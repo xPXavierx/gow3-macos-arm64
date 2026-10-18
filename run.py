@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Prepares the game image and starts gow3-probe (Windows and Linux; run.sh wraps it on Linux).
+"""Prepare and launch gow3-probe; run.sh wraps this on Linux.
+
+GOW3_NATIVE_AOT_DIR selects a prepared macOS ARM64 image. It uses the same game
+startup rules, validating rather than overwriting inputs compiled ahead of time.
 
 Environment variables (GOW3_GAME_DIR, GOW3_DATA_DIR, GOW3_PATCHES, GOW3_MODS_*,
 GOW3_USER_DIR, ...). Extra arguments go to gow3-probe.
@@ -8,6 +11,7 @@ The in-game "Apply and restart" runs this script again through GOW3_RESTART_COMM
 `--after PID` waits for the previous game process to end first (its GPU device and memory).
 """
 import os
+from contextlib import nullcontext
 from pathlib import Path
 import shlex
 import shutil
@@ -143,7 +147,7 @@ def glyph_mounts(env, probe, game, out):
     return [part for guest, path in mounts.items() for part in ('--mount', f'{guest}={path}')], style
 
 
-def main():
+def launch(native=None):
     args = sys.argv[1:]
     if len(args) >= 2 and args[0] == '--after':
         wait_for(int(args[1]))
@@ -152,9 +156,11 @@ def main():
     os.chdir(PORT)
     env = os.environ
     data = Path(env.get('GOW3_DATA_DIR', PORT))
-    out = data / 'out'
+    out = native.out if native else data / 'out'
     out.mkdir(parents=True, exist_ok=True)
     env.setdefault('GOW3_CONFIG', str(data / 'gow3.ini'))
+    if native:
+        native.seed_config(env['GOW3_CONFIG'])
     # Values this script derived on the previous start ("Apply and restart" inherits them) are
     # derived again from the new options.
     for key in env.pop('GOW3_DERIVED', '').split(','):
@@ -174,6 +180,14 @@ def main():
                                                env.get('GOW3_MODS_CONFIG', data / 'mods.json'),
                                                env.get('GOW3_MODS_ENABLED', '1') != '0')
     extra_resolutions = [s for s in patches.resolution_names(mod_patch_files) if s not in graphics_options.RESOLUTIONS]
+    if native:
+        # Desktop MetalFX presets can have an exact, nonstandard input size.
+        # Only expose the resolution already baked into this verified AOT image.
+        for name in native.patches['names']:
+            if name.startswith('Resolution Patch - '):
+                size = name.removeprefix('Resolution Patch - ')
+                if size not in graphics_options.RESOLUTIONS and size not in extra_resolutions:
+                    extra_resolutions.append(size)
     env['GOW3_EXTRA_RESOLUTIONS'] = ';'.join(extra_resolutions)
     derived.append('GOW3_EXTRA_RESOLUTIONS')
     graphics, reverted = graphics_options.prepare(env['GOW3_CONFIG'], out / 'graphics_state.json', extra_resolutions)
@@ -184,6 +198,14 @@ def main():
         env['GOW3_FSR411_DIR'] = str(data / 'fsr4_411')
 
     probe = Path(env['GOW3_PROBE']) if env.get('GOW3_PROBE') else find_executable('gow3-probe' + EXE_SUFFIX)
+    if native and probe and '--cpu-only' not in args:
+        bundle_host = probe.parent / 'gow3-probe-arm64.app' / 'Contents' / 'MacOS' / 'gow3-probe-arm64'
+        if bundle_host.is_file():
+            from native_launch import require_arm64
+            require_arm64(bundle_host)
+            probe = bundle_host
+            env['GOW3_PROBE'] = str(probe)
+            print('Native game application: ' + str(probe.parent.parent.parent), flush=True)
     if not probe or not probe.is_file():
         fail(f'gow3-probe{EXE_SUFFIX} not found: build it with build.sh or use a packaged build.')
     # Development builds run from the MSYS2 tree: its CLANG64 DLLs (SDL3, FFmpeg, ...).
@@ -193,12 +215,14 @@ def main():
             env['PATH'] = f'{clang64}{os.pathsep}{env.get("PATH", "")}'
     # Instruction sets this CPU lacks (MOVBE, BMI1, LZCNT): the ISA rewrite covers them; exit 20
     # is a set nothing covers.
-    features = subprocess.run([str(probe), '--cpu-features'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              text=True, creationflags=no_console())
-    if features.returncode == 20:
-        print(features.stdout, end='', flush=True)
-        sys.exit(20)
-    missing = parse_cpu_features(features.stdout)
+    missing = []
+    if not native:
+        features = subprocess.run([str(probe), '--cpu-features'], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                  text=True, creationflags=no_console())
+        if features.returncode == 20:
+            print(features.stdout, end='', flush=True)
+            sys.exit(20)
+        missing = parse_cpu_features(features.stdout)
 
     game = Path(env.get('GOW3_GAME_DIR', PORT.parent / 'CUSA01623'))
     if not (game / 'eboot.bin').is_file():
@@ -219,12 +243,17 @@ def main():
                            '--enabled', env.get('GOW3_MODS_ENABLED', '1'), capture=True).strip())
     mod_view = game if game.resolve() != original_game else None
     try:
-        run_script('prepare.py', game, '--out', out)
-        run_script('link_libc.py', game, '--out', out)
-        run_script('link_modules.py', game, '--out', out)
+        if native:
+            # These inputs were prepared before native compilation. Replacing them
+            # at launch would invalidate the compiled functions and their hashes.
+            native.verify_inputs(game)
+        else:
+            run_script('prepare.py', game, '--out', out)
+            run_script('link_libc.py', game, '--out', out)
+            run_script('link_modules.py', game, '--out', out)
         # A failed rewrite prints its reason and the game starts without the table.
         isa_args = []
-        if isa_rewrite_wanted(missing, env):
+        if not native and isa_rewrite_wanted(missing, env):
             code, output = run_script('isa_rewrite.py', out / 'boot-linked.bin', '--out', out,
                                       capture=True, check=False)
             print(output, end='', flush=True)
@@ -256,6 +285,10 @@ def main():
         if env.get('GOW3_EXPERIMENTAL_UPSCALER') != '1':
             env.setdefault('GOW3_UPSCALER', 'none')
         env.setdefault('GOW3_READBACK_LINEAR', '1')
+        if native and sys.platform == 'darwin':
+            # Permit lossless compression for supported RGBA8 images, promoting
+            # on a real storage/integer view. Keep all shared startup rules.
+            env.setdefault('GOW3_LAZY_COLOR', '1')
         patch_xml = profile[1] if profile else None
         if profile and mod_patch_files:
             # The built-in patches plus the enabled mods' (the same file for the selection and the notes).
@@ -274,6 +307,8 @@ def main():
                    '--patches-dir', env.get('GOW3_PATCHES_DIR', data / 'patches'),
                    '--patches-config', env.get('GOW3_PATCHES_CONFIG', data / 'patches.json'),
                    *[arg for f in mod_patch_files for arg in ('--mod-patches', f)])
+        if native:
+            native.verify_patches((patch_status(out) or {}).get('applied', []))
         if profile:
             # Only the patches found in this eboot.bin count: a frame rate patch that was skipped
             # leaves the engine at 60 FPS, and the notes' memory and VBlank needs follow the same list.
@@ -281,6 +316,9 @@ def main():
             engine_fps = graphics_options.applied_engine_fps(applied)
             dmem, vblank = patch_requirements(patch_xml, applied, profile[2])
             for key, value in (('GOW3_DMEM_MB', dmem), ('GOW3_VBLANK_HZ', vblank)):
+                if native and value and int(env.get(key, '0')) < value:
+                    env[key] = str(value)
+                    derived.append(key)
                 if value and key not in env:
                     env[key] = str(value)
                     derived.append(key)
@@ -299,6 +337,8 @@ def main():
             env['GOW3_GLYPHS'] = glyph_style
             derived.append('GOW3_GLYPHS')
         env['GOW3_DERIVED'] = ','.join(derived)
+        if native:
+            native.record_policy(graphics, (patch_status(out) or {}).get('applied', []))
         # The guest memory pool is committed in full at start: a resolution patch above 1080p
         # can need more than 16 GB of RAM, and the game then closes when the page file cannot grow.
         import guest_memory
@@ -322,21 +362,34 @@ def main():
         # the probe replaces itself with the new launch while this process still waits for it.
         after = ['--after', str(os.getpid())] if WINDOWS else []
         restart = [sys.executable, *this, *after, *args]
-        env['GOW3_RESTART_COMMAND'] = subprocess.list2cmdline(restart) if WINDOWS else shlex.join(restart)
+        # The ARM64 probe requests a supervisor restart with exit 75, so the old
+        # GPU process and native instance lock are gone before options are re-read.
+        env['GOW3_RESTART_COMMAND'] = ('native-supervisor' if native else
+                                     subprocess.list2cmdline(restart) if WINDOWS else shlex.join(restart))
         command = [*launch_prefix(env), str(probe), str(out / 'boot-linked.bin'), '--content-profile', str(out / 'content.bin'),
                    '--patches', str(out / 'patches.bin'), '--app0', str(game),
                    '--user', str(user_dir),
                    '--timeout', env.get('GOW3_TIMEOUT', '0'), *isa_args, *glyph_args, *args]
         # No stdin: an inherited pipe (shells such as Git Bash) cost the game its console output.
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, creationflags=no_console())
+        if native:
+            native.child_started(process.pid)
         presence = None
         try:
             try:
                 presence = discord_presence.Presence(pid=process.pid) if discord_presence else None
             except (OSError, RuntimeError):
                 print('Discord presence unavailable; the game will continue', flush=True)
-            return process.wait()
+            status = process.wait()
+            return 128-status if native and status < 0 else status
         finally:
+            if native and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
             if presence:
                 presence.close()
     finally:
@@ -346,8 +399,23 @@ def main():
             game_update.remove_view(update_view)
 
 
+def main():
+    sys.path.insert(0, str(PORT / 'scripts'))
+    native_out = os.environ.get('GOW3_NATIVE_AOT_DIR')
+    if native_out:
+        from native_launch import RESTART_EXIT, Session
+    while True:
+        with Session(native_out, os.environ) if native_out else nullcontext() as native:
+            status = launch(native)
+        if not native_out or status != RESTART_EXIT:
+            return status
+        print('Native AOT: restarting with the shared launcher rules', flush=True)
+
+
 if __name__ == '__main__':
     try:
         sys.exit(main())
     except KeyboardInterrupt:
         sys.exit(130)
+    except ValueError as error:
+        fail(str(error))

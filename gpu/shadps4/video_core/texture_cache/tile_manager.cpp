@@ -25,6 +25,8 @@
 
 #include <magic_enum/magic_enum.hpp>
 #include <vk_mem_alloc.h>
+#include <cstdio>
+#include <cstdlib>
 
 namespace VideoCore {
 
@@ -279,7 +281,78 @@ std::pair<const Buffer*, u64> TileManager::DetileImage(const VideoCore::Buffer* 
                          vk::PipelineStageFlagBits2::eComputeShader,
                          vk::AccessFlagBits2::eShaderWrite);
 
+    VerifyMicroDetile(in_buffer, in_offset, staging.buffer, staging.offset, info);
     return {staging.buffer, staging.offset};
+}
+
+void TileManager::VerifyMicroDetile(const Buffer* input, u64 input_offset,
+                                    const Buffer* output, u64 output_offset,
+                                    const ImageInfo& info) {
+    // Opt-in diagnosis: compare real uploads to an independent CPU Morton reference.
+    // No game texture bytes are written to disk. Finishing here deliberately changes
+    // scheduling, so a passing result cannot rule out a race in the normal path.
+    static const unsigned limit = [] {
+        const char* value = std::getenv("GOW3_VERIFY_MICRO_DETILE");
+        return value ? unsigned(std::clamp(std::atoi(value), 0, 512)) : 0u;
+    }();
+    static unsigned verified = 0;
+    if (verified >= limit || info.tile_mode != AmdGpu::TileMode::Thin1DThin ||
+        info.array_mode != AmdGpu::ArrayMode::Array1DTiledThin1 ||
+        info.props.is_volume || info.num_samples > 1 || input->mapped_data.empty() ||
+        !info.guest_size || info.guest_size > 32_MB ||
+        input_offset > input->mapped_data.size() ||
+        info.guest_size > input->mapped_data.size() - input_offset) {
+        return;
+    }
+    ++verified;
+    scheduler.WaitHostCopies();
+    const auto* source = input->mapped_data.data() + input_offset;
+    std::vector<u8> snapshot(source, source + info.guest_size);
+    Buffer readback(instance, 0, info.guest_size, MemoryType::HostCached);
+    const vk::BufferCopy copy{output_offset, 0, info.guest_size};
+    runtime.CopyBuffer(output, &readback, std::span{&copy, 1});
+    scheduler.Finish();
+    readback.Invalidate(0, info.guest_size);
+    u64 checked = 0, mismatches = 0, first_mismatch = 0;
+    const u32 bytes = info.num_bits / 8;
+    for (u32 mip = 0; mip < info.resources.levels; ++mip) {
+        const auto& layout = info.mips_layout[mip];
+        const u32 w = info.props.is_block ? (layout.pitch + 3) / 4 : layout.pitch;
+        const u32 h = info.props.is_block ? (layout.height + 3) / 4 : layout.height;
+        const u64 count = u64(w) * h * info.resources.layers * bytes;
+        if (!bytes || w % 8 || h % 8 || layout.offset > snapshot.size() ||
+            count > snapshot.size() - layout.offset || count > layout.size) {
+            continue; // no claim for unsupported padding/layouts
+        }
+        for (u32 layer = 0; layer < info.resources.layers; ++layer) {
+            for (u32 y = 0; y < h; ++y) {
+                for (u32 x = 0; x < w; ++x) {
+                    u32 morton = 0;
+                    for (u32 bit = 0; bit < 3; ++bit) {
+                        morton |= ((x >> bit) & 1) << (bit * 2);
+                        morton |= ((y >> bit) & 1) << (bit * 2 + 1);
+                    }
+                    const u64 linear = layout.offset + ((u64(layer) * h + y) * w + x) * bytes;
+                    const u64 tiled = layout.offset +
+                        (u64(layer) * w * h + ((y / 8) * (w / 8) + x / 8) * 64 + morton) * bytes;
+                    for (u32 b = 0; b < bytes; ++b) {
+                        if (snapshot[tiled + b] != readback.mapped_data[linear + b]) {
+                            if (!mismatches) first_mismatch = linear + b;
+                            ++mismatches;
+                        }
+                        ++checked;
+                    }
+                }
+            }
+        }
+    }
+    std::printf("Detile verify %u: %ux%u bits=%u block=%u mips=%u layers=%u "
+                "checked=%llu mismatches=%llu first=%llu\n", verified,
+                info.size.width, info.size.height, info.num_bits, unsigned(info.props.is_block),
+                info.resources.levels, info.resources.layers,
+                static_cast<unsigned long long>(checked),
+                static_cast<unsigned long long>(mismatches),
+                static_cast<unsigned long long>(first_mismatch));
 }
 
 void TileManager::TileImage(Image& in_image, std::span<vk::BufferImageCopy> buffer_copies,

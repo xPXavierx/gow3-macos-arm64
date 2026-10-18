@@ -331,13 +331,15 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
             ctx.AddExtension("SPV_KHR_fragment_shader_barycentric");
             ctx.AddCapability(spv::Capability::FragmentBarycentricKHR);
             ctx.AddCapability(spv::Capability::InterpolationFunction);
+            if (ctx.reconstruct_linear_barycentrics) ctx.AddCapability(spv::Capability::DerivativeControl);
         }
         if (info.loads.Get(IR::Attribute::SampleIndex) ||
             runtime_info.hw.fs.addr_flags.linear_sample_ena ||
             runtime_info.hw.fs.addr_flags.persp_sample_ena ||
             (!profile.supports_amd_shader_explicit_vertex_parameter &&
              profile.supports_fragment_shader_barycentric &&
-             info.loads.Get(IR::Attribute::BaryCoordSmoothSample))) {
+             (info.loads.Get(IR::Attribute::BaryCoordSmoothSample) ||
+              info.loads.Get(IR::Attribute::BaryCoordNoPerspSample)))) {
             ctx.AddCapability(spv::Capability::SampleRateShading);
         }
         if (info.loads.GetAny(IR::Attribute::RenderTargetIndex)) {
@@ -362,7 +364,7 @@ void SetupCapabilities(const Info& info, const Profile& profile, const RuntimeIn
     } else if (stage == SwStage::Geometry && info.stores.GetAny(IR::Attribute::ViewportIndex)) {
         ctx.AddCapability(spv::Capability::MultiViewport);
     }
-    if (info.uses_dma || ctx.VertexMotion()) {
+    if (info.uses_dma) {
         ctx.AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
         ctx.AddExtension("SPV_KHR_physical_storage_buffer");
     }

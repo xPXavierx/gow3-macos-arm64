@@ -231,9 +231,15 @@ struct Info : InfoPersistent {
         }
     }
 
+    u32 NumBufferBindings() const {
+        u32 count = buffers.size();
+        for (const auto& buffer : buffers) count += buffer.uniform_span != 0;
+        return count;
+    }
+
     void AddBindings(Backend::Bindings& bnd) const {
         bnd.buffer += buffers.size();
-        bnd.unified += buffers.size() + images.size() + samplers.size();
+        bnd.unified += NumBufferBindings() + images.size() + samplers.size();
         bnd.user_data += ud_mask.NumRegs();
     }
 
@@ -242,7 +248,7 @@ struct Info : InfoPersistent {
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
         if (srt_info.walker_func) {
-            srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
+            CallSrtWalker(srt_info.walker_func,user_data.data(),flattened_ud_buf.data());
         }
     }
 

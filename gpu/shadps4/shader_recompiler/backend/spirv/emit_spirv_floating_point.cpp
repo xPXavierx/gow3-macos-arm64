@@ -20,6 +20,10 @@ Id EmitFPAbs64(EmitContext& ctx, Id value) {
 }
 
 Id EmitFPAdd32(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
+    // Match SPIRV-Cross's precise MSL helper fma(1, a, b), without its optnone
+    // function boundary. Explicit fma keeps the operation's rounding boundary.
+    if (ctx.runtime_info.props.explicit_rounded_math)
+        return Decorate(ctx, inst, ctx.OpFma(ctx.F32[1], ctx.ConstF32(1.f), a, b));
     return Decorate(ctx, inst, ctx.OpFAdd(ctx.F32[1], a, b));
 }
 
@@ -28,6 +32,8 @@ Id EmitFPAdd64(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
 }
 
 Id EmitFPSub32(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
+    if (ctx.runtime_info.props.explicit_rounded_math)
+        return Decorate(ctx, inst, ctx.OpFma(ctx.F32[1], ctx.ConstF32(-1.f), b, a));
     return Decorate(ctx, inst, ctx.OpFSub(ctx.F32[1], a, b));
 }
 
@@ -78,6 +84,8 @@ Id EmitFPMedTri32(EmitContext& ctx, Id a, Id b, Id c) {
 }
 
 Id EmitFPMul32(EmitContext& ctx, IR::Inst* inst, Id a, Id b) {
+    if (ctx.runtime_info.props.explicit_rounded_math)
+        return Decorate(ctx, inst, ctx.OpFma(ctx.F32[1], a, b, ctx.ConstF32(0.f)));
     return Decorate(ctx, inst, ctx.OpFMul(ctx.F32[1], a, b));
 }
 

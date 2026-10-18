@@ -58,4 +58,28 @@ int main() {
         published_released += entry.valid && !entry.watched;  // still published, no watcher left
     });
     assert(watched == 2 && published_released == 1);
+
+    // A pending copy protects a whole 16 KiB host page. A write in another
+    // 4 KiB subpage must release the watcher too, while preserving publication.
+    VideoCore::ReadbackQueue<int, 14> apple;
+    apple.Push(0x30003000, 4, 11, 42);
+    assert(apple.RequiredTick(0x30000100, 8) == 11);
+    assert(apple.RequiredTick(0x30004000, 8) == 0);
+    unsigned apple_released = 0;
+    assert(apple.ReleaseOutside(0x30000100, 8, 64 << 10, [&](auto&) {
+        ++apple_released;
+    }) == 1);
+    assert(apple_released == 1 && apple.RequiredTick(0x30000100, 8) == 0);
+    apple.Retire([](auto) { return true; }, [&](auto& entry) {
+        assert(entry.valid && !entry.watched && entry.payload == 42);
+    });
+    assert(apple.Bytes() == 0);
+
+    // Large pending copies are resolved, rather than released, even when the
+    // fault touches only a different subpage at the end of the protected range.
+    apple.Push(0x40000000, (64 << 10)+4, 12, 43);
+    assert(apple.RequiredTick(0x40013000, 8) == 12);
+    assert(apple.ReleaseOutside(0x40013000, 8, 64 << 10, [](auto&) {}) == 0);
+    apple.Retire([](auto) { return true; }, [](auto& entry) { assert(entry.watched); });
+    assert(apple.RequiredTick(0x40013000, 8) == 0);
 }

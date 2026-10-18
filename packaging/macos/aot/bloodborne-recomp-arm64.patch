@@ -1,0 +1,1421 @@
+diff --git a/src/cpu/interp.c b/src/cpu/interp.c
+index 59f089d..8578c82 100644
+--- a/src/cpu/interp.c
++++ b/src/cpu/interp.c
+@@ -921,6 +921,9 @@ uint64_t bbcpu_step(BbCpu *cpu, const BbInsn *in) {
+ }
+ 
+ uint64_t bbcpu_step_insn(BbCpu *cpu, const BbInsn *in) {
++#ifdef GOW3_AOT_ONLY
++    bbcpu_fatal(cpu, in, "ARM64 AOT coverage gap: interpreted instruction disabled");
++#endif
+     const int locked = in->lock || (in->mnemonic == M(XCHG) &&
+                                     (in->op[0].type == OP_MEM || in->op[1].type == OP_MEM));
+     if (!locked) return step(cpu, in);
+@@ -948,7 +951,9 @@ void bbcpu_run(BbCpu *cpu, uint64_t stop) {
+         init_tables();
+         __atomic_store_n(&initialized, 1, __ATOMIC_RELEASE);
+     }
++#ifndef GOW3_AOT_ONLY
+     if (bbcpu_jit_run(cpu, stop)) return;
++#endif
+     while (cpu->rip != stop) {
+         if (__builtin_expect(cpu->rip == BB_GUARD_RETURN, 0)) {
+             bbcpu_guard_return(cpu);
+@@ -963,6 +968,16 @@ void bbcpu_run(BbCpu *cpu, uint64_t stop) {
+             cpu->rip = pop(cpu);
+             continue;
+         }
++#ifdef GOW3_AOT_ONLY
++        /* God of War integration: dispatch only compiled functions or explicit
++         * native import adapters. Never decode/interpret guest instructions. */
++        if (bbcpu_native_at(cpu->rip) ||
++            (bbcpu_recomp_at(cpu->rip) && bbcpu_recomp_thread_ok())) {
++            cpu->rip=bbcpu_step(cpu,NULL);
++            continue;
++        }
++        bbcpu_fatal(cpu,NULL,"ARM64 AOT coverage gap: function not recompiled");
++#else
+         const BbBlock *block = bbcpu_block(cpu->rip);
+         for (uint32_t i = 0; i < block->count; ++i) {
+             const BbInsn *in = &block->insn[i];
+@@ -974,5 +989,6 @@ void bbcpu_run(BbCpu *cpu, uint64_t stop) {
+             }
+             cpu->rip = next;
+         }
++#endif
+     }
+ }
+diff --git a/src/recomp/rc.h b/src/recomp/rc.h
+index f14280f..5ad3c63 100644
+--- a/src/recomp/rc.h
++++ b/src/recomp/rc.h
+@@ -8,6 +8,9 @@
+ #ifndef BB_RECOMP_RC_H
+ #define BB_RECOMP_RC_H
+ #include "../cpu/cpu_internal.h"
++#include <errno.h>
++#include <stdlib.h>
++#include <time.h>
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -47,6 +50,21 @@ typedef const RcFunction *(*RcInit)(const RcApi *api, size_t *count);
+ 
+ /* ---- for generated code ---- */
+ 
++/* Only emitted for a side-effect-free memory comparison loop. Keep short waits
++ * spinning; an opt-in one-microsecond sleep bounds sustained polling work. A
++ * wakeup always re-reads guest memory and recomputes the architectural flags.
++ * Host scheduling may delay a wakeup; this is not a simulated guest timer. */
++static inline void rc_poll_wait(unsigned *spins) {
++    if (++*spins < 256) return;
++    *spins = 0;
++    const char *enabled = getenv("BB_RECOMP_POLL_WAIT");
++    if (!enabled || enabled[0] != '1') return;
++    const int saved_errno = errno;
++    const struct timespec delay = {0, 1000};
++    (void)nanosleep(&delay, NULL);
++    errno = saved_errno;
++}
++
+ /* Lazy flags: the last flag-setting operation and its operands, or FK_CPU (in cpu->flags). */
+ enum { FK_CPU, FK_ADD, FK_SUB, FK_LOGIC, FK_INC, FK_DEC };
+ static inline uint64_t rc_mask(int size) { return size >= 8 ? ~UINT64_C(0) : (UINT64_C(1) << (size * 8)) - 1; }
+diff --git a/tests/fuzz_recomp.c b/tests/fuzz_recomp.c
+index b1c06de..419d5fc 100644
+--- a/tests/fuzz_recomp.c
++++ b/tests/fuzz_recomp.c
+@@ -127,7 +127,7 @@ static int place_memory(const Insn *x, BbCpu *cpu) {
+         uint64_t target = SCRATCH_AT + 0x2000 + rnd() % 0x6000;
+         /* Atomics are naturally aligned in real code (split locks are rare and slow on x86 too). */
+         const int atomic = (x->zi.attributes & ZYDIS_ATTRIB_HAS_LOCK) || x->zi.mnemonic == ZYDIS_MNEMONIC_XCHG ||
+-                           x->zi.mnemonic == ZYDIS_MNEMONIC_CMPXCHG || x->zi.mnemonic == ZYDIS_MNEMONIC_XADD;
++                           x->zi.mnemonic == ZYDIS_MNEMONIC_CMPXCHG16B || x->zi.mnemonic == ZYDIS_MNEMONIC_CMPXCHG || x->zi.mnemonic == ZYDIS_MNEMONIC_XADD;
+         if (atomic && o->size >= 16) target &= ~(uint64_t)(o->size / 8 - 1);
+         if (base >= 0 && seen_base >= 0 && base != seen_base) return 0;
+         if (base >= 0 && base == index) {
+@@ -152,12 +152,14 @@ static int place_memory(const Insn *x, BbCpu *cpu) {
+ static void random_state(BbCpu *cpu, uint8_t *scratch) {
+     for (int i = 0; i < 16; ++i) cpu->r[i] = interesting();
+     cpu->r[RSP] = SCRATCH_AT + 0x8000 + (rnd() % 0x100) * 8;
+-    cpu->flags = 2 | (rnd() & 0x8d5);
++    cpu->flags = 2 | (rnd() & 0xcd5);
+     for (int i = 0; i < 16; ++i) {
+         const int kind = (int)(rnd() % 3);
+         for (int k = 0; k < 8; ++k) cpu->v[i].d[k] = kind == 0 ? random_float_bits() : (uint32_t)rnd();
+         if (kind == 2) for (int k = 0; k < 4; ++k) cpu->v[i].q[k] = random_double_bits();
+     }
++    cpu->top=(int)(rnd()&7); cpu->fcw=0x37f; cpu->fsw=(uint16_t)rnd();
++    for(int i=0;i<8;++i) { const uint64_t bits=random_double_bits(); memcpy(&cpu->st[i],&bits,8); }
+     for (int i = 0; i < SCRATCH; i += 8) { uint64_t v = rnd(); memcpy(scratch + i, &v, 8); }
+ }
+ 
+@@ -176,6 +178,10 @@ static int compare(const BbCpu *a, const BbCpu *b, const uint8_t *ma, const uint
+                                   " recomp %016" PRIx64 "%016" PRIx64 "%016" PRIx64 "%016" PRIx64 ";", i,
+                                   a->v[i].q[3], a->v[i].q[2], a->v[i].q[1], a->v[i].q[0],
+                                   b->v[i].q[3], b->v[i].q[2], b->v[i].q[1], b->v[i].q[0]);
++    if ((a->top!=b->top || a->fcw!=b->fcw || a->fsw!=b->fsw || memcmp(a->st,b->st,sizeof(a->st))) && n<size-100)
++        n+=(size_t)snprintf(out+n,size-n," x87 stack/control/status differs;");
++    if (a->mxcsr != b->mxcsr && n < size - 100)
++        n += (size_t)snprintf(out+n,size-n," mxcsr: interp %#x recomp %#x;",a->mxcsr,b->mxcsr);
+     for (int i = 0; i < SCRATCH && n < size - 100; ++i)
+         if (ma[i] != mb[i]) {
+             n += (size_t)snprintf(out + n, size - n, " mem[+%#x]: interp %02x recomp %02x;", i, ma[i], mb[i]);
+@@ -185,6 +191,73 @@ static int compare(const BbCpu *a, const BbCpu *b, const uint8_t *ma, const uint
+ }
+ 
+ 
++/* Byte-oriented reference for SSSE3 sign control and rounded multiply.
++ * These forms are absent from the upstream interpreter. Specification reference:
++ * https://clang.llvm.org/doxygen/tmmintrin_8h.html (no implementation copied).
++ * Multiplication uses int64 arithmetic and floor division, independently of the
++ * generator's int32 arithmetic shift. Both sources are captured before alias writes. */
++static int reference_sign(BbCpu *cpu,const BbInsn *in) {
++    int size,multiply=0;
++    switch(in->mnemonic) {
++    case ZYDIS_MNEMONIC_PSIGNB: case ZYDIS_MNEMONIC_VPSIGNB: size=1;break;
++    case ZYDIS_MNEMONIC_PSIGNW: case ZYDIS_MNEMONIC_VPSIGNW: size=2;break;
++    case ZYDIS_MNEMONIC_PSIGND: case ZYDIS_MNEMONIC_VPSIGND: size=4;break;
++    case ZYDIS_MNEMONIC_PMULHRSW: case ZYDIS_MNEMONIC_VPMULHRSW: size=2;multiply=1;break;
++    default:return 0;
++    }
++    const int width=in->op[0].size;
++    uint8_t src[2][32];
++    for(int j=0;j<2;++j) {
++        const BbOp *op=&in->op[j+(in->vex ? 1 : 0)];
++        const void *at=op->type==OP_MEM ? (void*)(uintptr_t)bbcpu_addr(cpu,in,op) : cpu->v[op->reg].b;
++        memcpy(src[j],at,(size_t)width);
++    }
++    uint8_t *dst=cpu->v[in->op[0].reg].b;
++    for(int i=0;i<width;i+=size) {
++        uint32_t a=0,b=0;
++        for(int j=0;j<size;++j) { a|=(uint32_t)src[0][i+j]<<(8*j); b|=(uint32_t)src[1][i+j]<<(8*j); }
++        uint32_t v;
++        if(multiply) {
++            const int64_t x=a<32768 ? a : (int64_t)a-65536, y=b<32768 ? b : (int64_t)b-65536;
++            const int64_t scaled=x*y+16384;
++            v=(uint32_t)(scaled<0 ? -((-scaled+32767)/32768) : scaled/32768);
++        } else v=!b ? 0 : src[1][i+size-1]&128 ? (~a+1u) : a;
++        for(int j=0;j<size;++j) dst[i+j]=(uint8_t)(v>>(8*j));
++    }
++    if(in->vex && width==16) memset(dst+16,0,16);
++    return 1;
++}
++
++/* Independent byte-level oracle for the complete widening family. This deliberately
++ * does not call interp_vec.c (which lacks BQ/WQ), nor use the generator's typed
++ * vector casts: copy each source element and fill its remaining bytes. */
++static int reference_widen(BbCpu *cpu, const BbInsn *in) {
++    int from, to, sign;
++    switch (in->mnemonic) {
++#define WIDEN(S, F, T, N) case ZYDIS_MNEMONIC_PMOV##S##N: case ZYDIS_MNEMONIC_VPMOV##S##N: from=F; to=T; sign=(#S[0]=='S'); break;
++    WIDEN(ZX,1,2,BW) WIDEN(ZX,1,4,BD) WIDEN(ZX,1,8,BQ)
++    WIDEN(ZX,2,4,WD) WIDEN(ZX,2,8,WQ) WIDEN(ZX,4,8,DQ)
++    WIDEN(SX,1,2,BW) WIDEN(SX,1,4,BD) WIDEN(SX,1,8,BQ)
++    WIDEN(SX,2,4,WD) WIDEN(SX,2,8,WQ) WIDEN(SX,4,8,DQ)
++#undef WIDEN
++    default: return 0;
++    }
++    const int width=in->op[0].size;
++    const BbOp *src=&in->op[1];
++    uint8_t input[16];
++    const void *at=src->type==OP_MEM ? (void*)(uintptr_t)bbcpu_addr(cpu,in,src) : cpu->v[src->reg].b;
++    memcpy(input,at,(size_t)(width/to*from));
++    uint8_t *dst=cpu->v[in->op[0].reg].b;
++    for(int i=0;i<width/to;++i) {
++        const uint8_t *element=input+i*from;
++        memset(dst+i*to,sign && (element[from-1]&0x80) ? 0xff : 0,(size_t)to);
++        memcpy(dst+i*to,element,(size_t)from);
++    }
++    if(in->vex && width==16) memset(dst+16,0,16);
++    return 1;
++}
++
++
+ int main(int argc, char **argv) {
+     if (argc < 3) { fprintf(stderr, "usage: fuzz_recomp FILE LIB [trials] [max reports]\n"); return 2; }
+     const int trials = argc > 3 ? atoi(argv[3]) : 200, max_reports = argc > 4 ? atoi(argv[4]) : 50;
+@@ -237,16 +310,16 @@ int main(int argc, char **argv) {
+         ZydisFormatterFormatInstruction(&formatter, &x.zi, x.zo, x.zi.operand_count_visible, text, sizeof(text), CODE_AT, NULL);
+         const ZydisMnemonic mn = x.zi.mnemonic;
+         if (x.zi.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE || mn == ZYDIS_MNEMONIC_RET ||
+-            ((mn == ZYDIS_MNEMONIC_DIV || mn == ZYDIS_MNEMONIC_IDIV) && x.zo[0].size < 32) || mn == ZYDIS_MNEMONIC_RDTSC ||
++            mn == ZYDIS_MNEMONIC_RDTSC ||
+             mn == ZYDIS_MNEMONIC_RDTSCP || mn == ZYDIS_MNEMONIC_CPUID || mn == ZYDIS_MNEMONIC_INT3 ||
+             mn == ZYDIS_MNEMONIC_UD2 || mn == ZYDIS_MNEMONIC_HLT || mn == ZYDIS_MNEMONIC_SYSCALL ||
+             mn == ZYDIS_MNEMONIC_INT || mn == ZYDIS_MNEMONIC_LEAVE || mn == ZYDIS_MNEMONIC_POPFQ ||
+             mn == ZYDIS_MNEMONIC_PUSHFQ || mn == ZYDIS_MNEMONIC_XGETBV) { ++skipped; continue; }
+-        x.defined_flags = 0x8d5;
++        x.defined_flags = 0xcd5;
+         if (x.zi.cpu_flags) x.defined_flags &= ~(uint32_t)x.zi.cpu_flags->undefined;
+         /* Shifts by cl: CF is undefined past the operand width; the count may also be 0. */
+         if ((x.zi.mnemonic == ZYDIS_MNEMONIC_SHL || x.zi.mnemonic == ZYDIS_MNEMONIC_SHR || x.zi.mnemonic == ZYDIS_MNEMONIC_SAR) &&
+-            x.zo[1].type == ZYDIS_OPERAND_TYPE_REGISTER && x.zo[0].size < 32)
++            x.zo[1].type == ZYDIS_OPERAND_TYPE_REGISTER && x.zo[0].size < 16)
+             x.defined_flags &= ~1u;
+         /* The instruction, then a jump to `stop` (block end). */
+         memset(code, 0x90, 64);
+@@ -266,6 +339,11 @@ int main(int argc, char **argv) {
+             memset(ci, 0, offsetof(BbCpu, jf_flags));
+             random_state(ci, scratch);
+             ci->mxcsr = 0x1f80;
++            if (mn==ZYDIS_MNEMONIC_ROUNDSS || mn==ZYDIS_MNEMONIC_VROUNDSS ||
++                mn==ZYDIS_MNEMONIC_ROUNDSD || mn==ZYDIS_MNEMONIC_VROUNDSD ||
++                mn==ZYDIS_MNEMONIC_ROUNDPS || mn==ZYDIS_MNEMONIC_VROUNDPS ||
++                mn==ZYDIS_MNEMONIC_ROUNDPD || mn==ZYDIS_MNEMONIC_VROUNDPD)
++                ci->mxcsr |= (t & 3) << 13;
+             ci->fcw = 0x37f;
+             ci->stack_top = SCRATCH_AT + SCRATCH;
+             uses_rip = 0;
+@@ -283,7 +361,8 @@ int main(int argc, char **argv) {
+                 const BbOp *op = &block->insn[0].op[0];
+                 if (op->type == OP_REG) {
+                     if (op->reg == RAX || op->reg == RDX) { placed = 0; break; }
+-                    ci->r[op->reg] = (ci->r[op->reg] & ~mask) | d;
++                    const unsigned shift=op->high8 ? 8 : 0;
++                    ci->r[op->reg] = (ci->r[op->reg] & ~(mask<<shift)) | (d<<shift);
+                 } else {
+                     if (op->base == RAX || op->base == RDX || op->index == RAX || op->index == RDX) { placed = 0; break; }
+                     const uint64_t at = bbcpu_addr(ci, &block->insn[0], op);
+@@ -295,10 +374,54 @@ int main(int argc, char **argv) {
+                 if (sgn) dx = ((ax >> (bytes * 8 - 1)) & 1) ? mask : 0;
+                 else dx = rnd() % 4 ? 0 : (rnd() % d) & mask;
+                 if (sgn && bytes == 8 && ax == UINT64_C(0x8000000000000000) && d == mask) ci->r[RAX] = 1;
+-                if (bytes == 4) { ci->r[RDX] = (ci->r[RDX] & ~mask) | dx; }
++                if(bytes==1) ci->r[RAX]=(ci->r[RAX]&~UINT64_C(0xffff))|ax|(dx<<8);
++                else if (bytes < 8) { ci->r[RDX] = (ci->r[RDX] & ~mask) | dx; }
+                 else ci->r[RDX] = dx;
+             }
++            if (mn == ZYDIS_MNEMONIC_CMPXCHG16B && (t & 1) == 0) {
++                const BbOp *op=&block->insn[0].op[0];
++                /* Exercise both successful replacement and mismatching accumulator paths. */
++                if(op->base==RAX || op->base==RDX || op->index==RAX || op->index==RDX) { placed=0; break; }
++                const uint64_t at=bbcpu_addr(ci,&block->insn[0],op);
++                memcpy(&ci->r[RAX],(void*)at,8);
++                memcpy(&ci->r[RDX],(void*)(at+8),8);
++            }
++            if (mn==ZYDIS_MNEMONIC_LDMXCSR || mn==ZYDIS_MNEMONIC_VLDMXCSR) {
++                const uint64_t at=bbcpu_addr(ci,&block->insn[0],&block->insn[0].op[0]);
++                const uint32_t mxcsr=(uint32_t)rnd()&0xffffu;
++                memcpy((void*)at,&mxcsr,4);
++            }
++            if(mn==ZYDIS_MNEMONIC_FSCALE) {
++                // The upstream reference casts the exponent to int without a guard.
++                static const double powers[]={-2147483648.0,2147483647.0,-1075,-1022,-1.75,-0.5,0,0.5,1.75,1023,1075};
++                ci->st[(ci->top+1)&7]=t<11 ? powers[t] : (double)((int)(rnd()%4097)-2048)/4.0;
++            }
++            if(mn==ZYDIS_MNEMONIC_FISTTP) {
++                // The upstream oracle casts double to int64_t without an invalid-range guard.
++                // Restrict differential inputs to defined C conversions, including fractions.
++                ci->st[ci->top]=(double)((int64_t)(rnd()%2000001)-1000000)/8.0;
++            }
++            if ((mn==ZYDIS_MNEMONIC_PMULHRSW || mn==ZYDIS_MNEMONIC_VPMULHRSW) && t==0) {
++                const BbInsn *in=&block->insn[0];
++                for(int j=0;j<2;++j) {
++                    const BbOp *op=&in->op[j+(in->vex ? 1 : 0)];
++                    uint8_t *at=op->type==OP_MEM ? (void*)(uintptr_t)bbcpu_addr(ci,in,op) : ci->v[op->reg].b;
++                    for(int k=0;k<in->op[0].size;k+=2) { at[k]=0; at[k+1]=0x80; }
++                }
++            }
+             if (uses_rip) memcpy(rip_start, rip_mem, RIP_SIZE);
++            /* Bounded implicit string operands, including overlap and both directions. */
++            switch (mn) {
++#define STR_CASES(p) case ZYDIS_MNEMONIC_##p##B: case ZYDIS_MNEMONIC_##p##W: case ZYDIS_MNEMONIC_##p##D: case ZYDIS_MNEMONIC_##p##Q:
++            STR_CASES(MOVS) STR_CASES(STOS) STR_CASES(LODS) STR_CASES(CMPS) STR_CASES(SCAS)
++                if (x.zi.operand_count_visible == 0) {
++                    ci->r[RCX]=t%17; ci->r[RSI]=SCRATCH_AT+1024;
++                    ci->r[RDI]=SCRATCH_AT+(t%3==0 ? 1025 : t%3==1 ? 1023 : 512);
++                }
++                break;
++#undef STR_CASES
++            default: break;
++            }
+             ci->rip = CODE_AT;
+             memcpy(mem_start, scratch, SCRATCH);
+             memcpy(c0, ci, sizeof(*c0));
+@@ -313,7 +436,7 @@ int main(int argc, char **argv) {
+                 memcpy(scratch, mem_start, SCRATCH);
+                 if (uses_rip) { memcpy(rip_jit, rip_mem, RIP_SIZE); memcpy(rip_mem, rip_start, RIP_SIZE); }
+                 stage = "interpreter";
+-                bbcpu_step_insn(ci, &block->insn[0]);
++                if (!reference_widen(ci, &block->insn[0]) && !reference_sign(ci, &block->insn[0])) bbcpu_step_insn(ci, &block->insn[0]);
+             }
+             guarded = 0;
+             if (sig) {
+diff --git a/tools/recomp/bbrecomp.c b/tools/recomp/bbrecomp.c
+index caa258b..3e89cc9 100644
+--- a/tools/recomp/bbrecomp.c
++++ b/tools/recomp/bbrecomp.c
+@@ -32,6 +32,7 @@ typedef struct { uint32_t p_type, p_flags; uint64_t p_offset, p_vaddr, p_paddr,
+     p_align; } Elf64_Phdr;
+ 
+ static uint64_t base; /* where the image is mapped here */
++static uint64_t image_size;
+ 
+ static void map_image(const char *path) {
+     FILE *f = fopen(path, "rb");
+@@ -52,6 +53,7 @@ static void map_image(const char *path) {
+                           MAP_PRIVATE | MAP_ANON, -1, 0);
+     if (image == MAP_FAILED) exit(1);
+     base = (uint64_t)(uintptr_t)image;
++    image_size = end;
+     for (int i = 0; i < eh->e_phnum; ++i) {
+         const Elf64_Phdr *ph = (const Elf64_Phdr *)(data + eh->e_phoff + (uint64_t)i * eh->e_phentsize);
+         if (ph->p_type != 1) continue;
+@@ -252,19 +254,75 @@ static int translate_shift_mul(uint64_t off, const BbInsn *in);
+ static int translate_extra(uint64_t off, const BbInsn *in);
+ static int translate_atomic(uint64_t off, const BbInsn *in);
+ 
++/* Native string operations. Preserve x86 element order even for overlapping ranges.
++ * Address-size overrides stay unsupported until the decoder exposes their width. */
++static int translate_string(uint64_t off, const BbInsn *in) {
++    const int m = in->mnemonic;
++    int size=0, mode=0; /* copy, store, load, compare, scan */
++    switch (m) {
++#define STRING_CASES(prefix, operation) \
++    case M(prefix##B): size=1; mode=operation; break; \
++    case M(prefix##W): size=2; mode=operation; break; \
++    case M(prefix##D): size=4; mode=operation; break; \
++    case M(prefix##Q): size=8; mode=operation; break
++    STRING_CASES(MOVS,0);
++    STRING_CASES(STOS,1);
++    STRING_CASES(LODS,2);
++    STRING_CASES(CMPS,3);
++    STRING_CASES(SCAS,4);
++#undef STRING_CASES
++    default: return 0;
++    }
++    if ((m==M(MOVSD) || m==M(CMPSD)) &&
++        (in->op[0].kind==RK_VEC || in->op[1].kind==RK_VEC)) return 0;
++    const uint8_t *bytes=(const uint8_t *)(uintptr_t)(base+off);
++    for (unsigned i=0;i<in->length;++i) {
++        const uint8_t b=bytes[i];
++        if (b==0x67) return 0;
++        if (!(b==0x66 || b==0xf0 || b==0xf2 || b==0xf3 || b==0x26 || b==0x2e ||
++              b==0x36 || b==0x3e || b==0x64 || b==0x65 || (b>=0x40 && b<=0x4f))) break;
++        if (b==0x64 || b==0x65) return 0; /* segment overrides */
++    }
++    const int repeat=in->rep || in->repne;
++    emit("{ const uint64_t delta=(c->flags & F_DF) ? (uint64_t)-%d : %d; ",size,size);
++    emit(repeat ? "while (r[RCX]) { " : "{ ");
++    if (mode==0) emit("rc_st(r[RDI],%d,rc_ld(r[RSI],%d)); ",size,size);
++    if (mode==1) emit("rc_st(r[RDI],%d,r[RAX]); ",size);
++    if (mode==2) {
++        if (size<4) emit("r[RAX]=(r[RAX] & ~0x%" PRIx64 "ull) | rc_ld(r[RSI],%d); ",mask(size),size);
++        else emit("r[RAX]=rc_ld(r[RSI],%d); ",size);
++    }
++    if (mode>=3) {
++        if (mode==3) emit("fa=rc_ld(r[RSI],%d); ",size);
++        else emit("fa=r[RAX] & 0x%" PRIx64 "ull; ",mask(size));
++        emit("fb=rc_ld(r[RDI],%d); fr=(fa-fb) & 0x%" PRIx64 "ull; fk=FK_SUB; fz=%d; ",size,mask(size),size);
++    }
++    if (mode==0 || mode==2 || mode==3) emit("r[RSI]+=delta; ");
++    if (mode!=2) emit("r[RDI]+=delta; ");
++    if (repeat) {
++        emit("--r[RCX]; ");
++        if (mode>=3) emit(in->rep ? "if (fa!=fb) break; " : "if (fa==fb) break; ");
++    }
++    emit("} }\n");
++    return 1;
++}
++
+ /* One instruction natively; 0: it goes to the interpreter. */
++static int poll_backedge;
+ static int translate(Range f, uint64_t off, const BbInsn *in, uint64_t *stats) {
+     const uint64_t next = off + in->length;
+     const int m = in->mnemonic;
+     const BbOp *d = &in->op[0], *s = &in->op[1];
+     Str a, b, w;
++    if (translate_string(off,in)) return 1;
+     if (in->rep || in->repne) return 0;
+-    if (in->lock || m == M(XADD) || m == M(CMPXCHG)) return translate_atomic(off, in);
++    if (in->lock || m == M(XADD) || m == M(CMPXCHG) || m == M(CMPXCHG16B) || (m == M(XCHG) && d->type == OP_MEM)) return translate_atomic(off, in);
+     const int cc = cc_of(m);
+     if (cc >= 0 && cc < 16) { /* jcc */
+         if (d->type != OP_IMM) return 0;
+-        emit("if (" COND ") ", cc);
++        emit("if (" COND ") %s", cc, poll_backedge ? "{ rc_poll_wait(&poll_spins); " : "");
+         jump(f, off + (uint64_t)d->disp);
++        if (poll_backedge) emit(" } else { poll_spins = 0; }");
+         emit("\n");
+         return 1;
+     }
+@@ -285,10 +343,138 @@ static int translate(Range f, uint64_t off, const BbInsn *in, uint64_t *stats) {
+         return 1;
+     }
+     switch (m) {
++    /* x87 shares the upstream runtime's double-valued stack. This is not full
++       extended-precision/exception emulation; memory transfers preserve its model. */
++    case M(FADD): case M(FADDP): case M(FIADD):
++    case M(FMUL): case M(FMULP): case M(FIMUL):
++    case M(FSUB): case M(FSUBP): case M(FISUB):
++    case M(FSUBR): case M(FSUBRP): case M(FISUBR):
++    case M(FDIV): case M(FDIVP): case M(FIDIV):
++    case M(FDIVR): case M(FDIVRP): case M(FIDIVR): {
++        const char *name=ZydisMnemonicGetString((ZydisMnemonic)m);
++        const int integer=name[1]=='i', pop=name[strlen(name)-1]=='p';
++        const char *op=strstr(name,"add") ? "+" : strstr(name,"mul") ? "*" : strstr(name,"sub") ? "-" : "/";
++        const int reverse=strstr(name,"subr") || strstr(name,"divr");
++        int dst=0, rhs=1, stack;
++        const BbOp *mem=NULL;
++        if(in->count==2 && d->type==OP_REG && s->type==OP_REG) { dst=d->reg; rhs=s->reg; }
++        else if(in->count && in->op[in->count-1].type==OP_MEM) mem=&in->op[in->count-1];
++        else if(in->count==1 && d->type==OP_REG) rhs=d->reg;
++        else if(in->count==0) { dst=1; rhs=0; }
++        else return 0;
++        if(mem && ((integer ? (mem->size!=2 && mem->size!=4) : (mem->size!=4 && mem->size!=8)) || !address(off,in,mem,&a,&stack))) return 0;
++        emit("{ const double x=c->st[(c->top+%d)&7]; ",dst);
++        if(mem) {
++            if(integer) emit("const double y=(double)(int%d_t)rc_ld(%s,%d); ",mem->size*8,a.s,mem->size);
++            else emit("const BbVec bits={.q={rc_ld(%s,%d),0,0,0}}; const double y=bits.%s[0]; ",a.s,mem->size,mem->size==4 ? "f" : "fd");
++        } else emit("const double y=c->st[(c->top+%d)&7]; ",rhs);
++        emit("c->st[(c->top+%d)&7]=%s %s %s; ",dst,reverse ? "y" : "x",op,reverse ? "x" : "y");
++        if(pop) emit("c->top=(c->top+1)&7; ");
++        emit("}\n"); return 1;
++    }
++    case M(FCOMI): case M(FCOMIP): case M(FUCOMI): case M(FUCOMIP):
++        emit("{ " FLAGS_OUT " c->flags=rc_comis(c->flags,c->st[c->top],c->st[(c->top+%d)&7]); ",in->op[in->count-1].reg);
++        if(m==M(FCOMIP) || m==M(FUCOMIP)) emit("c->top=(c->top+1)&7; ");
++        emit("}\n"); return 1;
++    case M(FNSTCW): case M(FNSTSW):
++        if(!write_op(off,in,d,m==M(FNSTCW) ? "c->fcw" : "(uint16_t)((c->fsw & ~0x3800) | ((c->top & 7)<<11))",&w)) return 0;
++        emit("%s\n",w.s); return 1;
++    case M(FLDCW):
++        if(!read_op(off,in,d,2,&a)) return 0;
++        emit("c->fcw=(uint16_t)(%s);\n",a.s); return 1;
++    case M(FILD): {
++        const BbOp *src=&in->op[in->count-1]; int stack;
++        if(src->type!=OP_MEM || (src->size!=2 && src->size!=4 && src->size!=8) || !address(off,in,src,&a,&stack)) return 0;
++        emit("{ const double v=(double)(int%d_t)rc_ld(%s,%d); c->top=(c->top-1)&7; c->st[c->top]=v; }\n",src->size*8,a.s,src->size); return 1;
++    }
++    case M(FISTTP): {
++        int stack;
++        if(d->type!=OP_MEM || d->size!=8 || !address(off,in,d,&a,&stack)) return 0;
++        emit("rc_st(%s,8,(uint64_t)rc_f2i64(c->st[c->top],1,c->mxcsr)); c->top=(c->top+1)&7;\n",a.s); return 1;
++    }
++    case M(FCMOVB): case M(FCMOVE): case M(FCMOVBE): case M(FCMOVU):
++    case M(FCMOVNB): case M(FCMOVNE): case M(FCMOVNBE): case M(FCMOVNU): {
++        const int cc=m==M(FCMOVB) ? 2 : m==M(FCMOVE) ? 4 : m==M(FCMOVBE) ? 6 : m==M(FCMOVU) ? 10 :
++                     m==M(FCMOVNB) ? 3 : m==M(FCMOVNE) ? 5 : m==M(FCMOVNBE) ? 7 : 11;
++        emit("if (" COND ") c->st[c->top]=c->st[(c->top+%d)&7];\n",cc,in->op[in->count-1].reg); return 1;
++    }
++    case M(FSQRT):
++        emit("c->st[c->top]=__builtin_sqrt(c->st[c->top]);\n"); return 1;
++    case M(FSCALE):
++        /* The upstream double-stack model supports finite int-sized exponents.
++         * Reject other operands rather than invoking an undefined C conversion. */
++        emit("{ const double exponent=__builtin_trunc(c->st[(c->top+1)&7]); "
++             "if (!(exponent>=-2147483648.0 && exponent<=2147483647.0)) { " SPILL " " FLAGS_OUT
++             " c->rip=B+0x%" PRIx64 "ull; rc->bail(c,entry_rsp); return; } "
++             "c->st[c->top]=__builtin_ldexp(c->st[c->top],(int)exponent); }\n",off); return 1;
++    case M(FXCH):
++        emit("{ const int i=(c->top+%d)&7; const double v=c->st[c->top]; c->st[c->top]=c->st[i]; c->st[i]=v; }\n",in->count ? in->op[in->count-1].reg : 1); return 1;
++    case M(FLD1): case M(FLDZ):
++        emit("c->top=(c->top-1)&7; c->st[c->top]=%s;\n",m==M(FLD1) ? "1.0" : "0.0"); return 1;
++    case M(FCHS): case M(FABS):
++        emit(m==M(FCHS) ? "c->st[c->top]=-c->st[c->top];\n" : "c->st[c->top]=__builtin_fabs(c->st[c->top]);\n"); return 1;
++    case M(FLD): {
++        const BbOp *src=&in->op[in->count-1];
++        if (src->type==OP_REG && src->kind==RK_X87) {
++            emit("{ const double v=c->st[(c->top+%d)&7]; c->top=(c->top-1)&7; c->st[c->top]=v; }\n",src->reg);
++            return 1;
++        }
++        int stack;
++        if(src->type!=OP_MEM || (src->size!=4 && src->size!=8 && src->size!=10) || !address(off,in,src,&a,&stack)) return 0;
++        emit("{ const uint64_t ea=%s; double v; ",a.s);
++        if(src->size==10) {
++            emit("const uint64_t mant=rc_ld(ea,8); const unsigned se=(unsigned)rc_ld(ea+8,2), exp=se&0x7fff; "
++                 "if(exp==0 && mant==0) v=0.0; else if(exp==0x7fff) v=(mant<<1) ? __builtin_nan(\"\") : __builtin_inf(); "
++                 "else v=__builtin_ldexp((double)mant,(int)exp-16383-63); if(se>>15) v=-v; ");
++        } else {
++            emit("const BbVec bits={.q={rc_ld(ea,%d),0,0,0}}; v=bits.%s[0]; ",src->size,src->size==4 ? "f" : "fd");
++        }
++        emit("c->top=(c->top-1)&7; c->st[c->top]=v; }\n"); return 1;
++    }
++    case M(FST): case M(FSTP): {
++        if(d->type==OP_REG && d->kind==RK_X87) {
++            emit("c->st[(c->top+%d)&7]=c->st[c->top]; ",d->reg);
++        } else {
++            int stack;
++            if(d->type!=OP_MEM || (d->size!=4 && d->size!=8 && d->size!=10) || !address(off,in,d,&a,&stack)) return 0;
++            emit("{ const uint64_t ea=%s; const double v=c->st[c->top]; ",a.s);
++            if(d->size==10) {
++                emit("uint64_t mant=0; uint16_t se=__builtin_signbit(v) ? 0x8000 : 0; "
++                     "if(__builtin_isnan(v)) { mant=0xc000000000000000ull; se|=0x7fff; } "
++                     "else if(__builtin_isinf(v)) { mant=0x8000000000000000ull; se|=0x7fff; } "
++                     "else if(v!=0.0) { int exp; const double frac=__builtin_frexp(__builtin_fabs(v),&exp); "
++                     "mant=(uint64_t)__builtin_ldexp(frac,64); se|=(uint16_t)(exp-1+16383); } "
++                     "rc_st(ea,8,mant); rc_st(ea+8,2,se); ");
++            } else {
++                emit("BbVec bits={0}; bits.%s[0]=v; rc_st(ea,%d,bits.q[0]); ",d->size==4 ? "f" : "fd",d->size);
++            }
++            emit("} ");
++        }
++        if(m==M(FSTP)) emit("c->top=(c->top+1)&7; ");
++        emit("\n"); return 1;
++    }
++    case M(LDMXCSR): case M(VLDMXCSR):
++        if (d->type != OP_MEM || !read_op(off,in,d,4,&a)) return 0;
++        emit("c->mxcsr=(uint32_t)(%s);\n",a.s); return 1;
++    case M(STMXCSR): case M(VSTMXCSR):
++        if (d->type != OP_MEM || !write_op(off,in,d,"c->mxcsr",&w)) return 0;
++        emit("%s\n",w.s); return 1;
++    case M(MFENCE): case M(LFENCE): case M(SFENCE):
++        emit("__atomic_thread_fence(__ATOMIC_SEQ_CST);\n"); return 1;
+     case M(NOP): case M(ENDBR64): case M(PAUSE): case M(PREFETCHNTA): case M(PREFETCHT0):
+     case M(PREFETCHT1): case M(PREFETCHT2): case M(PREFETCHW):
+         emit("/* %s */\n", ZydisMnemonicGetString((ZydisMnemonic)m));
+         return 1;
++    case M(XCHG): {
++        Str wa, wb;
++        if (!gpr(d) || !gpr(s) || !read_op(off,in,d,d->size,&a) ||
++            !read_op(off,in,s,d->size,&b) || !write_op(off,in,d,"vb",&wa) ||
++            !write_op(off,in,s,"va",&wb)) return 0;
++        emit("{ const uint64_t va=%s, vb=%s; %s %s }\n",a.s,b.s,wa.s,wb.s);
++        return 1;
++    }
++    case M(CLD): emit("c->flags &= ~(uint64_t)F_DF;\n"); return 1;
++    case M(STD): emit("c->flags |= F_DF;\n"); return 1;
+     case M(MOV):
+         if (d->type == OP_REG && d->kind != RK_GPR) return 0;
+         if (s->type == OP_REG && s->kind != RK_GPR) return 0;
+@@ -498,6 +684,8 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+     case M(MOVAPS): case M(MOVUPS): case M(MOVAPD): case M(MOVUPD): case M(MOVDQA): case M(MOVDQU):
+     case M(VMOVAPS): case M(VMOVUPS): case M(VMOVAPD): case M(VMOVUPD): case M(VMOVDQA): case M(VMOVDQU):
+     case M(LDDQU): case M(VLDDQU):
++    case M(MOVNTDQ): case M(VMOVNTDQ): case M(MOVNTDQA): case M(VMOVNTDQA):
++    case M(MOVNTPS): case M(VMOVNTPS): case M(MOVNTPD): case M(VMOVNTPD):
+         if (!vread(off, in, &in->op[1], &a) || !vwrite(off, in, &in->op[0], a.s, in->op[0].size, &s)) return 0;
+         emit("%s\n", s.s);
+         return 1;
+@@ -539,7 +727,9 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+     case M(DIVSS): case M(VDIVSS): case M(MINSS): case M(VMINSS): case M(MAXSS): case M(VMAXSS):
+     case M(ADDPD): case M(VADDPD): case M(SUBPD): case M(VSUBPD): case M(MULPD): case M(VMULPD):
+     case M(DIVPD): case M(VDIVPD): case M(ADDSD): case M(VADDSD): case M(SUBSD): case M(VSUBSD):
+-    case M(MULSD): case M(VMULSD): case M(DIVSD): case M(VDIVSD): {
++    case M(MULSD): case M(VMULSD): case M(DIVSD): case M(VDIVSD):
++    case M(MINPD): case M(VMINPD): case M(MAXPD): case M(VMAXPD):
++    case M(MINSD): case M(VMINSD): case M(MAXSD): case M(VMAXSD): {
+         const char *name = ZydisMnemonicGetString((ZydisMnemonic)m);
+         const char *base = name[0] == 'v' ? name + 1 : name;
+         const int dbl = base[strlen(base) - 1] == 'd', scalar = base[strlen(base) - 2] == 's';
+@@ -558,13 +748,74 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+         return vbinary(off, in, 4, w, 0, "rr.q[i] = a.q[i] | b.q[i];");
+     case M(XORPS): case M(VXORPS): case M(XORPD): case M(VXORPD): case M(PXOR): case M(VPXOR):
+         return vbinary(off, in, 4, w, 0, "rr.q[i] = a.q[i] ^ b.q[i];");
++    /* Packed integer families share operand capture, lane iteration and VEX writeback.
++     * Semantics follow bloodborne-recomp interp_vec.c (bbport/shadPS4 ancestry);
++     * unsigned products/sums make modular overflow defined in emitted C. */
++    case M(PSIGNB): case M(VPSIGNB): return vbinary(off,in,w,w,1,"rr.b[i]=b.sb[i]<0 ? (uint8_t)(0u-a.b[i]) : b.sb[i]==0 ? 0 : a.b[i];");
++    case M(PSIGNW): case M(VPSIGNW): return vbinary(off,in,w/2,w,1,"rr.w[i]=b.sw[i]<0 ? (uint16_t)(0u-a.w[i]) : b.sw[i]==0 ? 0 : a.w[i];");
++    case M(PSIGND): case M(VPSIGND): return vbinary(off,in,w/4,w,1,"rr.d[i]=b.sd[i]<0 ? 0u-a.d[i] : b.sd[i]==0 ? 0 : a.d[i];");
++    case M(PMULHRSW): case M(VPMULHRSW): return vbinary(off,in,w/2,w,1,"rr.w[i]=(uint16_t)(((int32_t)a.sw[i]*b.sw[i]+16384)>>15);");
++    case M(PMULLW): case M(VPMULLW): return vbinary(off,in,w/2,w,1,"rr.w[i]=(uint16_t)((uint32_t)a.w[i]*b.w[i]);");
++    case M(PMULHW): case M(VPMULHW): return vbinary(off,in,w/2,w,1,"rr.w[i]=(uint16_t)(((int32_t)a.sw[i]*b.sw[i])>>16);");
++    case M(PMULHUW): case M(VPMULHUW): return vbinary(off,in,w/2,w,1,"rr.w[i]=(uint16_t)(((uint32_t)a.w[i]*b.w[i])>>16);");
++    case M(PMULLD): case M(VPMULLD): return vbinary(off,in,w/4,w,1,"rr.d[i]=a.d[i]*b.d[i];");
++    case M(PMULUDQ): case M(VPMULUDQ): return vbinary(off,in,w/8,w,1,"rr.q[i]=(uint64_t)a.d[i*2]*b.d[i*2];");
++    case M(PMULDQ): case M(VPMULDQ): return vbinary(off,in,w/8,w,1,"rr.q[i]=(uint64_t)((int64_t)a.sd[i*2]*b.sd[i*2]);");
++    case M(PMADDWD): case M(VPMADDWD): return vbinary(off,in,w/4,w,1,"rr.d[i]=(uint32_t)((int32_t)a.sw[i*2]*b.sw[i*2])+(uint32_t)((int32_t)a.sw[i*2+1]*b.sw[i*2+1]);");
++    case M(PMINSB): case M(VPMINSB): return vbinary(off,in,w/1,w,1,"rr.sb[i]=a.sb[i]<b.sb[i] ? a.sb[i] : b.sb[i];");
++    case M(PMAXSB): case M(VPMAXSB): return vbinary(off,in,w/1,w,1,"rr.sb[i]=a.sb[i]>b.sb[i] ? a.sb[i] : b.sb[i];");
++    case M(PMINUB): case M(VPMINUB): return vbinary(off,in,w/1,w,1,"rr.b[i]=a.b[i]<b.b[i] ? a.b[i] : b.b[i];");
++    case M(PMAXUB): case M(VPMAXUB): return vbinary(off,in,w/1,w,1,"rr.b[i]=a.b[i]>b.b[i] ? a.b[i] : b.b[i];");
++    case M(PMINSW): case M(VPMINSW): return vbinary(off,in,w/2,w,1,"rr.sw[i]=a.sw[i]<b.sw[i] ? a.sw[i] : b.sw[i];");
++    case M(PMAXSW): case M(VPMAXSW): return vbinary(off,in,w/2,w,1,"rr.sw[i]=a.sw[i]>b.sw[i] ? a.sw[i] : b.sw[i];");
++    case M(PMINUW): case M(VPMINUW): return vbinary(off,in,w/2,w,1,"rr.w[i]=a.w[i]<b.w[i] ? a.w[i] : b.w[i];");
++    case M(PMAXUW): case M(VPMAXUW): return vbinary(off,in,w/2,w,1,"rr.w[i]=a.w[i]>b.w[i] ? a.w[i] : b.w[i];");
++    case M(PMINSD): case M(VPMINSD): return vbinary(off,in,w/4,w,1,"rr.sd[i]=a.sd[i]<b.sd[i] ? a.sd[i] : b.sd[i];");
++    case M(PMAXSD): case M(VPMAXSD): return vbinary(off,in,w/4,w,1,"rr.sd[i]=a.sd[i]>b.sd[i] ? a.sd[i] : b.sd[i];");
++    case M(PMINUD): case M(VPMINUD): return vbinary(off,in,w/4,w,1,"rr.d[i]=a.d[i]<b.d[i] ? a.d[i] : b.d[i];");
++    case M(PMAXUD): case M(VPMAXUD): return vbinary(off,in,w/4,w,1,"rr.d[i]=a.d[i]>b.d[i] ? a.d[i] : b.d[i];");
++    case M(PCMPEQW): case M(VPCMPEQW): return vbinary(off,in,w/2,w,1,"rr.w[i]=a.w[i]==b.w[i] ? 0xffff : 0;");
++    case M(PCMPGTQ): case M(VPCMPGTQ): return vbinary(off,in,w/8,w,1,"rr.q[i]=a.sq[i]>b.sq[i] ? ~0ull : 0;");
++    case M(PADDSB): case M(VPADDSB): return vbinary(off,in,w/1,w,1,"const int v=(int)a.sb[i]+(int)b.sb[i]; rr.sb[i]=v<-128 ? -128 : v>127 ? 127 : v;");
++    case M(PADDSW): case M(VPADDSW): return vbinary(off,in,w/2,w,1,"const int v=(int)a.sw[i]+(int)b.sw[i]; rr.sw[i]=v<-32768 ? -32768 : v>32767 ? 32767 : v;");
++    case M(PADDUSB): case M(VPADDUSB): return vbinary(off,in,w/1,w,1,"const int v=(int)a.b[i]+(int)b.b[i]; rr.b[i]=v<0 ? 0 : v>255 ? 255 : v;");
++    case M(PADDUSW): case M(VPADDUSW): return vbinary(off,in,w/2,w,1,"const int v=(int)a.w[i]+(int)b.w[i]; rr.w[i]=v<0 ? 0 : v>65535 ? 65535 : v;");
++    case M(PSUBSB): case M(VPSUBSB): return vbinary(off,in,w/1,w,1,"const int v=(int)a.sb[i]-(int)b.sb[i]; rr.sb[i]=v<-128 ? -128 : v>127 ? 127 : v;");
++    case M(PSUBSW): case M(VPSUBSW): return vbinary(off,in,w/2,w,1,"const int v=(int)a.sw[i]-(int)b.sw[i]; rr.sw[i]=v<-32768 ? -32768 : v>32767 ? 32767 : v;");
++    case M(PSUBUSB): case M(VPSUBUSB): return vbinary(off,in,w/1,w,1,"const int v=(int)a.b[i]-(int)b.b[i]; rr.b[i]=v<0 ? 0 : v>255 ? 255 : v;");
++    case M(PSUBUSW): case M(VPSUBUSW): return vbinary(off,in,w/2,w,1,"const int v=(int)a.w[i]-(int)b.w[i]; rr.w[i]=v<0 ? 0 : v>65535 ? 65535 : v;");
++    case M(PACKSSDW): case M(VPACKSSDW): return vbinary(off,in,w/16,w,1,"for(int j=0;j<8;++j) { const int v=j<4 ? a.sd[i*4+j] : b.sd[i*4+j-4]; rr.sw[i*8+j]=v<-32768 ? -32768 : v>32767 ? 32767 : v; }");
++    case M(PACKUSDW): case M(VPACKUSDW): return vbinary(off,in,w/16,w,1,"for(int j=0;j<8;++j) { const int v=j<4 ? a.sd[i*4+j] : b.sd[i*4+j-4]; rr.w[i*8+j]=v<0 ? 0 : v>65535 ? 65535 : v; }");
++    case M(PACKSSWB): case M(VPACKSSWB): return vbinary(off,in,w/16,w,1,"for(int j=0;j<16;++j) { const int v=j<8 ? a.sw[i*8+j] : b.sw[i*8+j-8]; rr.sb[i*16+j]=v<-128 ? -128 : v>127 ? 127 : v; }");
++    case M(PACKUSWB): case M(VPACKUSWB): return vbinary(off,in,w/16,w,1,"for(int j=0;j<16;++j) { const int v=j<8 ? a.sw[i*8+j] : b.sw[i*8+j-8]; rr.b[i*16+j]=v<0 ? 0 : v>255 ? 255 : v; }");
++    case M(PADDB): case M(VPADDB): return vbinary(off, in, w, w, 1, "rr.b[i] = (uint8_t)(a.b[i] + b.b[i]);");
++    case M(PSUBB): case M(VPSUBB): return vbinary(off, in, w, w, 1, "rr.b[i] = (uint8_t)(a.b[i] - b.b[i]);");
++    case M(PADDW): case M(VPADDW): return vbinary(off, in, w / 2, w, 1, "rr.w[i] = (uint16_t)(a.w[i] + b.w[i]);");
++    case M(PSUBW): case M(VPSUBW): return vbinary(off, in, w / 2, w, 1, "rr.w[i] = (uint16_t)(a.w[i] - b.w[i]);");
+     case M(PADDD): case M(VPADDD): return vbinary(off, in, w / 4, w, 1, "rr.d[i] = a.d[i] + b.d[i];");
+     case M(PSUBD): case M(VPSUBD): return vbinary(off, in, w / 4, w, 1, "rr.d[i] = a.d[i] - b.d[i];");
+     case M(PADDQ): case M(VPADDQ): return vbinary(off, in, w / 8, w, 1, "rr.q[i] = a.q[i] + b.q[i];");
+     case M(PSUBQ): case M(VPSUBQ): return vbinary(off, in, w / 8, w, 1, "rr.q[i] = a.q[i] - b.q[i];");
++    case M(PCMPGTB): case M(VPCMPGTB): return vbinary(off, in, w, w, 1, "rr.b[i] = a.sb[i] > b.sb[i] ? 0xff : 0;");
++    case M(PCMPGTW): case M(VPCMPGTW): return vbinary(off, in, w / 2, w, 1, "rr.w[i] = a.sw[i] > b.sw[i] ? 0xffff : 0;");
++    case M(PCMPGTD): case M(VPCMPGTD): return vbinary(off, in, w / 4, w, 1, "rr.d[i] = a.sd[i] > b.sd[i] ? ~0u : 0;");
+     case M(PCMPEQB): case M(VPCMPEQB): return vbinary(off, in, w, w, 1, "rr.b[i] = a.b[i] == b.b[i] ? 0xff : 0;");
+     case M(PCMPEQD): case M(VPCMPEQD): return vbinary(off, in, w / 4, w, 1, "rr.d[i] = a.d[i] == b.d[i] ? ~0u : 0;");
+     case M(PCMPEQQ): case M(VPCMPEQQ): return vbinary(off, in, w / 8, w, 1, "rr.q[i] = a.q[i] == b.q[i] ? ~0ull : 0;");
++    case M(MOVSHDUP): case M(VMOVSHDUP): case M(MOVSLDUP): case M(VMOVSLDUP): case M(MOVDDUP): case M(VMOVDDUP): {
++        const VOps o=vops1(in);
++        if(!vread(off,in,o.s2,&a) || !vwrite(off,in,o.dst,"rr",w,&s)) return 0;
++        const int dbl=m==M(MOVDDUP) || m==M(VMOVDDUP);
++        const int odd=m==M(MOVSHDUP) || m==M(VMOVSHDUP);
++        emit("{ const BbVec x=%s; BbVec rr={0}; for(int i=0;i<%d;i+=2) rr.%s[i]=rr.%s[i+1]=x.%s[i+%d]; %s }\n",
++             a.s,w/(dbl ? 8 : 4),dbl ? "q" : "d",dbl ? "q" : "d",dbl ? "q" : "d",odd,s.s); return 1;
++    }
++    case M(PHADDD): case M(VPHADDD):
++        if(w!=16 && w!=32) return 0;
++        return vbinary(off,in,w/16,w,1,"rr.d[i*4]=a.d[i*4]+a.d[i*4+1]; rr.d[i*4+1]=a.d[i*4+2]+a.d[i*4+3]; rr.d[i*4+2]=b.d[i*4]+b.d[i*4+1]; rr.d[i*4+3]=b.d[i*4+2]+b.d[i*4+3];");
++    case M(PHADDW): case M(VPHADDW):
++        if(w!=16 && w!=32) return 0;
++        return vbinary(off,in,w/16,w,1,"for(int j=0;j<4;++j) { rr.w[i*8+j]=(uint16_t)(a.w[i*8+j*2]+a.w[i*8+j*2+1]); rr.w[i*8+4+j]=(uint16_t)(b.w[i*8+j*2]+b.w[i*8+j*2+1]); }");
+     case M(HADDPS): case M(VHADDPS): case M(HSUBPS): case M(VHSUBPS): {
+         const char *op = (m == M(HADDPS) || m == M(VHADDPS)) ? "+" : "-";
+         const Str body = str("const float *x = a.f + i * 4, *y = b.f + i * 4; rr.f[i * 4] = x[0] %s x[1]; "
+@@ -572,6 +823,10 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+                              op, op, op, op);
+         return vbinary(off, in, w / 16, w, 1, body.s);
+     }
++    case M(HADDPD): case M(VHADDPD):
++        return vbinary(off, in, w / 16, w, 1,
++            "rr.fd[i * 2] = a.fd[i * 2] + a.fd[i * 2 + 1]; "
++            "rr.fd[i * 2 + 1] = b.fd[i * 2] + b.fd[i * 2 + 1];");
+     case M(CMPPS): case M(VCMPPS): case M(CMPPD): case M(VCMPPD): case M(CMPSS): case M(VCMPSS): case M(CMPSD): case M(VCMPSD): {
+         const VOps o = vops3(in);
+         if (!o.imm) return 0;
+@@ -590,6 +845,20 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+              dbl ? "fd" : "f", dbl ? "fd" : "f");
+         return 1;
+     }
++    case M(SHUFPD): case M(VSHUFPD): {
++        const VOps o=vops3(in);
++        if(!o.imm) return 0;
++        const Str body=str("rr.q[i*2]=a.q[i*2+((%u>>(i*2))&1)]; rr.q[i*2+1]=b.q[i*2+((%u>>(i*2+1))&1)];",
++                           (unsigned)o.imm->disp&255,(unsigned)o.imm->disp&255);
++        return vbinary(off,in,w/16,w,1,body.s);
++    }
++    case M(VPERMILPD): {
++        const VOps o=vops1(in);
++        if(!o.imm) return vbinary(off,in,w/8,w,1,"rr.q[i]=a.q[(i&~1)+((b.q[i]>>1)&1)];");
++        if(!vread(off,in,o.s2,&a) || !vwrite(off,in,o.dst,"rr",w,&s)) return 0;
++        emit("{ const BbVec x=%s; BbVec rr={0}; for(int i=0;i<%d;++i) rr.q[i]=x.q[(i&~1)+((%u>>i)&1)]; %s }\n",
++             a.s,w/8,(unsigned)o.imm->disp&255,s.s); return 1;
++    }
+     case M(SHUFPS): case M(VSHUFPS): {
+         const VOps o = vops3(in);
+         if (!o.imm) return 0;
+@@ -599,7 +868,8 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+         return vbinary(off, in, w / 16, w, 1, body.s);
+     }
+     case M(PSHUFD): case M(VPSHUFD): case M(VPERMILPS): {
+-        if (m == M(VPERMILPS) && in->op[2].type != OP_IMM) return 0;
++        if (m == M(VPERMILPS) && in->op[2].type != OP_IMM)
++            return vbinary(off,in,w/4,w,1,"rr.d[i]=a.d[(i&~3)+(b.d[i]&3)];");
+         const VOps o = vops1(in);
+         if (!o.imm || !vread(off, in, o.s2, &a) || !vwrite(off, in, o.dst, "rr", w, &s)) return 0;
+         const int imm = (int)o.imm->disp;
+@@ -608,14 +878,29 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+              a.s, w / 16, imm & 3, (imm >> 2) & 3, (imm >> 4) & 3, (imm >> 6) & 3, s.s);
+         return 1;
+     }
+-    case M(MOVMSKPS): case M(VMOVMSKPS): {
++    case M(MOVMSKPS): case M(VMOVMSKPS): case M(MOVMSKPD): case M(VMOVMSKPD):
++    case M(PMOVMSKB): case M(VPMOVMSKB): {
+         if (!vread(off, in, &in->op[1], &a)) return 0;
+         Str wr;
+         if (!write_op(off, in, &in->op[0], "mask", &wr)) return 0;
+-        emit("{ const BbVec a = %s; uint64_t mask = 0; for (int i = 0; i < %d; ++i) mask |= (uint64_t)(a.d[i] >> 31) << i; %s }\n",
+-             a.s, w / 4, wr.s);
++        const int size=(m==M(MOVMSKPS) || m==M(VMOVMSKPS)) ? 4 : (m==M(MOVMSKPD) || m==M(VMOVMSKPD)) ? 8 : 1;
++        emit("{ const BbVec a = %s; uint64_t mask = 0; for (int i = 0; i < %d; ++i) mask |= (uint64_t)(a.b[i*%d+%d] >> 7) << i; %s }\n",
++             a.s, w/size,size,size-1,wr.s);
+         return 1;
+     }
++    case M(MOVLPS): case M(VMOVLPS): case M(MOVLPD): case M(VMOVLPD):
++    case M(MOVHPS): case M(VMOVHPS): case M(MOVHPD): case M(VMOVHPD): {
++        const int high=m==M(MOVHPS) || m==M(VMOVHPS) || m==M(MOVHPD) || m==M(VMOVHPD);
++        const BbOp *dst=&in->op[0];
++        if(dst->type==OP_MEM) {
++            Str addr; int stack;
++            if(!vread(off,in,&in->op[1],&a) || !address(off,in,dst,&addr,&stack)) return 0;
++            emit("{ const BbVec value=%s; rc_st(%s,8,value.q[%d]); }\n",a.s,addr.s,high); return 1;
++        }
++        if(!vread(off,in,in->count==3 ? &in->op[1] : dst,&a) ||
++           !vread(off,in,&in->op[in->count-1],&b) || !vwrite(off,in,dst,"rr",16,&s)) return 0;
++        emit("{ BbVec rr=%s; const BbVec value=%s; rr.q[%d]=value.q[0]; %s }\n",a.s,b.s,high,s.s); return 1;
++    }
+     case M(MOVHLPS): case M(VMOVHLPS): case M(MOVLHPS): case M(VMOVLHPS): {
+         const VOps o = vops3(in);
+         if (!vread(off, in, o.s1, &a) || !vread(off, in, o.s2, &b) || !vwrite(off, in, o.dst, "rr", 16, &s)) return 0;
+@@ -710,6 +995,44 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+         emit("{ BbVec rr = %s; const BbVec x = %s; %s %s }\n", a.s, b.s, calc, s.s);
+         return 1;
+     }
++    case M(ROUNDSS): case M(VROUNDSS): case M(ROUNDSD): case M(VROUNDSD):
++    case M(ROUNDPS): case M(VROUNDPS): case M(ROUNDPD): case M(VROUNDPD): {
++        const int scalar=m==M(ROUNDSS) || m==M(VROUNDSS) || m==M(ROUNDSD) || m==M(VROUNDSD);
++        const int dbl=m==M(ROUNDSD) || m==M(VROUNDSD) || m==M(ROUNDPD) || m==M(VROUNDPD);
++        const VOps o=scalar ? vops3(in) : vops1(in);
++        if (!o.imm || !vread(off,in,o.s2,&b) || !vwrite(off,in,o.dst,"rr",scalar ? 16 : w,&s)) return 0;
++        if (scalar && !vread(off,in,o.s1,&a)) return 0;
++        emit("{ BbVec rr=%s; const BbVec source=%s; const unsigned mode=%s; ",scalar ? a.s : "{0}",b.s,
++             (o.imm->disp&4) ? "(c->mxcsr>>13)&3" : str("%u",(unsigned)o.imm->disp&3).s);
++        emit("for(int i=0;i<%d;++i) { const double x=source.%s[i]; double value; switch(mode) { "
++             "case 0:value=__builtin_nearbyint(x);break; case 1:value=__builtin_floor(x);break; "
++             "case 2:value=__builtin_ceil(x);break; default:value=__builtin_trunc(x);break; } "
++             "rr.%s[i]=value; } %s }\n",scalar ? 1 : w/(dbl ? 8 : 4),dbl ? "fd" : "f",dbl ? "fd" : "f",s.s);
++        return 1;
++    }
++    /* Packed conversions have asymmetric source/destination widths. */
++    case M(CVTPS2PD): case M(VCVTPS2PD): case M(CVTDQ2PD): case M(VCVTDQ2PD):
++    case M(CVTPD2PS): case M(VCVTPD2PS): case M(CVTPD2DQ): case M(VCVTPD2DQ):
++    case M(CVTTPD2DQ): case M(VCVTTPD2DQ): {
++        const int widen=m==M(CVTPS2PD) || m==M(VCVTPS2PD) || m==M(CVTDQ2PD) || m==M(VCVTDQ2PD);
++        const int bytes=widen ? in->op[0].size : 16;
++        const int lanes=(widen ? in->op[0].size : in->op[1].size)/8;
++        if(!vread(off,in,&in->op[1],&a) || !vwrite(off,in,&in->op[0],"rr",bytes,&s)) return 0;
++        const char *calc=(m==M(CVTPS2PD) || m==M(VCVTPS2PD)) ? "rr.fd[i]=(double)x.f[i];" :
++                         (m==M(CVTDQ2PD) || m==M(VCVTDQ2PD)) ? "rr.fd[i]=(double)x.sd[i];" :
++                         (m==M(CVTPD2PS) || m==M(VCVTPD2PS)) ? "rr.f[i]=(float)x.fd[i];" :
++                         (m==M(CVTTPD2DQ) || m==M(VCVTTPD2DQ)) ? "rr.sd[i]=rc_f2i32(x.fd[i],1,c->mxcsr);" :
++                         "rr.sd[i]=rc_f2i32(x.fd[i],0,c->mxcsr);";
++        emit("{ const BbVec x=%s; BbVec rr={0}; for(int i=0;i<%d;++i) { %s } %s }\n",a.s,lanes,calc,s.s);
++        return 1;
++    }
++    case M(CVTSS2SD): case M(VCVTSS2SD): case M(CVTSD2SS): case M(VCVTSD2SS): {
++        const VOps o=vops3(in);
++        if (!vread(off,in,o.s1,&a) || !vread(off,in,o.s2,&b) || !vwrite(off,in,o.dst,"rr",16,&s)) return 0;
++        emit("{ BbVec rr=%s; const BbVec value=%s; %s %s }\n",a.s,b.s,
++             (m==M(CVTSS2SD) || m==M(VCVTSS2SD)) ? "rr.fd[0]=(double)value.f[0];" : "rr.f[0]=(float)value.fd[0];",s.s);
++        return 1;
++    }
+     case M(CVTSI2SS): case M(VCVTSI2SS): case M(CVTSI2SD): case M(VCVTSI2SD): {
+         const VOps o = vops3(in);
+         Str g;
+@@ -748,6 +1071,23 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+              a.s, w, es, es, s.s);
+         return 1;
+     }
++    case M(PUNPCKLBW): case M(VPUNPCKLBW): case M(PUNPCKHBW): case M(VPUNPCKHBW):
++    case M(PUNPCKLWD): case M(VPUNPCKLWD): case M(PUNPCKHWD): case M(VPUNPCKHWD):
++    case M(PUNPCKLDQ): case M(VPUNPCKLDQ): case M(PUNPCKHDQ): case M(VPUNPCKHDQ):
++    case M(PUNPCKLQDQ): case M(VPUNPCKLQDQ): case M(PUNPCKHQDQ): case M(VPUNPCKHQDQ): {
++        if (w!=16 && w!=32) return 0;
++        const char *name=ZydisMnemonicGetString((ZydisMnemonic)m);
++        if (*name=='v') ++name;
++        const int high=name[6]=='h';
++        const int es=strstr(name,"bw") ? 1 : strstr(name,"wd") ? 2 : strstr(name,"qdq") ? 8 : 4;
++        const Str body=str("for(int j=0;j<%d;++j) { const int src=i*16+%d+j*%d; "
++            "memcpy(rr.b+i*16+j*%d,a.b+src,%d); memcpy(rr.b+i*16+j*%d+%d,b.b+src,%d); }",
++            8/es,high ? 8 : 0,es,2*es,es,2*es,es,es);
++        return vbinary(off,in,w/16,w,1,body.s);
++    }
++    case M(PSHUFB): case M(VPSHUFB):
++        if(w!=16 && w!=32) return 0;
++        return vbinary(off,in,w/16,w,1,"for(int j=0;j<16;++j) { const unsigned mask=b.b[i*16+j]; rr.b[i*16+j]=(mask&128) ? 0 : a.b[i*16+(mask&15)]; }");
+     case M(UNPCKLPS): case M(VUNPCKLPS): case M(UNPCKHPS): case M(VUNPCKHPS):
+         return vbinary(off, in, w / 16, w, 1, (m == M(UNPCKLPS) || m == M(VUNPCKLPS))
+             ? "rr.d[i * 4] = a.d[i * 4]; rr.d[i * 4 + 1] = b.d[i * 4]; rr.d[i * 4 + 2] = a.d[i * 4 + 1]; rr.d[i * 4 + 3] = b.d[i * 4 + 1];"
+@@ -808,6 +1148,32 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+         emit("{ BbVec rr = %s; const uint64_t v = %s; %s %s }\n", a.s, g.s, set.s, s.s);
+         return 1;
+     }
++    case M(PMOVZXBW): case M(VPMOVZXBW): case M(PMOVZXBD): case M(VPMOVZXBD):
++    case M(PMOVZXWD): case M(VPMOVZXWD): case M(PMOVZXDQ): case M(VPMOVZXDQ):
++    case M(PMOVZXBQ): case M(VPMOVZXBQ): case M(PMOVZXWQ): case M(VPMOVZXWQ):
++    case M(PMOVSXBW): case M(VPMOVSXBW): case M(PMOVSXBD): case M(VPMOVSXBD):
++    case M(PMOVSXWD): case M(VPMOVSXWD): case M(PMOVSXDQ): case M(VPMOVSXDQ):
++    case M(PMOVSXBQ): case M(VPMOVSXBQ): case M(PMOVSXWQ): case M(VPMOVSXWQ): {
++        if (!vread(off,in,&in->op[1],&a) || !vwrite(off,in,&in->op[0],"rr",w,&s)) return 0;
++        const char *name=ZydisMnemonicGetString((ZydisMnemonic)m);
++        const size_t n=strlen(name);
++        const char src=name[n-2],dst=name[n-1];
++        const char *sign=strstr(name,"sx") ? "s" : "";
++        const int size=dst=='w' ? 2 : dst=='d' ? 4 : 8;
++        emit("{ const BbVec value=%s; BbVec rr={0}; for (int i=0;i<%d;++i) rr.%s%c[i]=value.%s%c[i]; %s }\n",a.s,w/size,sign,dst,sign,src,s.s);
++        return 1;
++    }
++    case M(VINSERTF128): case M(VINSERTI128): {
++        const VOps o=vops3(in);
++        if (!o.imm || !vread(off,in,o.s1,&a) || !vread(off,in,o.s2,&b) || !vwrite(off,in,o.dst,"rr",32,&s)) return 0;
++        emit("{ BbVec rr=%s; const BbVec value=%s; memcpy(rr.b+%d,value.b,16); %s }\n",a.s,b.s,((int)o.imm->disp & 1)*16,s.s);
++        return 1;
++    }
++    case M(VEXTRACTF128): case M(VEXTRACTI128): {
++        if (in->op[2].type!=OP_IMM || !vread(off,in,&in->op[1],&a) || !vwrite(off,in,&in->op[0],"rr",16,&s)) return 0;
++        emit("{ const BbVec value=%s; BbVec rr={0}; memcpy(rr.b,value.b+%d,16); %s }\n",a.s,((int)in->op[2].disp & 1)*16,s.s);
++        return 1;
++    }
+     case M(PALIGNR): case M(VPALIGNR): {
+         const VOps o = vops3(in);
+         if (!o.imm) return 0;
+@@ -827,10 +1193,18 @@ static int translate_atomic(uint64_t off, const BbInsn *in) {
+     const BbOp *d = &in->op[0], *src = &in->op[1];
+     if (d->type != OP_MEM) return 0;
+     const int size = d->size;
+-    if (size != 1 && size != 2 && size != 4 && size != 8) return 0;
+     Str ad, b, w;
+     int stack;
+     if (!address(off, in, d, &ad, &stack)) return 0;
++    if (m == M(CMPXCHG16B) && size == 16) {
++        emit("{ const uint64_t ea=%s; unsigned __int128 expected=((unsigned __int128)r[RDX]<<64)|r[RAX]; "
++             "const unsigned __int128 desired=((unsigned __int128)r[RCX]<<64)|r[RBX]; "
++             "const int ok=__atomic_compare_exchange_n((unsigned __int128*)(uintptr_t)ea,&expected,desired,0,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST); "
++             FLAGS_OUT " c->flags=(c->flags & ~(uint64_t)F_ZF)|(ok ? F_ZF : 0); "
++             "if(!ok) { r[RAX]=(uint64_t)expected; r[RDX]=(uint64_t)(expected>>64); } }\n", ad.s);
++        return 1;
++    }
++    if (size != 1 && size != 2 && size != 4 && size != 8) return 0;
+     const uint64_t mk = mask(size);
+     switch (m) {
+     case M(ADD): case M(SUB): case M(AND): case M(OR): case M(XOR): {
+@@ -850,6 +1224,12 @@ static int translate_atomic(uint64_t off, const BbInsn *in) {
+              m == M(INC) ? "FK_INC" : "FK_DEC", size);
+         return 1;
+     }
++    case M(XCHG): {
++        if (!gpr(src) || !read_op(off,in,src,size,&b) || !write_op(off,in,src,"old",&w)) return 0;
++        /* A memory XCHG is locked even without an explicit LOCK prefix. */
++        emit("{ const uint64_t ea=%s, value=%s; const uint64_t old=__atomic_exchange_n((uint%d_t*)(uintptr_t)ea,(uint%d_t)value,__ATOMIC_SEQ_CST); %s }\n",ad.s,b.s,size*8,size*8,w.s);
++        return 1;
++    }
+     case M(XADD): {
+         if (!gpr(src) || !read_op(off, in, src, size, &b) || !write_op(off, in, src, "a", &w)) return 0;
+         emit("{ const uint64_t ea = %s; const uint64_t b = %s; uint64_t a, seen; do a = rc_ld(ea, %d); "
+@@ -881,6 +1261,88 @@ static int translate_extra(uint64_t off, const BbInsn *in) {
+     Str a, b, w, ad;
+     int stack = 0;
+     switch (m) {
++    case M(MUL): case M(IMUL): {
++        if (in->count != 1) return 0;
++        const int size=d->size, bits=size*8;
++        if ((size!=1 && size!=2 && size!=4 && size!=8) || !read_op(off,in,d,size,&a)) return 0;
++        emit("{ const uint64_t a=r[RAX] & 0x%" PRIx64 "ull, b=%s; ", mask(size), a.s);
++        if (m==M(IMUL)) {
++            emit("const __int128 full=(__int128)(%s)a * (%s)b; const uint64_t low=(uint64_t)full & 0x%" PRIx64 "ull; const uint64_t high=(uint64_t)((__uint128_t)full >> %d); const int ov=full != (__int128)(%s)low; ", sext[size],sext[size],mask(size),bits,sext[size]);
++        } else {
++            emit("const __uint128_t full=(__uint128_t)a*b; const uint64_t low=(uint64_t)full & 0x%" PRIx64 "ull, high=(uint64_t)(full >> %d); const int ov=high!=0; ",mask(size),bits);
++        }
++        if(size==1) emit("r[RAX]=(r[RAX]&~0xffffull)|low|((high&255)<<8); ");
++        else if(size==2) emit("r[RAX]=(r[RAX]&~0xffffull)|low; r[RDX]=(r[RDX]&~0xffffull)|(high&0xffff); ");
++        else if(size==4) emit("r[RAX]=(uint32_t)low; r[RDX]=(uint32_t)high; ");
++        else emit("r[RAX]=low; r[RDX]=high; ");
++        emit("c->flags=(rc_flags(fk,fa,fb,fr,fz,fcf,c->flags)&~(uint64_t)(F_CF|F_OF))|(ov ? F_CF|F_OF : 0); fk=FK_CPU; }\n");
++        return 1;
++    }
++    case M(DIV): case M(IDIV): {
++        const int size=d->size,bits=size*8;
++        if ((size!=1 && size!=2 && size!=4 && size!=8) || !read_op(off,in,d,size,&a)) return 0;
++        if(size==1) emit("{ const uint64_t divisor=%s; const __uint128_t raw=r[RAX]&0xffffull; uint64_t q,rem; ",a.s);
++        else emit("{ const uint64_t divisor=%s; const __uint128_t raw=((__uint128_t)(r[RDX] & 0x%" PRIx64 "ull)<<%d) | (r[RAX] & 0x%" PRIx64 "ull); uint64_t q,rem; ",a.s,mask(size),bits,mask(size));
++        if (m==M(DIV)) {
++            emit("if (!divisor || (raw >> %d)>=divisor) __builtin_trap(); q=(uint64_t)(raw/divisor); rem=(uint64_t)(raw%%divisor); ",bits);
++        } else {
++            const char* type=size==1?"int8_t":size==2?"int16_t":size==4?"int32_t":"int64_t";
++            emit("const __int128 divisor_s=(%s)divisor; const __int128 numerator=(__int128)(raw << %d) >> %d; ",type,128-2*bits,128-2*bits);
++            emit("if (!divisor_s || (raw==((__uint128_t)1<<127) && divisor_s==-1)) __builtin_trap(); const __int128 result=numerator/divisor_s; ");
++            emit("if (result < -((__int128)1<<%d) || result >= ((__int128)1<<%d)) __builtin_trap(); q=(uint64_t)result; rem=(uint64_t)(numerator%%divisor_s); ",bits-1,bits-1);
++        }
++        if(size==1) emit("r[RAX]=(r[RAX]&~0xffffull)|(q&0xff)|((rem&0xff)<<8); ");
++        else if (size==2) emit("r[RAX]=(r[RAX]&~0xffffull)|(q&0xffff); r[RDX]=(r[RDX]&~0xffffull)|(rem&0xffff); ");
++        else if(size==4) emit("r[RAX]=(uint32_t)q; r[RDX]=(uint32_t)rem; ");
++        else emit("r[RAX]=q; r[RDX]=rem; ");
++        emit("}\n"); return 1;
++    }
++    case M(BLSR): case M(BLSI): case M(BLSMSK): case M(ANDN): case M(BEXTR): {
++        const int size=d->size;
++        Str ctl;
++        if (!gpr(d) || (size!=4 && size!=8) || !read_op(off,in,src,size,&a)) return 0;
++        if ((m==M(ANDN) || m==M(BEXTR)) && !read_op(off,in,&in->op[2],size,&ctl)) return 0;
++        emit("{ const uint64_t a=%s; uint64_t v; " FLAGS_OUT " c->flags &= ~(uint64_t)F_ARITH; ",a.s);
++        if (m==M(ANDN)) emit("v=~a & (%s); ",ctl.s);
++        else if (m==M(BEXTR)) emit("const uint64_t ctl=%s; const unsigned start=ctl & 255, len=(ctl >> 8) & 255; v=start>=%d ? 0 : a >> start; if (len<64) v&=(1ull<<len)-1; ",ctl.s,size*8);
++        else if (m==M(BLSR)) emit("v=a & (a-1); if (!a) c->flags|=F_CF; ");
++        else if (m==M(BLSI)) emit("v=a & (0-a); if (a) c->flags|=F_CF; ");
++        else emit("v=a ^ (a-1); if (!a) c->flags|=F_CF; ");
++        emit("v &= 0x%" PRIx64 "ull; if (!v) c->flags|=F_ZF; if (v & 0x%" PRIx64 "ull) c->flags|=F_SF; fk=FK_CPU; ",mask(size),UINT64_C(1)<<(size*8-1));
++        if (!write_op(off,in,d,"v",&w)) return 0;
++        emit("%s }\n",w.s); return 1;
++    }
++    case M(BSF): case M(BSR): case M(TZCNT): case M(LZCNT): case M(POPCNT): {
++        const int size=d->size;
++        if (!gpr(d) || (size!=2 && size!=4 && size!=8) || !read_op(off,in,src,size,&a)) return 0;
++        emit("{ const uint64_t a=%s; uint64_t v; " FLAGS_OUT " ",a.s);
++        if (m==M(BSF) || m==M(BSR)) {
++            emit("if (!a) { c->flags|=F_ZF; } else { c->flags &= ~(uint64_t)F_ZF; v=%s; ",m==M(BSF)?"__builtin_ctzll(a)":"63-__builtin_clzll(a)");
++        } else if (m==M(POPCNT)) {
++            emit("v=__builtin_popcountll(a); c->flags=(c->flags & ~(uint64_t)F_ARITH) | (a ? 0 : F_ZF); ");
++        } else {
++            emit("v=!a ? %d : %s; c->flags=(c->flags & ~(uint64_t)(F_CF|F_ZF)) | (!a ? F_CF : 0) | (!v ? F_ZF : 0); ",size*8,m==M(TZCNT)?"__builtin_ctzll(a)":str("__builtin_clzll(a)-%d",64-size*8).s);
++        }
++        if (!write_op(off,in,d,"v",&w)) return 0;
++        emit("%s %s fk=FK_CPU; }\n",w.s,(m==M(BSF)||m==M(BSR))?"}":"");return 1;
++    }
++    case M(MOVBE): {
++        const int size=d->size;
++        if ((size!=2 && size!=4 && size!=8) || !read_op(off,in,src,size,&a)) return 0;
++        b=str("__builtin_bswap%d((uint%d_t)(%s))",size*8,size*8,a.s);
++        if (!write_op(off,in,d,b.s,&w)) return 0;
++        emit("%s\n",w.s);return 1;
++    }
++    case M(BSWAP): {
++        /* Native ARM64 recompilation: preserve flags and zero the upper half
++         * for the 32-bit form through the existing register writer. */
++        if (!gpr(d) || (d->size != 4 && d->size != 8) ||
++            !read_op(off, in, d, d->size, &a)) return 0;
++        b = str("__builtin_bswap%d((uint%d_t)(%s))", d->size * 8, d->size * 8, a.s);
++        if (!write_op(off, in, d, b.s, &w)) return 0;
++        emit("%s\n", w.s);
++        return 1;
++    }
+     case M(CBW): emit("r[RAX] = (r[RAX] & ~0xffffull) | ((uint64_t)(int16_t)(int8_t)r[RAX] & 0xffff);\n"); return 1;
+     case M(CWDE): emit("r[RAX] = (uint32_t)(int32_t)(int16_t)r[RAX];\n"); return 1;
+     case M(CDQE): emit("r[RAX] = (uint64_t)(int64_t)(int32_t)r[RAX];\n"); return 1;
+@@ -979,6 +1441,32 @@ static int translate_shift_mul(uint64_t off, const BbInsn *in) {
+     if (size != 4 && size != 8 && size != 2 && size != 1) return 0;
+     static const char *const sext[9] = {0, "int8_t", "int16_t", 0, "int32_t", 0, 0, 0, "int64_t"};
+     Str a, w;
++    if (m == M(ROL) || m == M(ROR)) {
++        Str count = str("1"), da;
++        int stack = 0;
++        if (in->count > 1 && !read_op(off, in, &in->op[1], 1, &count)) return 0;
++        if (d->type == OP_MEM) {
++            if (!address(off, in, d, &da, &stack)) return 0;
++            a = str("%s(ea, %d)", stack ? "rc_lds" : "rc_ld", size);
++        } else if (!gpr(d) || !read_op(off, in, d, size, &a)) return 0;
++        emit("{ const unsigned count = (%s) & %u; ", count.s, size == 8 ? 63 : 31);
++        if (d->type == OP_MEM) emit("const uint64_t ea = %s; ", da.s);
++        emit("if (count) { const unsigned n = count %% %d; const uint64_t a = %s; ", size * 8, a.s);
++        emit("const uint64_t v = (n ? ((a %s n) | (a %s (%d - n))) : a) & 0x%" PRIx64 "ull; ",
++             m == M(ROL) ? "<<" : ">>", m == M(ROL) ? ">>" : "<<", size * 8, mask(size));
++        emit("const unsigned msb = (v >> %d) & 1; const unsigned cf = %s; ",
++             size * 8 - 1, m == M(ROL) ? "v & 1" : "msb");
++        emit("c->flags = (rc_flags(fk, fa, fb, fr, fz, fcf, c->flags) & ~(uint64_t)(F_CF | F_OF)) | "
++             "(cf ? F_CF : 0) | ((msb ^ %s) ? F_OF : 0); fk = FK_CPU; ",
++             m == M(ROL) ? "cf" : str("((v >> %d) & 1)", size * 8 - 2).s);
++        if (d->type == OP_MEM) emit("%s(ea, %d, v);", stack ? "rc_sts" : "rc_st", size);
++        else {
++            if (!write_op(off, in, d, "v", &w)) return 0;
++            emit("%s", w.s);
++        }
++        emit(" } }\n");
++        return 1;
++    }
+     if (m == M(SHL) || m == M(SHR) || m == M(SAR)) {
+         unsigned count = 1;
+         if (in->count > 1) {
+@@ -1039,6 +1527,31 @@ static int translate_shift_mul(uint64_t off, const BbInsn *in) {
+  * jumps and branches inside the function (data between them, such as jump tables, is never decoded;
+  * a place only an indirect jump reaches goes back to the translator). Sorted by offset. */
+ typedef struct { uint64_t off; BbInsn in; } Insn;
++/* A conservative CFG-local polling family, independent of any game address.
++ * Exactly one CMP/TEST reads memory; every other loop instruction is NOP or
++ * PAUSE. No register/address changes, stores, calls or inner branches qualify.
++ * Reject gaps and overlapping decodes instead of guessing an execution path. */
++static int pure_poll_backedge(const Insn *list, size_t at) {
++    const BbInsn *branch = &list[at].in;
++    const int cc = cc_of(branch->mnemonic);
++    if (cc < 0 || cc >= 16 || branch->op[0].type != OP_IMM) return 0;
++    const uint64_t target = list[at].off + (uint64_t)branch->op[0].disp;
++    if (target >= list[at].off || list[at].off - target > 64) return 0;
++    size_t first = at;
++    while (first && list[first].off > target) --first;
++    if (list[first].off != target) return 0;
++    int comparisons = 0;
++    for (size_t i = first; i < at; ++i) {
++        const BbInsn *in = &list[i].in;
++        if (list[i].off + in->length != list[i+1].off || in->lock) return 0;
++        if (in->mnemonic == M(NOP) || in->mnemonic == M(PAUSE)) continue;
++        if (in->rep || in->repne) return 0;
++        if ((in->mnemonic != M(CMP) && in->mnemonic != M(TEST)) || ++comparisons != 1) return 0;
++        if (in->count != 2 || in->op[0].type != OP_MEM ||
++            (in->op[1].type != OP_REG && in->op[1].type != OP_IMM)) return 0;
++    }
++    return comparisons == 1;
++}
+ static int insn_order(const void *a, const void *b) {
+     const uint64_t x = ((const Insn *)a)->off, y = ((const Insn *)b)->off;
+     return x < y ? -1 : x > y;
+@@ -1046,32 +1559,280 @@ static int insn_order(const void *a, const void *b) {
+ /* Targets of the jump tables decode found (labels too), for the function being generated. */
+ static uint64_t *table_targets;
+ static size_t table_target_count, table_target_capacity;
++typedef struct { uint64_t from, to; } TableEdge;
++static TableEdge *table_edges;
++static size_t table_edge_count, table_edge_capacity;
++static void remember_table_edge(uint64_t from, uint64_t to) {
++    for(size_t i=0;i<table_edge_count;++i)
++        if(table_edges[i].from==from && table_edges[i].to==to) return;
++    if(table_edge_count==table_edge_capacity) {
++        table_edge_capacity=table_edge_capacity ? table_edge_capacity*2 : 64;
++        table_edges=realloc(table_edges,table_edge_capacity*sizeof(*table_edges));
++    }
++    table_edges[table_edge_count++]=(TableEdge){from,to};
++}
++typedef struct { uint64_t offset, entries; int reg; } TableGuard;
++static TableGuard *table_guards;
++static size_t table_guard_count, table_guard_capacity;
++
++/* Include implicit/conditional writes: a guessed table must never survive a clobber. */
++static int writes_gpr(const Insn *x, int reg) {
++    if (x->in.mnemonic == M(CALL)) return 1; /* conservatively reject across calls */
++    ZydisDecoder decoder;
++    ZydisDecodedInstruction zi;
++    ZydisDecodedOperand zo[ZYDIS_MAX_OPERAND_COUNT];
++    ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
++    if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, (void*)(uintptr_t)(base+x->off), x->in.length, &zi, zo))) return 1;
++    for (unsigned j=0;j<zi.operand_count;++j) {
++        if (zo[j].type!=ZYDIS_OPERAND_TYPE_REGISTER || !(zo[j].actions & ZYDIS_OPERAND_ACTION_MASK_WRITE)) continue;
++        const ZydisRegister full=ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64,zo[j].reg.value);
++        if (ZydisRegisterGetClass(full)==ZYDIS_REGCLASS_GPR64 && ZydisRegisterGetId(full)==reg) return 1;
++    }
++    return 0;
++}
++static int follows(const Insn *a, const Insn *b) {
++    if (a->in.mnemonic==M(JMP)) return a->in.op[0].type==OP_IMM && a->off+(uint64_t)a->in.op[0].disp==b->off;
++    return a->off+a->in.length==b->off;
++}
++
++static int writes_flags(const Insn *x) {
++    if (x->in.mnemonic==M(CALL)) return 1;
++    ZydisDecoder decoder;
++    ZydisDecodedInstruction zi;
++    ZydisDecodedOperand zo[ZYDIS_MAX_OPERAND_COUNT];
++    ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64);
++    if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, (void*)(uintptr_t)(base+x->off), x->in.length, &zi, zo))) return 1;
++    return zi.cpu_flags && (zi.cpu_flags->modified || zi.cpu_flags->set_0 || zi.cpu_flags->set_1 || zi.cpu_flags->undefined);
++}
++/* A byte/word comparison only bounds a full table index if its high bits are
++ * known zero. Stop at the nearest definition, not an older convenient MOVZX. */
++static int zero_extended_before(const Insn *list, size_t at, int reg, unsigned width) {
++    for (size_t k=at;k-- > 0 && k+16>=at;) {
++        if (!follows(&list[k],&list[k+1])) return 0;
++        if (!writes_gpr(&list[k],reg)) continue;
++        const BbInsn *in=&list[k].in;
++        return in->mnemonic==M(MOVZX) && gpr(&in->op[0]) && in->op[0].reg==reg &&
++            in->op[0].size>=4 && in->op[1].size<=width;
++    }
++    return 0;
++}
++/* Find the CMP supplying this branch's flags, allowing flag-preserving instructions. */
++static uint64_t branch_bound(const Insn *list, size_t branch, int index, int *guard) {
++    for (size_t k=branch;k-- > 0 && k+16>=branch;) {
++        const Insn *x=&list[k];
++        if (!follows(x,&list[k+1])) return 0;
++        if (x->in.mnemonic==M(CMP) && gpr(&x->in.op[0]) && x->in.op[1].type==OP_IMM &&
++            (x->in.op[0].size==4 || x->in.op[0].size==8 ||
++             x->in.op[0].size==2 || x->in.op[0].size==1)) {
++            int same=x->in.op[0].reg==index;
++            if (!same && k>0) {
++                for (size_t j=k;j-- > 0 && j+64>=k;) {
++                    const Insn *copy=&list[j];
++                    if (!follows(copy,&list[j+1])) break;
++                    if ((copy->in.mnemonic==M(MOV) || copy->in.mnemonic==M(MOVZX)) && gpr(&copy->in.op[0]) &&
++                        gpr(&copy->in.op[1]) && copy->in.op[0].reg==index &&
++                        copy->in.op[1].reg==x->in.op[0].reg &&
++                        copy->in.op[1].size>=x->in.op[0].size && copy->in.op[0].size>=4 &&
++                        copy->in.op[1].high8==x->in.op[0].high8) {
++                        same=1; break;
++                    }
++                    if (writes_gpr(copy,index) || writes_gpr(copy,x->in.op[0].reg)) break;
++                }
++            }
++            if(same && (x->in.op[0].reg!=index || (x->in.op[0].size<8 &&
++                !zero_extended_before(list,k,index,x->in.op[0].size)))) *guard=1;
++            return same ? (uint64_t)x->in.op[1].disp+1 : 0;
++        }
++        if (writes_flags(x) || writes_gpr(x,index)) return 0;
++    }
++    return 0;
++}
++
++/* Backward reaching-definition query for table bases hoisted through loops.
++ * Work items are (instruction boundary, GPR), not decoder visitation order.
++ * Every known incoming path must reach the same RIP-relative constant. Calls
++ * preserve only the SysV callee-saved GPRs used by PS4 code; flags/index bounds
++ * retain their stricter local checks. No guest address is hard-coded. */
++static int call_preserves(int reg) {
++    return reg==RBX || reg==RBP || (reg>=R12 && reg<=R15);
++}
++static int edge_to(const Insn *x, uint64_t target) {
++    const int m=x->in.mnemonic, cc=cc_of(m);
++    const int conditional=(cc>=0 && cc<16) || m==M(JRCXZ) || m==M(JECXZ) ||
++                          m==M(LOOP) || m==M(LOOPE) || m==M(LOOPNE);
++    if ((m==M(JMP) || conditional) && x->in.op[0].type==OP_IMM &&
++        x->off+(uint64_t)x->in.op[0].disp==target) return 1;
++    if(m==M(JMP) && x->in.op[0].type==OP_REG) {
++        for(size_t i=0;i<table_edge_count;++i)
++            if(table_edges[i].from==x->off && table_edges[i].to==target) return 1;
++    }
++    if (m==M(JMP) || m==M(RET) || m==M(INVALID) || m==M(UD2) || m==M(HLT)) return 0;
++    return x->off+x->in.length==target;
++}
++static uint64_t table_base_cfg(Function fn, const Insn *list, size_t n, size_t load, int reg) {
++    if(n>8192) return 0; /* bound work on pathological scanner candidates */
++    const size_t states=n*16;
++    uint8_t *visited=calloc(states,1);
++    size_t *queue=malloc(states*sizeof(*queue));
++    if(!visited || !queue) { free(visited); free(queue); return 0; }
++    size_t head=0,tail=0;
++    queue[tail++]=load*16+(size_t)reg; visited[queue[0]]=1;
++    uint64_t value=0; int defined=0,valid=1;
++    while(head<tail && valid) {
++        const size_t state=queue[head++], at=state/16;
++        const int wanted=(int)(state%16);
++        int incoming=0;
++        if(list[at].off==fn.offset) { valid=0; break; }
++        for(size_t k=0;k<n && valid;++k) {
++            const Insn *x=&list[k];
++            if(!edge_to(x,list[at].off)) continue;
++            incoming=1;
++            int source=wanted;
++            if(x->in.mnemonic==M(CALL)) {
++                if(!call_preserves(wanted)) { valid=0; break; }
++            } else if(writes_gpr(x,wanted)) {
++                const BbOp *dst=&x->in.op[0],*src=&x->in.op[1];
++                if(x->in.mnemonic==M(LEA) && gpr(dst) && dst->reg==wanted && dst->size==8 &&
++                   src->type==OP_AGEN && src->base==0xfe && src->index==0xff) {
++                    const uint64_t v=x->off+x->in.length+(uint64_t)src->disp;
++                    if(defined && value!=v) valid=0;
++                    value=v; defined=1; continue;
++                }
++                if(x->in.mnemonic==M(MOV) && gpr(dst) && dst->reg==wanted && dst->size==8 && gpr(src) && src->size==8)
++                    source=src->reg;
++                else { valid=0; break; }
++            }
++            const size_t next=k*16+(size_t)source;
++            if(!visited[next]) { visited[next]=1; queue[tail++]=next; }
++        }
++        if(!incoming) valid=0;
++    }
++    free(visited); free(queue);
++
++    return valid && defined ? value : 0;
++}
+ 
+ /* A compiler's jump table ending at list[n - 1] (jmp reg): lea T, [rip + table]; movsxd C,
+  * dword [T + 4 * I]; add C, T; jmp C, its size from cmp I, N; ja (N + 1 entries). Its targets
+  * are pushed to `work` and kept in table_targets; 0 if it is not one. */
+-static int jump_table(Function fn, const Insn *list, size_t n, uint64_t *work, size_t *pending, const uint8_t *seen) {
++static int jump_table(Function fn, const Insn *list, size_t total, size_t jump, int cfg_complete, uint64_t *work, size_t *pending, const uint8_t *seen) {
++    const size_t n=jump+1;
+     if (n < 4) return 0;
+-    const BbInsn *jmp = &list[n - 1].in, *add = &list[n - 2].in, *load = &list[n - 3].in;
++    const BbInsn *jmp = &list[n - 1].in;
+     if (jmp->op[0].type != OP_REG || jmp->op[0].kind != RK_GPR || jmp->op[0].size != 8) return 0;
+     const int c = jmp->op[0].reg;
+-    if (add->mnemonic != M(ADD) || add->op[0].type != OP_REG || add->op[0].reg != c || add->op[1].type != OP_REG ||
+-        add->op[0].size != 8) return 0;
++    size_t add_pos=n-2;
++    while (add_pos && n-add_pos<=8 && !writes_gpr(&list[add_pos],c)) {
++        if (!follows(&list[add_pos],&list[add_pos+1])) return 0;
++        --add_pos;
++    }
++    const BbInsn *add=&list[add_pos].in;
++    if (!follows(&list[add_pos],&list[add_pos+1]) || add->mnemonic != M(ADD) ||
++        !gpr(&add->op[0]) || add->op[0].reg != c || !gpr(&add->op[1]) || add->op[0].size != 8 || !add_pos) return 0;
+     const int t = add->op[1].reg;
+-    if (load->mnemonic != M(MOVSXD) || load->op[0].type != OP_REG || load->op[0].reg != c || load->op[1].type != OP_MEM ||
++    if (t == c) return 0;
++    size_t load_pos=add_pos-1;
++    while (load_pos && add_pos-load_pos<=8 && !writes_gpr(&list[load_pos],c)) {
++        if (!follows(&list[load_pos],&list[load_pos+1]) || writes_gpr(&list[load_pos],t)) return 0;
++        --load_pos;
++    }
++    const BbInsn *load=&list[load_pos].in;
++    if (!follows(&list[load_pos],&list[load_pos+1]) || load->mnemonic != M(MOVSXD) ||
++        !gpr(&load->op[0]) || load->op[0].reg != c || load->op[1].type != OP_MEM ||
+         load->op[1].base != t || load->op[1].scale != 4 || load->op[1].index == 0xff || load->op[1].disp != 0) return 0;
+     const int index = load->op[1].index;
+     uint64_t table = 0, entries = 0;
+-    for (size_t k = n - 3; k-- > 0 && k + 12 > n;) {
+-        const Insn *x = &list[k];
+-        if (!table && x->in.mnemonic == M(LEA) && x->in.op[0].type == OP_REG && x->in.op[0].reg == t &&
+-            x->in.op[1].base == 0xfe && x->in.op[1].index == 0xff)
+-            table = x->off + x->in.length + (uint64_t)x->in.op[1].disp;
+-        if (!entries && x->in.mnemonic == M(CMP) && x->in.op[0].type == OP_REG && x->in.op[0].reg == index &&
+-            x->in.op[1].type == OP_IMM && k + 1 < n && list[k + 1].in.mnemonic == M(JNBE))
+-            entries = (uint64_t)x->in.op[1].disp + 1;
+-    }
+-    if (!table || !entries || entries > 4096) return 0;
++    int base_reg=t, needs_guard=0;
++    /* A table base may be hoisted out of the dispatch block. Follow only the
++     * decoded path, and stop at any write to that register (including implicit writes). */
++    for (size_t k=load_pos;k-- > 0 && k+128>load_pos;) {
++        const Insn *x=&list[k];
++        if (!follows(x,&list[k+1])) break;
++        if (x->in.mnemonic==M(LEA) && gpr(&x->in.op[0]) && x->in.op[0].reg==base_reg && x->in.op[0].size==8 &&
++            x->in.op[1].base==0xfe && x->in.op[1].index==0xff) {
++            table=x->off+x->in.length+(uint64_t)x->in.op[1].disp; break;
++        }
++        if (x->in.mnemonic==M(MOV) && gpr(&x->in.op[0]) && gpr(&x->in.op[1]) &&
++            x->in.op[0].reg==base_reg && x->in.op[0].size==8) {
++            base_reg=x->in.op[1].reg; continue;
++        }
++        if (writes_gpr(x,base_reg)) break;
++    }
++    if (!table && cfg_complete) table=table_base_cfg(fn,list,total,load_pos,t);
++    for (size_t k=load_pos;k-- > 0 && k+32>load_pos;) {
++        const Insn *x=&list[k];
++        if (!follows(x,&list[k+1])) {
++            /* A taken jbe can enter the bounded dispatch block after its failure
++             * path was decoded. Require an adjacent CMP of the unchanged index;
++             * never scan across writes on the dispatch path itself. */
++            for (size_t j=1;j<=k;++j) {
++                const Insn *branch=&list[j];
++                if (branch->in.mnemonic==M(JBE) && branch->in.op[0].type==OP_IMM &&
++                    branch->off+(uint64_t)branch->in.op[0].disp==list[k+1].off) {
++                    entries=branch_bound(list,j,index,&needs_guard);
++                    if (entries) break;
++                }
++            }
++            break;
++        }
++        /* A full-width AND bounds the selector directly, independently of flags. */
++        if (x->in.mnemonic==M(AND) && gpr(&x->in.op[0]) && x->in.op[0].reg==index &&
++            x->in.op[0].size>=4 && x->in.op[1].type==OP_IMM &&
++            (uint64_t)x->in.op[1].disp<4096) {
++            entries=(uint64_t)x->in.op[1].disp+1; break;
++        }
++        if (x->in.mnemonic==M(JNBE) && x->in.op[0].type==OP_IMM) {
++            entries=branch_bound(list,k,index,&needs_guard);
++            if (entries) break;
++        }
++        if (writes_gpr(x,index)) break;
++    }
++
++    /* Optional bounded partial recovery for spilled/nonlocal selectors. The
++     * next local RIP-relative object (or function end) limits candidate entries;
++     * this is NOT a proof of the guest index range. A full-width runtime guard
++     * and the original computed-target dispatch remain mandatory. Useful for
++     * strict AOT: supported targets run natively, other indices still fail closed. */
++    uint64_t inferred_end=0;
++    if(!entries && cfg_complete && getenv("GOW3_AOT_GUARDED_TABLES") &&
++       table>=fn.offset && table<fn.offset+fn.size) {
++        inferred_end=fn.offset+fn.size;
++        for(size_t k=0;k<total;++k) {
++            const BbInsn *in=&list[k].in;
++            if(in->mnemonic!=M(LEA) || in->op[1].base!=0xfe || in->op[1].index!=0xff) continue;
++            const uint64_t object=list[k].off+in->length+(uint64_t)in->op[1].disp;
++            if(object>table && object<inferred_end) inferred_end=object;
++        }
++        if((inferred_end-table)%4==0) { entries=(inferred_end-table)/4; needs_guard=1; }
++    }
++    if (!table || !entries || entries>4096 || table>image_size || entries*4>image_size-table) return 0;
++    /* Validate the entire table before publishing any target. */
++    for (uint64_t e=0;e<entries;++e) {
++        int32_t rel;
++        memcpy(&rel,(const void*)(uintptr_t)(base+table+4*e),4);
++        const uint64_t target=table+(uint64_t)(int64_t)rel;
++        if (target<fn.offset || target>=fn.offset+fn.size) return 0;
++        if(inferred_end) {
++            if(target>=table && target<inferred_end) return 0; /* table bytes are not code */
++            for(size_t k=0;k<total;++k)
++                if(target>list[k].off && target<list[k].off+list[k].in.length) return 0;
++        }
++    }
++    /* A narrow comparison gives candidate entries, not a full-register bound.
++     * Keep the original computed target and guard the complete index before its
++     * load. Unknown high bits stop in strict AOT, rather than indexing a guessed
++     * table extent. No index is truncated or guest branch bypassed. */
++    if(needs_guard) {
++        size_t k=0;
++        for(;k<table_guard_count;++k) if(table_guards[k].offset==list[load_pos].off) break;
++        if(k==table_guard_count) {
++            if(table_guard_count==table_guard_capacity) {
++                table_guard_capacity=table_guard_capacity ? table_guard_capacity*2 : 16;
++                table_guards=realloc(table_guards,table_guard_capacity*sizeof(*table_guards));
++            }
++            table_guards[table_guard_count++]=(TableGuard){list[load_pos].off,entries,index};
++        }
++    }
+     for (uint64_t e = 0; e < entries; ++e) {
+         int32_t rel;
+         memcpy(&rel, (const void *)(uintptr_t)(base + table + 4 * e), 4);
+@@ -1081,6 +1842,7 @@ static int jump_table(Function fn, const Insn *list, size_t n, uint64_t *work, s
+             table_target_capacity = table_target_capacity ? table_target_capacity * 2 : 256;
+             table_targets = realloc(table_targets, table_target_capacity * sizeof(*table_targets));
+         }
++        remember_table_edge(list[jump].off,target);
+         table_targets[table_target_count++] = target;
+         if (!seen[target - fn.offset]) work[(*pending)++] = target;
+     }
+@@ -1095,7 +1857,12 @@ static Insn *decode(Function fn, size_t *count) {
+     uint64_t *work = malloc(work_capacity * sizeof(*work));
+     size_t pending = 0;
+     table_target_count = 0;
++    table_edge_count = 0;
++    table_guard_count = 0;
+     work[pending++] = fn.offset;
++    size_t previous_edges;
++    do {
++    previous_edges=table_edge_count;
+     while (pending) {
+         uint64_t off = work[--pending];
+         while (off >= fn.offset && off < fn.offset + fn.size && !seen[off - fn.offset]) {
+@@ -1118,7 +1885,7 @@ static Insn *decode(Function fn, size_t *count) {
+                     if (t >= fn.offset && t < fn.offset + fn.size && !seen[t - fn.offset]) work[pending++] = t;
+                 }
+                 if (m == M(JMP) && in->op[0].type == OP_REG && pending + 4096 < work_capacity)
+-                    jump_table(fn, list, n, work, &pending, seen);
++                    jump_table(fn, list, n, n-1, 0, work, &pending, seen);
+                 /* No fall-through after these. */
+                 if (m == M(JMP) || m == M(RET) || m == M(INVALID) || m == M(UD2) || m == M(HLT)) ended = 2;
+                 off += in->length;
+@@ -1126,6 +1893,13 @@ static Insn *decode(Function fn, size_t *count) {
+             if (ended == 2) break;
+         }
+     }
++    /* Complete direct control flow before querying reaching definitions. Repeat
++     * after discovering table targets so new case blocks can reveal more tables. */
++    qsort(list,n,sizeof(*list),insn_order);
++    for(size_t k=0;k<n && pending+4096<work_capacity;++k)
++        if(list[k].in.mnemonic==M(JMP) && list[k].in.op[0].type==OP_REG)
++            jump_table(fn,list,n,k,1,work,&pending,seen);
++    } while(pending || previous_edges!=table_edge_count);
+     free(work);
+     free(seen);
+     qsort(list, n, sizeof(*list), insn_order);
+@@ -1150,12 +1924,17 @@ static void generate(Function fn, uint64_t *stats) {
+     const Range f = {fn.offset, fn.offset + fn.size};
+     /* Labels only where a direct jump goes (and the entry): every other address an indirect jump
+      * or an interpreted branch reaches goes back to the translator (L_dispatch). */
+-    uint64_t *targets = malloc((count + 1 + table_target_count) * sizeof(*targets));
++    uint64_t *targets = malloc((count * 2 + 1 + table_target_count) * sizeof(*targets));
+     size_t target_count = 0;
+     targets[target_count++] = f.start;
+     for (size_t i = 0; i < table_target_count; ++i) targets[target_count++] = table_targets[i]; /* jump tables */
+     for (size_t i = 0; i < count; ++i) {
+         const BbInsn *in = &list[i].in;
++        const uint64_t next=list[i].off+in->length;
++        if(i+1<count && list[i+1].off!=next) {
++            const Insn key={.off=next};
++            if(bsearch(&key,list,count,sizeof(*list),insn_order)) targets[target_count++]=next;
++        }
+         const int cc = cc_of(in->mnemonic);
+         if (((cc >= 0 && cc < 16) || in->mnemonic == M(JMP)) && in->op[0].type == OP_IMM) {
+             const uint64_t t = list[i].off + (uint64_t)in->op[0].disp;
+@@ -1170,22 +1949,41 @@ static void generate(Function fn, uint64_t *stats) {
+     emit("    uint64_t r[16];\n    " RELOAD "\n");
+     emit("    int fk = FK_CPU, fz = 8, fcf = 0;\n    uint64_t fa = 0, fb = 0, fr = 0, dn = 0;\n");
+     emit("    const uint64_t entry_rsp = r[RSP];\n");
++    int has_poll = 0;
++    for (size_t i = 0; i < count; ++i) has_poll |= pure_poll_backedge(list, i);
++    if (has_poll) emit("    unsigned poll_spins = 0;\n");
+     emit("    (void)fa; (void)fb; (void)fr; (void)fz; (void)fcf; (void)entry_rsp; (void)dn;\n");
+     for (size_t i = 0; i < count; ++i) {
+         const Insn *x = &list[i];
+         if (bsearch(&x->off, targets, target_count, sizeof(*targets), by_offset)) emit("L_%" PRIx64 ": ", x->off);
++        for(size_t g=0;g<table_guard_count;++g) if(table_guards[g].offset==x->off) {
++            emit("if (r[%d] >= %" PRIu64 "ull) { " SPILL " " FLAGS_OUT
++                 " c->rip = B + 0x%" PRIx64 "ull; rc->bail(c, entry_rsp); return; } /* full-width table bound */\n",
++                 table_guards[g].reg,table_guards[g].entries,x->off);
++        }
+         if (trace_points) emit("rc->trace(0x%" PRIx64 ", r, c); ", x->off);
+         ++stats[2];
+         const long mark = ftell(out);
++        poll_backedge = pure_poll_backedge(list, i);
+         if (translate(f, x->off, &x->in, stats)) {
+             ++stats[0];
+-            continue;
+-        }
++        } else {
+         fseek(out, mark, SEEK_SET); /* what a translation wrote before it gave up */
+         /* The interpreter: state spilled, flags in cpu->flags; an unexpected next rip dispatches. */
+         emit("/* %s */ { " SPILL " " FLAGS_OUT " c->rip = B + 0x%" PRIx64 "ull; const uint64_t n = rc->step(c); " RELOAD
+              " if (n != B + 0x%" PRIx64 "ull) { dn = n; goto L_dispatch; } }\n",
+              ZydisMnemonicGetString((ZydisMnemonic)x->in.mnemonic), x->off, x->off + x->in.length);
++        }
++        poll_backedge = 0;
++        /* Sorted decoded starts can overlap (or have gaps). C source adjacency
++         * must never replace the architectural instruction-length successor. */
++        const uint64_t next=x->off+x->in.length;
++        if(!snippet_mode && next!=(i+1<count ? list[i+1].off : f.end)) {
++            const Insn key={.off=next};
++            if(bsearch(&key,list,count,sizeof(*list),insn_order))
++                emit("goto L_%" PRIx64 "; /* exact instruction successor */\n",next);
++            else emit("dn=B+0x%" PRIx64 "ull; goto L_dispatch; /* undecoded successor */\n",next);
++        }
+     }
+     if (snippet_mode) emit("    " SPILL " " FLAGS_OUT " c->rip = B + 0x%" PRIx64 "ull; return;\n", f.end);
+     emit("    dn = B + 0x%" PRIx64 "ull; /* past the end */\n", f.end);
+@@ -1207,6 +2005,7 @@ static int snippets(const char *encodings, const char *path) {
+     uint8_t *code = mmap((void *)SNIPPET_AT, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
+     if (code == MAP_FAILED) { perror("mmap"); return 1; }
+     base = SNIPPET_AT;
++    image_size = 0x4000;
+     bbcpu_add_guest_code(SNIPPET_AT, 0x4000);
+     static BbCpu warm;
+     bbcpu_run(&warm, 0);
+@@ -1329,7 +2128,7 @@ int main(int argc, char **argv) {
+          * setjmp saved that one. They gain nothing in C. */
+         size_t stubs = 0;
+         for (size_t i = 0; i < function_count;) {
+-            if (import_name(functions[i].offset)) { functions[i] = functions[--function_count]; ++stubs; }
++            if (!getenv("GOW3_AOT_INCLUDE_STUBS") && import_name(functions[i].offset)) { functions[i] = functions[--function_count]; ++stubs; }
+             else ++i;
+         }
+         if (stubs) printf("%zu import stubs: left to the translator\n", stubs);

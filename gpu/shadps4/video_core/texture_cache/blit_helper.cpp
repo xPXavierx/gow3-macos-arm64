@@ -16,6 +16,18 @@
 
 namespace VideoCore {
 
+// Metal requires the combined target's stencil attachment to match the native
+// pipeline format even when this helper writes only depth. Preserve stencil by
+// loading/storing it with stencil testing and writes disabled.
+static bool BindCombinedStencil(vk::Format format) {
+#ifdef __APPLE__
+    return format == vk::Format::eD32SfloatS8Uint || format == vk::Format::eD24UnormS8Uint ||
+           format == vk::Format::eD16UnormS8Uint;
+#else
+    return false;
+#endif
+}
+
 static vk::SampleCountFlagBits ToSampleCount(u32 num_samples) {
     switch (num_samples) {
     case 1:
@@ -68,6 +80,7 @@ void BlitHelper::ReinterpretColorAsMsDepth(u32 width, u32 height, u32 num_sample
         instance.GetDevice().createImageView(color_view_ci);
     ASSERT_MSG(color_view_result == vk::Result::eSuccess, "Failed to create image view: {}",
                vk::to_string(color_view_result));
+    const bool stencil = BindCombinedStencil(dst_pixel_format);
     const vk::ImageViewUsageCreateInfo depth_usage_ci{
         .usage = vk::ImageUsageFlagBits::eDepthStencilAttachment};
     const vk::ImageViewCreateInfo depth_view_ci = {
@@ -76,7 +89,8 @@ void BlitHelper::ReinterpretColorAsMsDepth(u32 width, u32 height, u32 num_sample
         .viewType = vk::ImageViewType::e2D,
         .format = dst_pixel_format,
         .subresourceRange{
-            .aspectMask = vk::ImageAspectFlagBits::eDepth,
+            .aspectMask = stencil ? vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil
+                                  : vk::ImageAspectFlagBits::eDepth,
             .baseMipLevel = 0U,
             .levelCount = 1U,
             .baseArrayLayer = 0U,
@@ -97,9 +111,11 @@ void BlitHelper::ReinterpretColorAsMsDepth(u32 width, u32 height, u32 num_sample
     state.height = height;
     state.num_layers = 1;
     state.depth_stencil_attachment.image_view = depth_view;
-    state.depth_stencil_attachment.image_layout = vk::ImageLayout::eDepthAttachmentOptimal;
+    state.depth_stencil_attachment.image_layout = stencil ? vk::ImageLayout::eDepthStencilAttachmentOptimal
+                                                         : vk::ImageLayout::eDepthAttachmentOptimal;
     state.depth_stencil_attachment.has_depth = true;
     state.depth_stencil_attachment.depth_clear = true;
+    state.depth_stencil_attachment.has_stencil = stencil;
     scheduler.BeginRendering(state);
 
     const auto cmdbuf = scheduler.CommandBuffer();
@@ -326,7 +342,8 @@ void BlitHelper::CreateColorToMSDepthPipeline(const MsPipelineKey& key) {
         .colorAttachmentCount = 0U,
         .pColorAttachmentFormats = nullptr,
         .depthAttachmentFormat = key.attachment_format,
-        .stencilAttachmentFormat = vk::Format::eUndefined,
+        .stencilAttachmentFormat = BindCombinedStencil(key.attachment_format) ? key.attachment_format
+                                                                           : vk::Format::eUndefined,
     };
 
     const vk::PipelineColorBlendStateCreateInfo color_blending{};

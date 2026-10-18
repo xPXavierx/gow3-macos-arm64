@@ -34,9 +34,19 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 7u; // gow3: interpolated integer fix (Pascal)
-static constexpr u32 ShaderMetaVersion = 7u; // gow3: ImageResource::needs_native
-static constexpr u32 PipelineKeyVersion = 5u; // gow3: Info layout (ImageResource::needs_native)
+static constexpr u32 ShaderBinaryVersion = 26u; // explicit rounded scalar math on native MoltenVK vertex/fragment stages
+// // gow3: interpolated integer fix (Pascal)
+// The serialized SRT walker has a different representation on ARM64.
+#if defined(ARCH_ARM64)
+static constexpr u32 ShaderMetaVersion = 0x4152000eu; // RuntimeInfo scalar math strategy
+#else
+static constexpr u32 ShaderMetaVersion = 10u; // RuntimeInfo layout includes the optional scalar math strategy
+#endif // gow3: ImageResource::needs_native
+#if defined(ARCH_ARM64)
+static constexpr u32 PipelineKeyVersion = 0x4152000cu; // independent unused depth attachment
+#else
+static constexpr u32 PipelineKeyVersion = 7u;
+#endif // gow3: Info layout (ImageResource::needs_native)
 } // namespace Serialization
 
 namespace Vulkan {
@@ -655,12 +665,6 @@ bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
     spec.Deserialize(ar);
     info.Deserialize(ar);
 
-    // Motion vertex shaders embed session-local buffer device addresses. They must be
-    // recompiled for the current allocation, never loaded from a previous process.
-    if (info.hw_stage == Shader::HwStage::Vertex && spec.runtime_info.hw.vs.motion_vectors) {
-        return false;
-    }
-
     fetch_shader_data = spec.fetch_shader_data;
     return true;
 }
@@ -880,37 +884,38 @@ bool PipelineCache::CheckCacheProfile() {
 
     Storage::DataBase::Instance().Open();
 
-    // Check if cache is compatible
+    // The profile alone cannot identify a compiler/cache generation. Mixing new shader
+    // metadata with old static pipeline layouts can pair incompatible vertex types.
+    const std::array<u32, 6> generation{0x47504332u, CurrentShaderBinaryVersion(),
+        Serialization::ShaderMetaVersion, Serialization::PipelineKeyVersion, sizeof(profile),
+        u32(AmdGpu::NoMsaa())};
+    std::vector<u8> current_data(sizeof(generation) + sizeof(profile));
+    std::memcpy(current_data.data(), generation.data(), sizeof(generation));
+    std::memcpy(current_data.data() + sizeof(generation), &profile, sizeof(profile));
     std::vector<u8> profile_data{};
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderProfile, "profile", profile_data);
     if (profile_data.empty()) {
         Storage::DataBase::Instance().FinishPreload();
 
-        profile_data.resize(sizeof(profile));
-        std::memcpy(profile_data.data(), &profile, sizeof(profile));
         Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
-                                           std::move(profile_data));
+                                           std::move(current_data));
         return false;
     }
-    if (profile_data.size() != sizeof(Shader::Profile)) {
-        LOG_WARNING(Render, "Pipeline cache profile has unexpected size ({} != {})",
-                    profile_data.size(), sizeof(Shader::Profile));
-    }
     Shader::Profile cached_profile{};
-    if (profile_data.size() == sizeof(Shader::Profile)) {
-        std::memcpy(&cached_profile, profile_data.data(), sizeof(cached_profile));
+    const bool same_generation = profile_data.size() == current_data.size() &&
+        std::memcmp(profile_data.data(), generation.data(), sizeof(generation)) == 0;
+    if (same_generation) {
+        std::memcpy(&cached_profile, profile_data.data() + sizeof(generation), sizeof(cached_profile));
     }
-    if (profile_data.size() != sizeof(Shader::Profile) || cached_profile != profile) {
+    if (!same_generation || cached_profile != profile) {
         // gow3: upstream closed the cache for the session here, so it was never rewritten
         // and every later session compiled every shader again (stutters on each new area).
         // Start a fresh cache for this build and GPU instead.
-        LOG_WARNING(Render, "Pipeline cache isn't compatible with current system: rebuilding it");
+        LOG_WARNING(Render, "Pipeline cache generation/profile changed: rebuilding it");
         Storage::DataBase::Instance().Clear();
         Storage::DataBase::Instance().FinishPreload();
-        profile_data.resize(sizeof(profile));
-        std::memcpy(profile_data.data(), &profile, sizeof(profile));
         Storage::DataBase::Instance().Save(Storage::BlobType::ShaderProfile, "profile",
-                                           std::move(profile_data));
+                                           std::move(current_data));
         return false;
     }
     return true;
@@ -1415,7 +1420,7 @@ void PersistentSrtInfo::Serialize(Serialization::Archive& ar) const {
 
     srt.Write(this, sizeof(*this));
     if (walker_func_size) {
-        srt.Write(reinterpret_cast<void*>(walker_func), walker_func_size);
+        srt.Write(const_cast<void*>(SrtWalkerCode(walker_func)), walker_func_size);
     }
 }
 
@@ -1426,6 +1431,7 @@ bool PersistentSrtInfo::Deserialize(Serialization::Archive& ar) {
 
     if (walker_func_size) {
         walker_func = RegisterWalkerCode(ar.CurrPtr(), walker_func_size);
+        if (!walker_func) return false;
         ar.Advance(walker_func_size);
     }
 

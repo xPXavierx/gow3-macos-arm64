@@ -8,6 +8,7 @@
 #include <vk_mem_alloc.h>
 #include "gow3_settings.h"
 #include "gow3_toggles.h"
+#include "video_core/renderer_vulkan/vk_framegen_inputs.h"
 #include "shader_recompiler/runtime_info.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -17,11 +18,11 @@ namespace Vulkan {
 namespace {
 
 bool CreateBuffer(const Instance& instance, vk::DeviceSize size, bool host, vk::Buffer& buffer,
-                  VmaAllocation& allocation, void** mapped, u64& address) {
+                  VmaAllocation& allocation, void** mapped) {
     const VkBufferCreateInfo buffer_ci{
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .size = size,
-        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
     };
     VmaAllocationCreateInfo alloc_ci{
         .usage = VMA_MEMORY_USAGE_AUTO,
@@ -43,18 +44,36 @@ bool CreateBuffer(const Instance& instance, vk::DeviceSize size, bool host, vk::
     if (mapped) {
         *mapped = info.pMappedData;
     }
-    address = instance.GetDevice().getBufferAddress({.buffer = buffer});
-    return address != 0;
+    return true;
 }
 
 } // namespace
+
+vk::UniqueDescriptorSetLayout ObjectMotion::CreateDescriptorLayout(const Instance& instance) {
+    const std::array<vk::DescriptorSetLayoutBinding, 2> bindings{
+        {{.binding = 0,
+          .descriptorType = vk::DescriptorType::eStorageBuffer,
+          .descriptorCount = 1,
+          .stageFlags = vk::ShaderStageFlagBits::eVertex},
+         {.binding = 1,
+          .descriptorType = vk::DescriptorType::eStorageBuffer,
+          .descriptorCount = 1,
+          .stageFlags = vk::ShaderStageFlagBits::eVertex}}};
+    return Check(instance.GetDevice().createDescriptorSetLayoutUnique(
+        {.bindingCount = 2, .pBindings = bindings.data()}));
+}
+void ObjectMotion::Bind(vk::PipelineLayout layout) {
+    scheduler.Record([layout, set = descriptor](vk::CommandBuffer cmd) {
+        cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, layout, 1, set, {});
+    });
+}
 
 ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
     : instance{instance_}, scheduler{scheduler_} {
     // Pipeline selection limits the extra attachment and vertex stores to likely
     // animated draws. A setting or environment override can still disable the path.
-    if (!Gow3Settings::Get().object_motion ||
-        Gow3Settings::Get().upscaler == Gow3Settings::UpscalerOff) {
+    if (!FrameGen::Requested() && (!Gow3Settings::Get().object_motion ||
+                                   Gow3Settings::Get().upscaler == Gow3Settings::UpscalerOff)) {
         std::puts("Object motion: off (enable in menu or GOW3_OBJECT_MOTION=1)");
         return;
     }
@@ -64,23 +83,43 @@ ObjectMotion::ObjectMotion(const Instance& instance_, Scheduler& scheduler_)
         return;
     }
     void* mapped = nullptr;
-    u64 params_address = 0, positions_address = 0;
     if (!CreateBuffer(instance, vk::DeviceSize(1 + FrameSlots * ParamsPerFrame) * 32, true,
-                      params_buffer, params_allocation, &mapped, params_address) ||
+                      params_buffer, params_allocation, &mapped) ||
         !CreateBuffer(instance, vk::DeviceSize(1 + 2 * PositionsPerFrame) * 16, false,
-                      positions_buffer, positions_allocation, nullptr, positions_address)) {
+                      positions_buffer, positions_allocation, nullptr)) {
         std::printf("Object motion: buffer creation failed, off\n");
         return;
     }
     params_mapped = static_cast<u32*>(mapped);
     std::memset(params_mapped, 0, 32);
-    Shader::MotionVectors::params_address = params_address;
-    Shader::MotionVectors::positions_address = positions_address;
+    const auto device = instance.GetDevice();
+    descriptor_layout = CreateDescriptorLayout(instance);
+    const vk::DescriptorPoolSize pool_size{vk::DescriptorType::eStorageBuffer, 2};
+    descriptor_pool = Check(device.createDescriptorPoolUnique(
+        {.maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &pool_size}));
+    const auto [result, sets] = device.allocateDescriptorSets({.descriptorPool = *descriptor_pool,
+                                                               .descriptorSetCount = 1,
+                                                               .pSetLayouts = &*descriptor_layout});
+    ASSERT(result == vk::Result::eSuccess);
+    descriptor = sets.front();
+    const std::array<vk::DescriptorBufferInfo, 2> buffers{
+        {{params_buffer, 0, VK_WHOLE_SIZE}, {positions_buffer, 0, VK_WHOLE_SIZE}}};
+    std::array<vk::WriteDescriptorSet, 2> writes;
+    for (u32 i = 0; i < 2; ++i)
+        writes[i] = {.dstSet = descriptor,
+                     .dstBinding = i,
+                     .descriptorCount = 1,
+                     .descriptorType = vk::DescriptorType::eStorageBuffer,
+                     .pBufferInfo = &buffers[i]};
+    device.updateDescriptorSets(writes, {});
+    Shader::MotionVectors::enabled = true;
     enabled = true;
-    std::printf("Object motion: on (%u vertices per frame)\n", PositionsPerFrame);
+    std::printf("Object motion: on (%u vertices per frame; explicit storage descriptors)\n",
+                PositionsPerFrame);
 }
 
 ObjectMotion::~ObjectMotion() {
+    Shader::MotionVectors::enabled = false;
     scheduler.Finish();
     const auto allocator = instance.GetAllocator();
     if (params_buffer) {
@@ -175,7 +214,7 @@ void ObjectMotion::EnsureImage(u32 width, u32 height) {
     image = VideoCore::UniqueImage(device, instance.GetAllocator());
     image.Create(vk::ImageCreateInfo{
         .imageType = vk::ImageType::e2D,
-        .format = vk::Format::eR32G32B32A32Sfloat,
+        .format = FrameGen::Requested()?vk::Format::eR16G16B16A16Sfloat:vk::Format::eR32G32B32A32Sfloat,
         .extent = {width, height, 1},
         .mipLevels = 1,
         .arrayLayers = 1,
@@ -188,7 +227,7 @@ void ObjectMotion::EnsureImage(u32 width, u32 height) {
     view = Check(device.createImageViewUnique({
         .image = vk::Image(image),
         .viewType = vk::ImageViewType::e2D,
-        .format = vk::Format::eR32G32B32A32Sfloat,
+        .format = FrameGen::Requested()?vk::Format::eR16G16B16A16Sfloat:vk::Format::eR32G32B32A32Sfloat,
         .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
     }));
     image_width = width;

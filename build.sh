@@ -5,6 +5,18 @@ mkdir -p out
 # Windows: MSYS2 CLANG64 (packages in packaging/windows/README.md). The GPU library is static
 # there and CMake links gow3-probe.exe as well; no PGO (GCC-only flags), LTO off by default.
 case $(uname -s) in
+Darwin)
+    if [[ ${1:-} == --host-tests ]]; then
+        cmake -S packaging/macos -B out/macos-host -DCMAKE_BUILD_TYPE=Debug "${@:2}"
+        cmake --build out/macos-host --parallel
+        ctest --test-dir out/macos-host --output-on-failure
+        exit 0
+    fi
+    echo 'The full game runtime is not ported to macOS (x86-64 guest execution, memory and GPU blockers).' >&2
+    echo 'Build native host components only: bash build.sh --host-tests -DCMAKE_PREFIX_PATH=/opt/homebrew' >&2
+    echo 'See docs/macos-arm64.md for scope, dependencies and remaining work.' >&2
+    exit 1
+    ;;
 MINGW*|MSYS*)
     # shellcheck source=msys2-env.sh
     source ./msys2-env.sh

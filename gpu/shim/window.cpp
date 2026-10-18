@@ -1,8 +1,11 @@
-// gow3: SDL3 window for the Vulkan swapchain (X11 or Wayland).
+// gow3: SDL3 window for the Vulkan swapchain (Cocoa, Windows, X11 or Wayland).
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
+#ifdef __APPLE__
+#include <SDL3/SDL_metal.h>
+#endif
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "sdl_window.h"
@@ -13,6 +16,11 @@
 namespace Frontend {
 
 WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}, height{height_} {
+#ifdef __APPLE__
+    // Game Mode requires the native Cocoa fullscreen Space, not an exclusive
+    // display-mode change or a desktop-sized borderless window.
+    SDL_SetHint(SDL_HINT_VIDEO_MAC_FULLSCREEN_SPACES, "1");
+#endif
     // Gamepads are sampled by runtime_pad.c; their events are pumped here with the window's.
     if (!SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         UNREACHABLE_MSG("Failed to initialize SDL video: {}", SDL_GetError());
@@ -25,6 +33,14 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height_);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
     SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_VULKAN_BOOLEAN, true);
+#ifdef __APPLE__
+    // A logical 1728-pixel Cocoa window otherwise gets a 1728-pixel drawable,
+    // even when it occupies twice as many Retina display pixels. Use native
+    // density by default; GOW3_RETINA=0 retains the old reference drawable.
+    const char* retina = std::getenv("GOW3_RETINA");
+    SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN,
+        !retina || retina[0]!='0');
+#endif
     base_title = title;
     window = SDL_CreateWindowWithProperties(props);
     SDL_DestroyProperties(props);
@@ -53,14 +69,29 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
         window_info.type = WindowSystemType::Wayland;
         window_info.display_connection = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WAYLAND_DISPLAY_POINTER, nullptr);
         window_info.render_surface = SDL_GetPointerProperty(wp, SDL_PROP_WINDOW_WAYLAND_SURFACE_POINTER, nullptr);
+#ifdef __APPLE__
+    } else if (driver && !std::strcmp(driver,"cocoa")) {
+        window_info.type=WindowSystemType::Metal;
+        metal_view=SDL_Metal_CreateView(window);
+        ASSERT_MSG(metal_view,"Cannot create Metal view: {}",SDL_GetError());
+        window_info.render_surface=SDL_Metal_GetLayer(metal_view);
+#endif
     } else {
         UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
     }
+    // Native macOS fullscreen at every graphical startup enables automatic
+    // Game Mode eligibility. The explicit zero is useful for windowed testing.
+#ifdef __APPLE__
+    const char* fullscreen = std::getenv("GOW3_FULLSCREEN");
+    Gow3Settings::Get().display_mode = fullscreen && fullscreen[0] == '0'
+        ? Gow3Graphics::Windowed : Gow3Graphics::Borderless;
+#else
     // gow3: GOW3_FULLSCREEN=1 (older launchers) still asks for fullscreen.
     if (const char* fullscreen = std::getenv("GOW3_FULLSCREEN"); fullscreen && fullscreen[0] == '1' &&
         Gow3Settings::Get().display_mode == Gow3Graphics::Windowed) {
         Gow3Settings::Get().display_mode = Gow3Graphics::Borderless;
     }
+#endif
     ApplyDisplayMode(Gow3Settings::Get().display_mode);
     // gow3: the game has no mouse; the in-game menu draws its own cursor (Gow3Overlay::SetOpen).
     SDL_HideCursor();
@@ -68,6 +99,10 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     SDL_GetWindowSizeInPixels(window, &w, &h);
     width = w;
     height = h;
+    int logical_w=0,logical_h=0;
+    SDL_GetWindowSize(window,&logical_w,&logical_h);
+    std::printf("Display pixels: logical=%dx%d drawable=%dx%d density=%.2f\n",
+        logical_w,logical_h,w,h,SDL_GetWindowPixelDensity(window));
     LOG_INFO(Frontend, "Window {}x{} on {}", w, h, driver);
 }
 
@@ -83,13 +118,20 @@ void WindowSDL::ApplyDisplayMode(int mode) {
         if (!SDL_SetWindowFullscreenMode(window, exclusive ? desktop : nullptr)) {
             LOG_WARNING(Frontend, "Fullscreen mode: {}", SDL_GetError());
         }
-        SDL_SetWindowFullscreen(window, true);
+        if (!SDL_SetWindowFullscreen(window, true)) {
+            LOG_WARNING(Frontend, "Fullscreen entry: {}", SDL_GetError());
+        }
     }
     SDL_SyncWindow(window);
     std::printf("Window: %s\n", Gow3Graphics::DisplayModeNames[mode]);
+    std::printf("Window fullscreen active: %s\n",
+        (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) ? "yes" : "no");
 }
 
 WindowSDL::~WindowSDL() {
+#ifdef __APPLE__
+    if (metal_view) SDL_Metal_DestroyView(metal_view);
+#endif
     SDL_DestroyWindow(window);
 }
 
@@ -115,6 +157,7 @@ void WindowSDL::UpdateTextTitle() {
 }
 
 bool WindowSDL::PollEvents() {
+    Gow3Overlay::PollTestChoice();
     {
         std::scoped_lock lock{text_mutex};
         if (text_requested) { // SDL text input must be toggled from the window thread

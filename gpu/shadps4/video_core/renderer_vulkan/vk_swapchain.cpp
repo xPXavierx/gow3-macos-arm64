@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <cmath>
 #include <limits>
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -40,6 +43,9 @@ void Swapchain::Create(u32 width_, u32 height_) {
     needs_recreation = false;
 
     Destroy();
+
+    timing_generated.clear();timing_intervals.clear();
+    timing_start=timing_last=timing_real=timing_extra=0;
 
     SetSurfaceProperties();
 
@@ -129,8 +135,12 @@ bool Swapchain::AcquireNextImage() {
     return !needs_recreation;
 }
 
-bool Swapchain::Present() {
+bool Swapchain::Present(bool generated) {
+    const vk::PresentTimeGOOGLE time{.presentID=++timing_id,.desiredPresentTime=0};
+    const vk::PresentTimesInfoGOOGLE times{.swapchainCount=1,.pTimes=&time};
+    if(instance.HasDisplayTiming())timing_generated[time.presentID]=generated;
     const vk::PresentInfoKHR present_info = {
+        .pNext=instance.HasDisplayTiming()?&times:nullptr,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores = &present_ready[image_index],
         .swapchainCount = 1,
@@ -139,6 +149,34 @@ bool Swapchain::Present() {
     };
 
     auto result = instance.GetPresentQueue().presentKHR(present_info);
+    if(instance.HasDisplayTiming()) {
+        const auto [status,past]=instance.GetDevice().getPastPresentationTimingGOOGLE(swapchain);
+        if(status==vk::Result::eSuccess)for(const auto& p:past){
+            const auto found=timing_generated.find(p.presentID);if(found==timing_generated.end())continue;
+            // Do not count a missing or repeated timestamp as an extra displayed image.
+            if(!p.actualPresentTime || (timing_last && p.actualPresentTime<=timing_last)){
+                std::printf("Display timing: skipped non-distinct timestamp for present %u\n",p.presentID);
+                timing_generated.erase(found);continue;
+            }
+            if(!timing_start)timing_start=p.actualPresentTime;
+            if(found->second)++timing_extra;else ++timing_real;
+            if(timing_last && p.actualPresentTime>timing_last)timing_intervals.push_back(p.actualPresentTime-timing_last);
+            timing_last=p.actualPresentTime;timing_generated.erase(found);
+            if(p.actualPresentTime>timing_start+5000000000ull){
+                const double seconds=double(p.actualPresentTime-timing_start)*1e-9;
+                u64 sum=0;for(auto v:timing_intervals)sum+=v;
+                auto sorted=timing_intervals;std::sort(sorted.begin(),sorted.end());
+                const double mean=sorted.empty()?0:double(sum)/sorted.size();double variance=0;
+                for(auto v:sorted)variance+=(v-mean)*(v-mean);
+                if(!sorted.empty())std::printf("Display intervals: median=%.3f p95=%.3f stddev=%.3f ms; actual presentation\n",
+                    sorted[sorted.size()/2]*1e-6,sorted[sorted.size()*95/100]*1e-6,std::sqrt(variance/sorted.size())*1e-6);
+                std::printf("Display timing: real=%.3f generated=%.3f total=%.3f FPS; average_interval=%.3f ms samples=%zu (actualPresentTime)\n",
+                    timing_real/seconds,timing_extra/seconds,(timing_real+timing_extra)/seconds,timing_intervals.empty()?0:double(sum)/timing_intervals.size()*1e-6,timing_intervals.size());
+                timing_start=p.actualPresentTime;timing_real=timing_extra=0;timing_intervals.clear();
+            }
+        }
+        if(timing_generated.size()>512)timing_generated.clear();
+    }
     if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eSuboptimalKHR) {
         needs_recreation = true;
     } else {
@@ -204,6 +242,9 @@ void Swapchain::FindPresentMode() {
     // driver has it, else Immediate (tearing allowed), else Fifo.
     vsync = Gow3Settings::Get().vsync;
     const auto has = [&](vk::PresentModeKHR mode) { return std::ranges::find(modes, mode) != modes.cend(); };
+    std::printf("Swapchain: supported present modes:");
+    for (auto mode : modes) std::printf(" %s", vk::to_string(mode).c_str());
+    std::printf("\n");
     present_mode = vsync ? vk::PresentModeKHR::eFifo
                    : has(vk::PresentModeKHR::eMailbox) ? vk::PresentModeKHR::eMailbox
                    : has(vk::PresentModeKHR::eImmediate) ? vk::PresentModeKHR::eImmediate
@@ -242,6 +283,17 @@ void Swapchain::SetSurfaceProperties() {
     if (capabilities.maxImageCount > 0) {
         image_count = std::min(image_count, capabilities.maxImageCount);
     }
+#ifdef __APPLE__
+    // Bound FIFO presentation latency independently of the game's render-frame pool.
+    // Keep the original allocation unless two drawable slots are explicitly selected.
+    if (const char* requested = std::getenv("GOW3_SWAPCHAIN_IMAGES");
+        requested && std::strcmp(requested, "2") == 0 && capabilities.minImageCount <= 2 &&
+        (!capabilities.maxImageCount || capabilities.maxImageCount >= 2)) {
+        image_count = 2;
+    }
+    std::printf("Swapchain: %u images (surface minimum %u)\n", image_count,
+                capabilities.minImageCount);
+#endif
 
     // Prefer identity transform if possible
     transform = vk::SurfaceTransformFlagBitsKHR::eIdentity;

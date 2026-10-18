@@ -30,6 +30,7 @@ constexpr u64 LARGE_IDLE_FRAMES = 3000;
 constexpr u64 PREWARM_BLOCKS = 8;
 constexpr u64 LARGE_MIN_GRANULARITY = 64_KB;
 constexpr u64 BLOCK_SIZE = 16_MB;
+constexpr auto STAGING_USAGE = VideoCore::AllFlags & ~vk::BufferUsageFlagBits::eShaderDeviceAddress;
 
 u64 RoundAllocationSize(u64 size) {
     const u64 step = std::max(std::bit_floor(size) / 4, LARGE_MIN_GRANULARITY);
@@ -46,7 +47,7 @@ StagingBufferPool::StagingBufferPool(const Instance& instance_, Scheduler& sched
     for (u64 i = 0; i < PREWARM_BLOCKS; ++i) {
         auto& block = ring.blocks.emplace_back(Block{
             .buffer = std::make_unique<VideoCore::StreamBuffer>(
-                instance, scheduler, MemoryType::HostUncached, BLOCK_SIZE),
+                instance, scheduler, MemoryType::HostUncached, BLOCK_SIZE, STAGING_USAGE),
             .last_used_frame = frame,
         });
         if (!block.buffer->mapped_data.empty()) {
@@ -84,7 +85,7 @@ StagingBufferRef StagingBufferPool::RequestFromRing(Ring& ring, u64 size, u64 al
     if (!best) {
         best = &ring.blocks.emplace_back(Block{
             .buffer =
-                std::make_unique<VideoCore::StreamBuffer>(instance, scheduler, type, BLOCK_SIZE),
+                std::make_unique<VideoCore::StreamBuffer>(instance, scheduler, type, BLOCK_SIZE, STAGING_USAGE),
             .last_used_frame = frame,
         });
         ring.current = ring.blocks.size() - 1;
@@ -123,9 +124,14 @@ StagingBufferRef StagingBufferPool::RequestLarge(u64 size, MemoryType type, bool
     }
 
     if (!best) {
+        // Staging is accessed through explicit storage descriptors
+        // and transfer commands, never physical addresses. On MoltenVK, advertising
+        // a BDA makes every physical-pointer draw reference this allocation, even
+        // after its explicit staging tick retired; idle trimming can then free it
+        // while such a draw is still pending. Keep it out of that residency set.
         best = &cache.emplace_back(LargeBuffer{
             .buffer = std::make_unique<VideoCore::Buffer>(instance, 0, RoundAllocationSize(size),
-                                                          type, "StagingBufferPool:Dedicated"),
+                                                          type, "StagingBufferPool:Dedicated",STAGING_USAGE),
             .tick = 0,
             .last_used_frame = frame,
             .held = false,

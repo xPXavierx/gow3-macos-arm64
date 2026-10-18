@@ -55,6 +55,10 @@ static void sleep_until(uint64_t deadline) {
 #ifdef _WIN32
     /* winpthreads' clock_nanosleep only takes CLOCK_REALTIME (EINVAL otherwise). */
     for (uint64_t now=now_ns(); now<deadline; now=now_ns()) compat_sleep_ns(deadline-now);
+#elif defined(__APPLE__)
+    /* Darwin has no clock_nanosleep. Recheck the monotonic deadline after each
+     * relative SDL sleep, including an early wakeup. */
+    for (uint64_t now=now_ns(); now<deadline; now=now_ns()) SDL_DelayNS(deadline-now);
 #else
     struct timespec t={(time_t)(deadline/1000000000u),(long)(deadline%1000000000u)};
     while (clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&t,NULL)) {}

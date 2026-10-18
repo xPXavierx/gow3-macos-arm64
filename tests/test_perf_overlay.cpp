@@ -39,6 +39,11 @@ int main() {
            "238 FPS\n4.2 ms\nFSR 3.1\nRTX 4070 87%\nCPU 34%\nRAM 6.1 / 31.9 GB\nVRAM 5.4 / 12.0 GB");
     assert(P::Format(s, P::Cpu | P::Vram, true) == "CPU 34%   VRAM 5.4 / 12.0 GB");
     assert(P::Format(s, 0, true).empty());
+    s.gpu_percent_is_system=true;
+    s.cpu_busiest_thread_percent=91;
+    s.unified_memory=true;
+    assert(P::Format(s,P::Gpu|P::Cpu|P::Vram,false)==
+           "RTX 4070 87% (system)\nCPU 34% | busiest thread 91%\nGPU shared 5.4 / 12.0 GB");
 
     P::Sample unknown;
     unknown.upscaler = "";
@@ -54,7 +59,11 @@ int main() {
                "overlay_cpu=1\noverlay_ram=0\noverlay_vram=1\noverlay_scale=400\noverlay_corner=2\n"
                "overlay_opacity=-5\noverlay_layout=1\nmenu_tab=3\n";
     }
+#ifdef _WIN32
     _putenv_s("GOW3_CONFIG", path);
+#else
+    setenv("GOW3_CONFIG",path,1);
+#endif
     auto& v = Gow3Settings::Get();
     assert(v.overlay_items == P::DefaultItems && v.overlay_scale == 100 && v.overlay_corner == 1);
     Gow3Settings::Load();

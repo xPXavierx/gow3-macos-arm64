@@ -14,6 +14,7 @@
 #include "video_core/renderer_vulkan/vk_blend_rewrite.h"
 #include "video_core/renderer_vulkan/vk_graphics_pipeline.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
+#include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_lighting_test.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "common/elf_info.h"
@@ -64,10 +65,11 @@ GraphicsPipeline::GraphicsPipeline(
         .size = sizeof(Shader::PushData),
     };
 
-    const vk::DescriptorSetLayout set_layout = *desc_layout;
+    std::array<vk::DescriptorSetLayout,2> set_layouts{*desc_layout,{}};
+    if(key.motion_vectors){motion_layout=ObjectMotion::CreateDescriptorLayout(instance);set_layouts[1]=*motion_layout;}
     const vk::PipelineLayoutCreateInfo layout_info = {
-        .setLayoutCount = 1U,
-        .pSetLayouts = &set_layout,
+        .setLayoutCount = key.motion_vectors?2U:1U,
+        .pSetLayouts = set_layouts.data(),
         .pushConstantRangeCount = 1,
         .pPushConstantRanges = &push_constants,
     };
@@ -106,6 +108,18 @@ GraphicsPipeline::GraphicsPipeline(
 
     const bool is_rect_list = key.prim_type == AmdGpu::PrimitiveType::RectList;
     const bool is_quad_list = key.prim_type == AmdGpu::PrimitiveType::QuadList;
+    // Auxiliary tessellation must not read every declared PS input: unused PS
+    // locations may have no VS export. Copy only attributes the fragment shader uses.
+    auto aux_fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
+    if (!preloading && (is_rect_list || is_quad_list)) {
+        const auto* fragment = infos[u32(Shader::SwStage::Fragment)];
+        for (u32 i = 0; i < aux_fs_info.num_inputs; ++i) {
+            if (!fragment || !fragment->loads.GetAny(Shader::IR::Attribute::Param0 + i)) {
+                aux_fs_info.inputs[i].is_default = true;
+                aux_fs_info.inputs[i].is_flat = false;
+            }
+        }
+    }
     const vk::PipelineTessellationStateCreateInfo tessellation_state = {
         .patchControlPoints = is_rect_list ? 3U : (is_quad_list ? 4U : key.patch_control_points),
     };
@@ -213,8 +227,7 @@ GraphicsPipeline::GraphicsPipeline(
     } else if (is_rect_list || is_quad_list) {
         const auto type = is_quad_list ? AuxShaderType::QuadListTCS : AuxShaderType::RectListTCS;
         if (!preloading) {
-            const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
-            sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, fs_info);
+            sdata.tcs = Shader::Backend::SPIRV::EmitAuxilaryTessShader(type, aux_fs_info);
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationControl,
@@ -231,9 +244,8 @@ GraphicsPipeline::GraphicsPipeline(
         });
     } else if (is_rect_list || is_quad_list) {
         if (!preloading) {
-            const auto& fs_info = runtime_infos[u32(Shader::SwStage::Fragment)].hw.fs;
             sdata.tes = Shader::Backend::SPIRV::EmitAuxilaryTessShader(
-                AuxShaderType::PassthroughTES, fs_info);
+                AuxShaderType::PassthroughTES, aux_fs_info);
         }
         shader_stages.emplace_back(vk::PipelineShaderStageCreateInfo{
             .stage = vk::ShaderStageFlagBits::eTessellationEvaluation,
@@ -273,6 +285,13 @@ GraphicsPipeline::GraphicsPipeline(
                                     vk::FormatFeatureFlagBits2::eDepthStencilAttachment);
     std::array<vk::Format, Shader::IR::NumRenderTargets> color_formats;
     for (s32 i = 0; i < key.num_color_attachments; ++i) {
+        // Motion uses slot 7, leaving holes after the game's last color output.
+        // Bound guest registers can still describe those holes; their formats must
+        // be undefined to match the null attachments in the rendering instance.
+        if ((key.mrt_mask & (1u << i)) == 0) {
+            color_formats[i] = vk::Format::eUndefined;
+            continue;
+        }
         const auto& col_buf = key.color_buffers[i];
         const auto format = LiverpoolToVK::SurfaceFormat(col_buf.data_format, col_buf.num_format);
         const auto color_format =
@@ -302,7 +321,7 @@ GraphicsPipeline::GraphicsPipeline(
         .pNext = instance.IsMixedDepthSamplesSupported() ? &mixed_samples : nullptr,
         .colorAttachmentCount = key.num_color_attachments,
         .pColorAttachmentFormats = color_formats.data(),
-        .depthAttachmentFormat = key.z_format != AmdGpu::DepthBuffer::ZFormat::Invalid
+        .depthAttachmentFormat = !key.omit_depth_attachment && key.z_format != AmdGpu::DepthBuffer::ZFormat::Invalid
                                      ? depth_format
                                      : vk::Format::eUndefined,
         .stencilAttachmentFormat = key.stencil_format != AmdGpu::DepthBuffer::StencilFormat::Invalid
@@ -533,6 +552,11 @@ void GraphicsPipeline::BuildDescSetLayout(bool preloading) {
                 .descriptorCount = 1,
                 .stageFlags = stage_bit,
             });
+            if (buffer.uniform_span) {
+                bindings.push_back({.binding = binding++,
+                    .descriptorType = vk::DescriptorType::eUniformBuffer,
+                    .descriptorCount = 1, .stageFlags = stage_bit});
+            }
         }
         for (const auto& image : stage->images) {
             const u32 num_bindings = image.NumBindings(*stage);

@@ -275,6 +275,7 @@ bool Instance::CreateDevice() {
         vk::PhysicalDeviceShaderMixedFloatDotProductFeaturesVALVE,
         vk::PhysicalDevicePipelineBinaryFeaturesKHR,
         vk::PhysicalDeviceMaintenance5FeaturesKHR,
+        vk::PhysicalDevicePortabilitySubsetFeaturesKHR,
         vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR>();
     features = feature_chain.get().features;
 
@@ -321,12 +322,28 @@ bool Instance::CreateDevice() {
                "Required Vulkan extension unavailable: {}", VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
 
     const auto robustness2_features = feature_chain.get<vk::PhysicalDeviceRobustness2FeaturesEXT>();
-    ASSERT_MSG(robustness2_features.robustBufferAccess2,
-               "Required Vulkan feature unavailable: robustBufferAccess2");
+    robust_buffer_access2 = robustness2_features.robustBufferAccess2;
+    null_descriptor = robustness2_features.nullDescriptor;
+    ASSERT_MSG(robust_buffer_access2 || features.robustBufferAccess,
+               "Buffer robustness is required (native or software bounds with core robustness)");
     ASSERT_MSG(robustness2_features.robustImageAccess2,
                "Required Vulkan feature unavailable: robustImageAccess2");
-    ASSERT_MSG(robustness2_features.nullDescriptor,
-               "Required Vulkan feature unavailable: nullDescriptor");
+    // Enabling the extension alone leaves its optional features disabled. Image views
+    // and fragment shaders use swizzles and interpolation on MoltenVK, so enable the
+    // supported subset features explicitly rather than relying on driver tolerance.
+    const bool portability_subset = std::ranges::find(available_extensions,
+        VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME) != available_extensions.end() &&
+        add_extension(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
+    sampler_lod_bias_supported = !portability_subset ||
+        feature_chain.get<vk::PhysicalDevicePortabilitySubsetFeaturesKHR>().samplerMipLodBias;
+
+    // Native MetalFX imports shared Metal timeline events. Leave the extension
+    // disabled for the normal renderer and on non-Apple Vulkan implementations.
+#ifdef __APPLE__
+    const auto enabled=[](const char* name){const char* v=std::getenv(name);return v && v[0]=='1';};
+    if (std::getenv("GOW3_METALFX_MODE") || enabled("GOW3_FRAMEGEN")) add_extension("VK_EXT_metal_objects");
+    if(enabled("GOW3_FRAMEGEN") || enabled("GOW3_PRESENT_TIMING"))display_timing=add_extension("VK_GOOGLE_display_timing");
+#endif
 
     // Optional
     maintenance_5 = add_extension(VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
@@ -478,7 +495,8 @@ bool Instance::CreateDevice() {
     }
 
     u32 sparse_queue_family_index = queue_family_index;
-    if (!(family_properties[queue_family_index].queueFlags & vk::QueueFlagBits::eSparseBinding)) {
+    if (IsSparseBufferSupported() &&
+        !(family_properties[queue_family_index].queueFlags & vk::QueueFlagBits::eSparseBinding)) {
         const auto sparse_family = std::find_if(
             family_properties.begin(), family_properties.end(), [](const auto& family) {
                 return family.queueCount && (family.queueFlags & vk::QueueFlagBits::eSparseBinding);
@@ -584,6 +602,7 @@ bool Instance::CreateDevice() {
             .maintenance4 = vk13_features.maintenance4,
         },
         // Extensions
+        feature_chain.get<vk::PhysicalDevicePortabilitySubsetFeaturesKHR>(),
         vk::PhysicalDeviceCustomBorderColorFeaturesEXT{
             .customBorderColors = true,
             .customBorderColorWithoutFormat = true,
@@ -599,9 +618,9 @@ bool Instance::CreateDevice() {
             .depthClipEnable = true,
         },
         vk::PhysicalDeviceRobustness2FeaturesEXT{
-            .robustBufferAccess2 = true,
+            .robustBufferAccess2 = robust_buffer_access2,
             .robustImageAccess2 = true,
-            .nullDescriptor = true,
+            .nullDescriptor = null_descriptor,
         },
         vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT{
             .vertexInputDynamicState = true,
@@ -673,6 +692,9 @@ bool Instance::CreateDevice() {
             .pipelineExecutableInfo = pipeline_executable_features.pipelineExecutableInfo,
         },
     };
+    if (!portability_subset) {
+        device_chain.unlink<vk::PhysicalDevicePortabilitySubsetFeaturesKHR>();
+    }
     if (!pipeline_executable_properties) {
         device_chain.unlink<vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR>();
     }

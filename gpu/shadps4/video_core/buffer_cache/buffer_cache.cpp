@@ -60,6 +60,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
       stream_buffer{instance, scheduler, MemoryType::Stream, STREAM_BUFFER_SIZE},
       gds_buffer{instance, 0, GDS_BUFFER_SIZE, MemoryType::Stream, "GDS Buffer"},
       memory_semaphore{instance} {
+    if (!instance.IsSparseBufferSupported()) arena_page_bits = MIN_ARENA_PAGE_BITS;
     while (arena_page_bits > MIN_ARENA_PAGE_BITS &&
            (u64{2} << arena_page_bits) > instance.GetMaxBufferSize()) {
         --arena_page_bits;
@@ -71,8 +72,9 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
                  arena_page_size >> 20, instance.GetMaxBufferSize() >> 20);
     }
     const vk::BufferCreateInfo probe_ci = {
-        .flags =
-            vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency,
+        .flags = instance.IsSparseBufferSupported()
+                     ? vk::BufferCreateFlagBits::eSparseBinding | vk::BufferCreateFlagBits::eSparseResidency
+                     : vk::BufferCreateFlags{},
         .size = arena_page_size,
         .usage = ARENA_USAGE,
         .sharingMode = vk::SharingMode::eExclusive,
@@ -82,7 +84,7 @@ BufferCache::BufferCache(const Vulkan::Instance& instance_, Vulkan::Scheduler& s
     };
     const auto device = instance.GetDevice();
     const auto reqs = device.getBufferMemoryRequirements(req_info).memoryRequirements;
-    block_size = Common::AlignUp(std::max<u64>(reqs.alignment, MIN_BLOCK_SIZE), reqs.alignment);
+    block_size = Common::AlignUp(std::max<u64>(reqs.alignment, instance.IsSparseBufferSupported() ? MIN_BLOCK_SIZE : 64_KB), reqs.alignment);
     ASSERT_MSG(std::popcount(block_size) == 1, "Sparse block size {} is not a power of 2",
                block_size);
     block_shift = std::bit_width(block_size) - 1;
@@ -404,6 +406,28 @@ void BufferCache::SynchronizeDmaBuffers() {
 }
 
 const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
+    if (!instance.IsSparseBufferSupported()) {
+        u64 start_page = first_block >> blocks_per_arena_page_shift;
+        u64 end_page = (last_block >> blocks_per_arena_page_shift) + 1;
+        const Buffer* existing = address_space[start_page];
+        if (existing && existing->cpu_addr <= (first_block << block_shift) &&
+            existing->cpu_addr + existing->size_bytes >= ((last_block + 1) << block_shift)) {
+            return existing;
+        }
+        // Sparse arenas can alias the same physical pages. Ordinary buffers cannot:
+        // copying into a larger arena would leave already prepared descriptors pointing
+        // at a stale copy. Stop instead of silently breaking read/write aliasing.
+        for (u64 page = start_page; page < end_page; ++page) {
+            ASSERT_MSG(!address_space[page],
+                       "MoltenVK: overlapping non-sparse arenas require descriptor rebinding");
+        }
+        const u64 start = start_page << arena_page_bits;
+        const u64 size = (end_page - start_page) << arena_page_bits;
+        ASSERT_MSG(size <= instance.GetMaxBufferSize(), "Non-sparse arena exceeds driver buffer limit");
+        auto* arena = &arenas.emplace_back(instance, start, size, MemoryType::DeviceLocal);
+        for (u64 page = start_page; page < end_page; ++page) address_space[page] = arena;
+        return arena;
+    }
     const u64 first_page = first_block >> blocks_per_arena_page_shift;
     const u64 last_page = last_block >> blocks_per_arena_page_shift;
     ASSERT_MSG(last_page - first_page <= 1,
@@ -457,6 +481,18 @@ const Buffer* BufferCache::GetArena(u64 first_block, u64 last_block) {
     return new_arena;
 }
 
+void BufferCache::UpdateArenaAddresses(const Buffer* arena, u64 start, u64 end) {
+    const u64 size = (end - start) * sizeof(vk::DeviceAddress);
+    const auto staging = staging_pool.Request(size, MemoryType::HostUncached);
+    auto* addresses = reinterpret_cast<vk::DeviceAddress*>(staging.mapped);
+    for (u64 block = start; block < end; ++block) {
+        *addresses++ = arena->BufferDeviceAddress() + (block << block_shift) - arena->cpu_addr;
+    }
+    staging.Flush();
+    const vk::BufferCopy copy{staging.offset, start * sizeof(vk::DeviceAddress), size};
+    runtime.CopyBuffer(staging.buffer, bda_pagetable_buffer.get(), std::span{&copy, 1});
+}
+
 void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_block) {
     u32 resident_blocks{};
     IntervalList bind_ranges;
@@ -466,6 +502,17 @@ void BufferCache::EnsureResident(const Buffer* arena, u64 first_block, u64 last_
     });
 
     if (bind_ranges.Empty()) {
+        return;
+    }
+    if (!instance.IsSparseBufferSupported()) {
+        for (const auto& range : bind_ranges) {
+            Backing backing;
+            backing.start = range.start;
+            backing.end = range.end;
+            backing.offset = range.start;
+            resident_ranges.Add(backing);
+            UpdateArenaAddresses(arena, range.start, range.end);
+        }
         return;
     }
     Gow3Stats::Timer timer{Gow3Stats::t_resident};

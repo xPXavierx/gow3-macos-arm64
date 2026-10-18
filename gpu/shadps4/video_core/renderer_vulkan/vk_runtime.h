@@ -90,6 +90,7 @@ public:
                     const vk::ClearValue& clear_value);
 
     void SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool copy_backing = true);
+    void ReallocateColorBacking(VideoCore::Image* image, bool requires_storage, bool compact = false);
 
     void AccessBuffer(const VideoCore::Buffer* handle, u64 offset, u64 size,
                       vk::PipelineStageFlags2 src_stage, vk::AccessFlags2 src_access);

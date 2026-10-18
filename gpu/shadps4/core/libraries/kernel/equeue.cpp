@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <thread>
 #include <magic_enum/magic_enum.hpp>
 
@@ -17,6 +19,11 @@
 #include "core/libraries/libs.h"
 
 namespace Libraries::Kernel {
+
+static bool TraceEqueues() {
+    static const bool enabled = std::getenv("GOW3_TRACE_EQUEUES") != nullptr;
+    return enabled;
+}
 
 extern boost::asio::io_context io_context;
 extern void KernelSignalRequest();
@@ -52,6 +59,7 @@ bool EqueueInternal::AddEvent(EqueueEvent& event) {
     // Save id and filter before event is moved into m_events.
     const u64 id = event.event.ident;
     const auto filter = event.event.filter;
+    if (TraceEqueues()) std::fprintf(stderr, "Equeue add: %s id=%llu filter=%d\n", m_name.c_str(), (unsigned long long)id, int(filter));
 
     {
         std::scoped_lock lock{m_mutex};
@@ -225,6 +233,7 @@ bool EqueueInternal::TriggerEvent(u64 ident, s16 filter, void* trigger_data) {
             }
         }
     }
+    if (TraceEqueues()) std::fprintf(stderr, "Equeue trigger: %s id=%llu filter=%d found=%d\n", m_name.c_str(), (unsigned long long)ident, int(filter), has_found);
     m_cond.notify_one();
     return has_found;
 }
@@ -479,7 +488,9 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev,
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
+    if (TraceEqueues()) std::fprintf(stderr, "Equeue wait: %s\n", equeue->GetName().data());
     *out = equeue->WaitForEvents(ev, num, timo);
+    if (TraceEqueues()) std::fprintf(stderr, "Equeue returned: %s count=%d\n", equeue->GetName().data(), *out);
 
     if (*out == 0) {
         return ORBIS_KERNEL_ERROR_ETIMEDOUT;

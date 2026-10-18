@@ -12,6 +12,15 @@
 #include <vector>
 
 namespace Gow3Graphics {
+enum SpatialAa : int { AaOff=0, AaSmaa, AaFxaa, AaFxaaStrong, SpatialAaCount };
+inline constexpr std::array<std::string_view, SpatialAaCount> SpatialAaKeys = {
+    "off", "smaa", "fxaa", "fxaa_strong"};
+inline constexpr std::array<const char*, SpatialAaCount> SpatialAaNames = {
+    "Off", "SMAA 1x High", "FXAA Quality", "FXAA Strong"};
+inline int ParseSpatialAa(std::string_view text) {
+    for(int i=0;i<SpatialAaCount;++i)if(SpatialAaKeys[i]==text)return i;
+    return AaOff;
+}
 
 enum DisplayMode : int { Windowed = 0, Borderless = 1, Fullscreen = 2, DisplayModeCount };
 inline constexpr std::array<std::string_view, DisplayModeCount> DisplayModeKeys = {

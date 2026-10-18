@@ -72,7 +72,7 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
                          Bindings& binding_)
     : Sirit::Module(profile_.supported_spirv), info{info_}, runtime_info{runtime_info_},
       profile{profile_}, hw_stage{info.hw_stage}, sw_stage{info.sw_stage}, binding{binding_} {
-    if (info.uses_dma || VertexMotion()) {
+    if (info.uses_dma) {
         SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
     } else {
         SetMemoryModel(spv::AddressingModel::Logical, spv::MemoryModel::GLSL450);
@@ -84,6 +84,11 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineInterfaces();
     DefineSharedMemory();
     DefineBuffers();
+    if(VertexMotion()){
+        motion_params=DefineBuffer(false,false,2,BufferType::Guest,U32[1],1,0).id;
+        motion_positions=DefineBuffer(true,false,2,BufferType::Guest,U32[1],1,1).id;
+        Name(motion_params,"motion_params");Name(motion_positions,"motion_positions");
+    }
     DefineImagesAndSamplers();
     DefineFunctions();
 }
@@ -376,6 +381,32 @@ void EmitContext::DefineInputs() {
             sample_mask_in = DefineVariable(TypeArray(U32[1], u32_one_value),
                                             spv::BuiltIn::SampleMask, spv::StorageClass::Input);
         }
+        if (profile.needs_single_barycentric_mode) {
+            ASSERT_MSG(!info.loads.GetAny(IR::Attribute::BaryCoordSmoothCentroid) &&
+                       !info.loads.GetAny(IR::Attribute::BaryCoordSmoothSample) &&
+                       !info.loads.GetAny(IR::Attribute::BaryCoordNoPerspCentroid) &&
+                       !info.loads.GetAny(IR::Attribute::BaryCoordNoPerspSample),
+                       "Metal barycentric centroid/sample evaluation is not implemented");
+        }
+        if (profile.needs_single_barycentric_mode &&
+            (info.loads.GetAny(IR::Attribute::BaryCoordNoPersp) ||
+             info.loads.GetAny(IR::Attribute::BaryCoordNoPerspCentroid) ||
+             info.loads.GetAny(IR::Attribute::BaryCoordNoPerspSample))) {
+            ASSERT(profile.supports_fragment_shader_barycentric);
+            bary_coord = DefineVariable(F32[3], spv::BuiltIn::BaryCoordKHR,
+                                        spv::StorageClass::Input);
+            reconstruct_linear_barycentrics = true;
+            if (!ValidId(frag_coord)) {
+                frag_coord = DefineVariable(F32[4], spv::BuiltIn::FragCoord, spv::StorageClass::Input);
+            }
+        }
+        if (!profile.supports_amd_shader_explicit_vertex_parameter &&
+            profile.supports_fragment_shader_barycentric && !ValidId(sample_index) &&
+            (info.loads.GetAny(IR::Attribute::BaryCoordSmoothSample) ||
+             info.loads.GetAny(IR::Attribute::BaryCoordNoPerspSample))) {
+            sample_index = DefineVariable(U32[1], spv::BuiltIn::SampleId, spv::StorageClass::Input);
+            Decorate(sample_index, spv::Decoration::Flat);
+        }
         if (info.loads.GetAny(IR::Attribute::BaryCoordSmooth)) {
             if (profile.supports_amd_shader_explicit_vertex_parameter) {
                 bary_coord_smooth = DefineVariable(F32[2], spv::BuiltIn::BaryCoordSmoothAMD,
@@ -418,7 +449,7 @@ void EmitContext::DefineInputs() {
                 }
             }
         }
-        if (info.loads.GetAny(IR::Attribute::BaryCoordNoPersp)) {
+        if (info.loads.GetAny(IR::Attribute::BaryCoordNoPersp) && !reconstruct_linear_barycentrics) {
             if (profile.supports_amd_shader_explicit_vertex_parameter) {
                 bary_coord_nopersp = DefineVariable(F32[2], spv::BuiltIn::BaryCoordNoPerspAMD,
                                                     spv::StorageClass::Input);
@@ -427,7 +458,7 @@ void EmitContext::DefineInputs() {
                                                     spv::StorageClass::Input);
             }
         }
-        if (info.loads.GetAny(IR::Attribute::BaryCoordNoPerspSample)) {
+        if (info.loads.GetAny(IR::Attribute::BaryCoordNoPerspSample) && !reconstruct_linear_barycentrics) {
             if (profile.supports_amd_shader_explicit_vertex_parameter) {
                 bary_coord_nopersp_sample = DefineVariable(
                     F32[2], spv::BuiltIn::BaryCoordNoPerspSampleAMD, spv::StorageClass::Input);
@@ -810,7 +841,8 @@ void EmitContext::DefinePushDataBlock() {
 }
 
 EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_written, bool is_coherent, u32 elem_shift,
-                                                 BufferType buffer_type, Id data_type) {
+                                                 BufferType buffer_type, Id data_type,
+                                                 u32 descriptor_set,u32 descriptor_binding) {
     // Define array type.
     const Id record_array_type{TypeRuntimeArray(data_type)};
     // Define block struct type. Don't perform decorations twice on the same Id.
@@ -828,8 +860,8 @@ EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_written, bool is_cohere
     const Id struct_pointer_type{TypePointer(storage_class, struct_type)};
     const Id pointer_type = TypePointer(storage_class, data_type);
     const Id id{AddGlobalVariable(struct_pointer_type, storage_class)};
-    Decorate(id, spv::Decoration::Binding, binding.unified);
-    Decorate(id, spv::Decoration::DescriptorSet, 0U);
+    Decorate(id, spv::Decoration::Binding, descriptor_binding==~0u?binding.unified:descriptor_binding);
+    Decorate(id, spv::Decoration::DescriptorSet, descriptor_set);
     if (!is_written) {
         Decorate(id, spv::Decoration::NonWritable);
     } else if (is_coherent) {
@@ -904,6 +936,23 @@ void EmitContext::DefineBuffers() {
                 DefineBuffer(desc.is_written, is_coherent, 0, desc.buffer_type, U8);
         }
         ++binding.unified;
+        if (desc.uniform_span) {
+            const Id array = TypeArray(U32[4], ConstU32(desc.uniform_span / 16));
+            const Id block = TypeStruct(array);
+            if (std::ranges::find(buf_type_ids, array.value, &Id::value) == buf_type_ids.end()) {
+                Decorate(array, spv::Decoration::ArrayStride, 16u);
+                Decorate(block, spv::Decoration::Block);
+                MemberDecorate(block, 0u, spv::Decoration::Offset, 0u);
+                buf_type_ids.push_back(array);
+            }
+            const Id pointer = TypePointer(spv::StorageClass::Uniform, block);
+            spv_buffer.uniform_id = AddGlobalVariable(pointer, spv::StorageClass::Uniform);
+            spv_buffer.uniform_pointer_type = TypePointer(spv::StorageClass::Uniform, U32[1]);
+            Decorate(spv_buffer.uniform_id, spv::Decoration::Binding, binding.unified++);
+            Decorate(spv_buffer.uniform_id, spv::Decoration::DescriptorSet, 0u);
+            Name(spv_buffer.uniform_id, fmt::format("constant_alias_{}", spv_buffer.binding));
+            interfaces.push_back(spv_buffer.uniform_id);
+        }
     }
 }
 
@@ -1039,6 +1088,7 @@ void EmitContext::DefineImagesAndSamplers() {
             .view_type = sharp.GetViewType(image_desc.is_array),
             .is_integer = is_integer,
             .is_storage = is_storage,
+            .is_null = profile.manual_null_images && !sharp,
             .mip_fallback_mode = mip_fallback_mode,
         });
         interfaces.push_back(id);

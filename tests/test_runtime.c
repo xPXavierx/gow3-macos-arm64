@@ -11,6 +11,9 @@ void runtime_restart(void) { abort(); }
 #include <pthread.h>
 #include <stdatomic.h>
 #include <time.h>
+#ifdef __APPLE__
+#include "macos_barrier.h"
+#endif
 
 typedef int (ABI *Register)(GuestCallback);
 typedef int (ABI *RegisterCxa)(void (ABI *)(void *), void *, void *);

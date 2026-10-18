@@ -81,6 +81,39 @@ int main() {
         regs->depth_render_override.force_z_valid = 1;
         assert(GetEffectiveDepthStencilState(*regs).needs_attachment);
     }
+    // Stencil masking does not need the unused depth plane. Rejection, writes,
+    // bounds and maintenance still keep it, and stencil zfail must see depth.
+    {
+        auto regs = DepthRegs(); AddStencil(*regs);
+        regs->depth_control.stencil_ref_func = AmdGpu::CompareFunc::Equal;
+        auto s = GetEffectiveDepthStencilState(*regs, true);
+        assert(s.needs_attachment && s.stencil_test_enable && !s.needs_depth && !s.depth_test_enable);
+        assert(!s.stencil_write_enable);
+        regs->stencil_control.stencil_zpass_front = AmdGpu::StencilFunc::ReplaceTest;
+        regs->stencil_ref_front.stencil_write_mask = 0;
+        assert(!GetEffectiveDepthStencilState(*regs, true).stencil_write_enable);
+        regs->stencil_ref_front.stencil_write_mask = 0xff;
+        assert(GetEffectiveDepthStencilState(*regs, true).stencil_write_enable);
+        regs->stencil_control.stencil_zpass_front = AmdGpu::StencilFunc::Keep;
+        regs->depth_control.depth_func = AmdGpu::CompareFunc::Less;
+        regs->depth_control.enable_color_writes_on_depth_fail = 1;
+        regs->stencil_control.stencil_zfail_front = AmdGpu::StencilFunc::ReplaceTest;
+        regs->stencil_ref_front.stencil_write_mask = 0xff;
+        s = GetEffectiveDepthStencilState(*regs, true);
+        assert(s.needs_depth && s.depth_test_enable);
+        regs->depth_control.depth_func = AmdGpu::CompareFunc::Always;
+        regs->depth_control.depth_write_enable = 1;
+        assert(GetEffectiveDepthStencilState(*regs, true).needs_depth);
+        regs->depth_control.depth_write_enable = 0;
+        regs->depth_control.depth_bounds_enable = 1;
+        assert(GetEffectiveDepthStencilState(*regs, true).needs_depth);
+        s = GetEffectiveDepthStencilState(*regs, true, false);
+        assert(s.needs_attachment && s.stencil_test_enable && !s.needs_depth);
+        regs->depth_control.depth_bounds_enable = 0;
+        regs->depth_render_override.force_z_valid = 1;
+        regs->depth_render_override.force_z_dirty = 1;
+        assert(GetEffectiveDepthStencilState(*regs, true).needs_depth);
+    }
     std::puts("depth-stencil-state-test: OK");
     return 0;
 }

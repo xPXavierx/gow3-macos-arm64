@@ -125,8 +125,14 @@ void runtime_finalize(void *dso) {
         if (!i) { pthread_mutex_unlock(&handler_lock); return; }
         ExitHandler handler = handlers[i-1]; handlers[i-1].active = 0;
         pthread_mutex_unlock(&handler_lock);
+#ifdef GOW3_ARM64
+        uint64_t argument=(uintptr_t)handler.argument;
+        if (handler.with_arg) runtime_guest_call((const void *)handler.callback.with_arg,1,&argument);
+        else runtime_guest_call((const void *)handler.callback.plain,0,NULL);
+#else
         if (handler.with_arg) handler.callback.with_arg(handler.argument);
         else handler.callback.plain();
+#endif
     }
 }
 static ABI void guest_finalize(void *dso) { runtime_finalize(dso); }

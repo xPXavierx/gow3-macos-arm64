@@ -258,9 +258,10 @@ public:
     Id motion_in_cur{};
     Id motion_in_prev{};
     Id motion_frag_out{};
+    Id motion_params{}, motion_positions{};
     [[nodiscard]] bool VertexMotion() const {
         return sw_stage == SwStage::Vertex && hw_stage == HwStage::Vertex &&
-               runtime_info.hw.vs.motion_vectors && MotionVectors::positions_address != 0;
+               runtime_info.hw.vs.motion_vectors;
     }
     [[nodiscard]] bool FragmentMotion() const {
         return sw_stage == SwStage::Fragment && runtime_info.hw.fs.motion_vectors;
@@ -304,6 +305,8 @@ public:
     Id shared_memory_u64_type{};
 
     Id bary_coord{};
+    bool reconstruct_linear_barycentrics{};
+    Id bary_weight_scale{};
     Id bary_coord_smooth{};
     Id bary_coord_smooth_centroid{};
     Id bary_coord_smooth_sample{};
@@ -319,6 +322,7 @@ public:
         AmdGpu::ImageType view_type;
         bool is_integer = false;
         bool is_storage = false;
+        bool is_null = false;
         MipStorageFallbackMode mip_fallback_mode{};
     };
 
@@ -348,6 +352,8 @@ public:
     struct BufferDefinition {
         u32 binding;
         BufferType buffer_type;
+        Id uniform_id{};
+        Id uniform_pointer_type{};
         std::array<Id, u32(PointerSize::NumClass)> offsets;
         std::array<BufferSpv, u32(PointerType::NumAlias)> aliases;
 
@@ -421,7 +427,8 @@ private:
                                     bool output, bool loaded = false, bool array = false);
 
     BufferSpv DefineBuffer(bool is_written, bool is_coherent, u32 elem_shift,
-                           BufferType buffer_type, Id data_type);
+                           BufferType buffer_type, Id data_type, u32 descriptor_set=0,
+                           u32 descriptor_binding=~0u);
 
     Id DefineFloat32ToUfloatM5(u32 mantissa_bits, std::string_view name);
     Id DefineUfloatM5ToFloat32(u32 mantissa_bits, std::string_view name);

@@ -140,6 +140,18 @@ int main(void) {
     assert(id!=0);
     SDL_Joystick *joystick=SDL_OpenJoystick(id);
     assert(joystick);
+    /* Right-stick direction changes must reach the next PS4 sample without a
+     * hold timer or easing. Exercise both directions and release, not just buttons. */
+    const int16_t directions[]={32767,-32768,0,32767,0};
+    const uint8_t expected[]={255,0,128,255,128};
+    for (size_t i=0;i<sizeof(directions)/sizeof(*directions);++i) {
+        assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTX,directions[i]));
+        assert(SDL_SetJoystickVirtualAxis(joystick,SDL_GAMEPAD_AXIS_RIGHTY,directions[i]));
+        pump();
+        data=read_pad();
+        assert(data.right_x==expected[i] && data.right_y==expected[i]);
+        assert(data.left_x==128 && data.left_y==128);
+    }
     /* A real touchpad: the fingers and the click go to the game as they are. */
     assert(SDL_SetJoystickVirtualTouchpad(joystick,0,0,true,0.75f,0.5f,1.0f));
     assert(SDL_SetJoystickVirtualTouchpad(joystick,0,1,true,0.25f,1.0f,1.0f));

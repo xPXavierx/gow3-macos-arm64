@@ -5,6 +5,7 @@
 
 #include <mutex>
 #include <vector>
+#include <unordered_map>
 #include "common/types.h"
 #include "video_core/renderer_vulkan/vk_common.h"
 
@@ -32,7 +33,7 @@ public:
     bool AcquireNextImage();
 
     /// Presents the current image and move to the next one
-    bool Present();
+    bool Present(bool generated=false);
 
     vk::SurfaceKHR GetSurface() const {
         return surface;
@@ -138,6 +139,10 @@ private:
     u32 frame_index = 0;
     bool needs_recreation = true;
     bool needs_hdr = false;    // The game requested HDR swapchain
+    u32 timing_id{};
+    std::unordered_map<u32,bool> timing_generated;
+    u64 timing_start{},timing_last{},timing_real{},timing_extra{};
+    std::vector<u64> timing_intervals;
     bool supports_hdr = false; // SC supports HDR output
 };
 

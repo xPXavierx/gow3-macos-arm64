@@ -14,6 +14,7 @@
 #include "core/signals.h"
 #include "video_core/page_manager.h"
 #include "video_core/page_state.h"
+#include "video_core/buffer_cache/region_definitions.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 
 #ifndef _WIN64
@@ -42,8 +43,8 @@
 
 namespace VideoCore {
 
-constexpr size_t PM_PAGE_SIZE = 4_KB;
-constexpr size_t PM_PAGE_BITS = 12;
+constexpr size_t PM_PAGE_SIZE = TRACKER_BYTES_PER_PAGE;
+constexpr size_t PM_PAGE_BITS = TRACKER_PAGE_BITS;
 
 struct PageManager::Impl {
     using PageState = VideoCore::PageState;

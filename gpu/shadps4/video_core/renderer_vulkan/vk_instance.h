@@ -29,6 +29,11 @@ public:
     explicit Instance(s32 physical_device_index, bool enable_validation);
     ~Instance();
 
+    bool IsRobustBufferAccess2Supported() const { return robust_buffer_access2; }
+    bool IsNullDescriptorSupported() const { return null_descriptor; }
+    bool IsSparseBufferSupported() const {
+        return features.sparseBinding && features.sparseResidencyBuffer;
+    }
     /// Returns a formatted string for the driver version
     std::string GetDriverVersionName();
 
@@ -395,7 +400,11 @@ public:
 
     /// Returns the maximum sampler LOD bias.
     float MaxSamplerLodBias() const {
-        return properties.limits.maxSamplerLodBias;
+        return sampler_lod_bias_supported ? properties.limits.maxSamplerLodBias : 0.f;
+    }
+
+    bool IsMultisampledStorageImageSupported() const {
+        return features.shaderStorageImageMultisample;
     }
 
     /// Returns the maximum sampler anisotropy.
@@ -405,7 +414,9 @@ public:
 
     /// Returns the maximum number of push descriptors.
     u32 MaxPushDescriptors() const {
-        return push_descriptor_props.maxPushDescriptors;
+        // MoltenVK 1.4.2 reports zero OpArrayLength for pushed buffers (upstream #2827).
+        // Use the existing descriptor-pool path whenever software buffer bounds are needed.
+        return robust_buffer_access2 ? push_descriptor_props.maxPushDescriptors : 0;
     }
 
     /// Returns the maximum size of a single VkDeviceMemory
@@ -493,6 +504,7 @@ public:
     }
 
     /// Returns whether the device can report memory usage.
+    bool HasDisplayTiming() const{return display_timing;}
     bool CanReportMemoryUsage() const {
         return supports_memory_budget;
     }
@@ -539,6 +551,9 @@ private:
     vk::PhysicalDeviceVulkan12Properties vk12_props;
     vk::PhysicalDeviceVulkan13Properties vk13_props;
     vk::PhysicalDevicePushDescriptorPropertiesKHR push_descriptor_props;
+    bool robust_buffer_access2{};
+    bool sampler_lod_bias_supported{true};
+    bool null_descriptor{};
     vk::PhysicalDeviceFeatures features;
     vk::PhysicalDeviceVulkan12Features vk12_features;
     vk::PhysicalDeviceVulkan13Features vk13_features;
@@ -589,6 +604,7 @@ private:
     bool attachment_feedback_loop{};
     bool image_2d_view_of_3d{};
     bool image_view_min_lod{};
+    bool display_timing{};
     bool shader_clock{};
     bool pipeline_executable_properties{}; // gow3: GOW3_WAVE_STATS=1 (vk_wave_stats.h)
     bool amd_shader_info{};                // gow3: with it, VK_AMD_shader_info when present

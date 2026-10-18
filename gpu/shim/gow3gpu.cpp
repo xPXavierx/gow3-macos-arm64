@@ -5,6 +5,10 @@
 #include "gow3_settings.h"
 #include "gow3_copy.h"
 #ifndef _WIN32
+#ifdef __APPLE__
+#include <pthread.h>
+#endif
+
 #include <sys/resource.h>
 #endif
 #include "gow3_toggles.h"
@@ -232,6 +236,11 @@ extern "C" int gow3gpu_init(const Gow3GpuConfig* config) {
     Core::Emulator::FillElfInfo(*config);
     const std::string title = config->title ? config->title : "God of War III";
     const s32 width = config->width, height = config->height;
+#ifdef __APPLE__
+    // Cocoa window creation and event processing must stay on the process main thread.
+    if (!pthread_main_np()) return -1;
+    g_window = new Frontend::WindowSDL(width, height, title.c_str());
+#else
     g_window_thread = std::thread([title, width, height] {
         Common::SetCurrentThreadName("gow3:window");
         auto* window = new Frontend::WindowSDL(width, height, title.c_str());
@@ -254,11 +263,19 @@ extern "C" int gow3gpu_init(const Gow3GpuConfig* config) {
         std::unique_lock lock{g_window_mutex};
         g_window_cv.wait(lock, [] { return g_window_ready; });
     }
+    #endif
     Core::Loader::SymbolsResolver resolver;
     // GnmDriver creates the presenter that the VideoOut present thread uses.
     Libraries::GnmDriver::RegisterLib(&resolver);
     Libraries::VideoOut::RegisterLib(&resolver);
     return 0;
+}
+
+extern "C" void gow3gpu_window_loop(void) {
+    while (g_window->PollEvents()) SDL_Delay(2);
+    runtime_report();
+    std::fflush(stdout);
+    std::_Exit(0);
 }
 
 namespace Libraries::Kernel { void StartKernelService(); }
@@ -330,6 +347,7 @@ int* PS4_SYSV_ABI __Error() {
 namespace VideoCore {
 namespace {
 std::atomic<u32> screenshot_requests{0};
+std::atomic<u32> screenshot_overlay_requests{0};
 }
 void LoadRenderDoc() {}
 void StartCapture() {}
@@ -338,16 +356,21 @@ void TriggerCapture() {}
 void SetOutputDir(const std::filesystem::path&, const std::string&) {}
 bool IsRenderDocLoaded() { return false; }
 void RequestScreenshot(ScreenshotRequest request) {
-    if (request != ScreenshotRequest::None) {
+    if (request == ScreenshotRequest::WithOverlays) {
+        screenshot_overlay_requests.fetch_add(1, std::memory_order_relaxed);
+    } else if (request == ScreenshotRequest::GameOnly) {
         screenshot_requests.fetch_add(1, std::memory_order_relaxed);
     }
 }
 u32 ConsumeGameOnlyScreenshotRequests() {
     return screenshot_requests.exchange(0, std::memory_order_acq_rel);
 }
-u32 ConsumeWithOverlaysScreenshotRequests() { return 0; }
+u32 ConsumeWithOverlaysScreenshotRequests() {
+    return screenshot_overlay_requests.exchange(0, std::memory_order_acq_rel);
+}
 ScreenshotRequests ConsumeScreenshotRequests() {
-    return {.game_only_count = ConsumeGameOnlyScreenshotRequests(), .with_overlays_count = 0};
+    return {.game_only_count = ConsumeGameOnlyScreenshotRequests(),
+            .with_overlays_count = ConsumeWithOverlaysScreenshotRequests()};
 }
 } // namespace VideoCore
 

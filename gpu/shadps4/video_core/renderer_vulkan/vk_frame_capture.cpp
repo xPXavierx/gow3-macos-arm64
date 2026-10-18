@@ -230,20 +230,31 @@ void FrameCapture::BeginPass(const VideoCore::ImageInfo* const* colors, u32 num_
     display = display && targets.size() == 1;
     const bool new_pass = !(pass_open && !entries.empty() && !entries.back().compute &&
                             entries.back().colors == targets);
+    // GOW3 can revisit a display target before the scene starts. Permit a bounded
+    // multi-boundary diagnostic capture instead of stopping in that short preamble.
+    static const unsigned display_limit = [] {
+        const char* value = std::getenv("GOW3_CAPTURE_DISPLAY_PASSES");
+        return value ? unsigned(std::clamp(std::atoi(value), 1, 8)) : 1u;
+    }();
+    static unsigned display_boundaries = 0;
     if (display && new_pass) {
         if (state.load(std::memory_order_relaxed) == Recording) {
-            Write(last_presented.load(std::memory_order_relaxed));
+            if (++display_boundaries >= display_limit) {
+                Write(last_presented.load(std::memory_order_relaxed));
+                entries.clear();
+                pending_sampled.clear();
+                pending_buffers.clear();
+                state.store(Idle, std::memory_order_release);
+                return;
+            }
+        } else {
+            display_boundaries = 0;
             entries.clear();
             pending_sampled.clear();
             pending_buffers.clear();
-            state.store(Idle, std::memory_order_release);
-            return;
+            pass_open = false;
+            state.store(Recording, std::memory_order_release);
         }
-        entries.clear();
-        pending_sampled.clear();
-        pending_buffers.clear();
-        pass_open = false;
-        state.store(Recording, std::memory_order_release);
     }
     if (state.load(std::memory_order_relaxed) != Recording) {
         pending_sampled.clear();

@@ -31,6 +31,8 @@ public:
 
     using DrawInfo = Motion::Draw;
     u32 PrepareDraw(const DrawInfo& draw);
+    static vk::UniqueDescriptorSetLayout CreateDescriptorLayout(const Instance& instance);
+    void Bind(vk::PipelineLayout layout);
     /// Small skeletons: whether the bone palette changed (Motion::History::Moving).
     bool Moving(const Motion::History::GateKey& key, u64 palette) {
         return history.Moving(key, palette);
@@ -82,6 +84,9 @@ private:
     u32* params_mapped{};
     vk::Buffer positions_buffer{};
     VmaAllocation positions_allocation{};
+    vk::UniqueDescriptorSetLayout descriptor_layout;
+    vk::UniqueDescriptorPool descriptor_pool;
+    vk::DescriptorSet descriptor{};
 
     u64 frame = 0;
     u32 params_used = 0;

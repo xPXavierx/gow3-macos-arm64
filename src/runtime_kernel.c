@@ -13,8 +13,13 @@
 #include <unistd.h>
 #include <sys/time.h>
 #ifndef _WIN32
+#ifndef __APPLE__
 #include <sys/random.h>
+#endif
 #include <sys/resource.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#endif
 #endif
 #define ERR(n) ((int32_t)(UINT32_C(0x80020000)|(n)))
 #define PAGE 16384
@@ -86,8 +91,14 @@ static ABI uint64_t process_time_counter(void) {
 static ABI uint64_t process_time_frequency(void) { return 1000000000; }
 /* The guest's TSC is the process clock in nanoseconds. The raw rdtsc differs per core on some
  * hosts (3.9 s apart on a Xeon E5-2680 v4, #42), so a thread moving cores made the game jump. */
+#ifdef GOW3_ARM64
+/* Match the native implementation of the guest RDTSC instruction exactly. */
+static ABI uint64_t read_tsc(void) { return bbcpu_tsc(); }
+static ABI uint64_t tsc_frequency(void) { return BBCPU_TSC_HZ; }
+#else
 static ABI uint64_t read_tsc(void) { return process_time_counter(); }
 static ABI uint64_t tsc_frequency(void) { return 1000000000; }
+#endif
 /* Shared with the GPU library so flip/label timestamps use the guest's clock. */
 uint64_t runtime_process_time_us(void) { return process_time(); }
 uint64_t runtime_process_time_counter(void) { return process_time_counter(); }
@@ -218,7 +229,22 @@ static ABI int32_t guest_getrusage(int who,GuestRusage *out) {
     out->stime=(GuestTimeval){kernel/1000000,kernel%1000000};
 #else
     struct rusage r;
+#ifdef __APPLE__
+    if (who==1) {
+        thread_basic_info_data_t info;
+        mach_msg_type_number_t count=THREAD_BASIC_INFO_COUNT;
+        thread_t thread=mach_thread_self();
+        kern_return_t result=thread_info(thread,THREAD_BASIC_INFO,(thread_info_t)&info,&count);
+        mach_port_deallocate(mach_task_self(),thread);
+        if (result!=KERN_SUCCESS) return fail_posix(EIO);
+        out->utime=(GuestTimeval){info.user_time.seconds,info.user_time.microseconds};
+        out->stime=(GuestTimeval){info.system_time.seconds,info.system_time.microseconds};
+        return 0;
+    }
+    if (getrusage(RUSAGE_SELF,&r)) return fail_posix(errno);
+#else
     getrusage(who==0 ? RUSAGE_SELF : RUSAGE_THREAD,&r);
+#endif
     out->utime=(GuestTimeval){r.ru_utime.tv_sec,r.ru_utime.tv_usec};
     out->stime=(GuestTimeval){r.ru_stime.tv_sec,r.ru_stime.tv_usec};
 #endif
@@ -232,7 +258,11 @@ static ABI int32_t guest_sysctl(const int32_t *name,uint32_t namelen,void *old,u
 #ifdef _WIN32
         if (compat_random(old,(size_t)*oldlen)) return fail_posix(EIO);
 #else
+#ifdef __APPLE__
+        arc4random_buf(old,(size_t)*oldlen);
+#else
         if (getrandom(old,(size_t)*oldlen,0)<0) return fail_posix(errno);
+#endif
 #endif
         return 0;
     }
@@ -255,7 +285,11 @@ static ABI int32_t thread_once(int32_t *once,void (ABI *routine)(void)) {
         int32_t state=__atomic_load_n(once,__ATOMIC_ACQUIRE);
         if (state==1) return 0;
         if (state==0 && __atomic_compare_exchange_n(once,&state,2,0,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
+#ifdef GOW3_ARM64
+            runtime_guest_call((const void *)routine,0,NULL);
+#else
             routine();
+#endif
             __atomic_store_n(once,1,__ATOMIC_RELEASE);
             return 0;
         }
@@ -299,7 +333,12 @@ void runtime_thread_keys_cleanup(void) {
             void *value=key_values[i];
             if (!value || !keys[i].used || !keys[i].destructor) continue;
             key_values[i]=NULL; any=1;
+#ifdef GOW3_ARM64
+            uint64_t argument=(uintptr_t)value;
+            runtime_guest_call((const void *)keys[i].destructor,1,&argument);
+#else
             keys[i].destructor(value);
+#endif
         }
         if (!any) break;
     }

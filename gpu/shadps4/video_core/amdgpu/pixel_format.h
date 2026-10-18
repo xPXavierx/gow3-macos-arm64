@@ -82,6 +82,29 @@ enum class NumberFormat : u32 {
     Ubscaled = 13,
 };
 
+// Formats whose sampled values (before number conversion) are confined to [0,1].
+// BC6, floating-point and integer/scaled views intentionally remain full-range.
+constexpr bool HasUnormSampleRange(DataFormat data, NumberFormat number) {
+    if (number != NumberFormat::Unorm) return false;
+    switch (data) {
+    case DataFormat::Format8:
+    case DataFormat::Format8_8:
+    case DataFormat::Format8_8_8_8:
+    case DataFormat::Format16:
+    case DataFormat::Format16_16:
+    case DataFormat::Format16_16_16_16:
+    case DataFormat::FormatBc1:
+    case DataFormat::FormatBc2:
+    case DataFormat::FormatBc3:
+    case DataFormat::FormatBc4:
+    case DataFormat::FormatBc5:
+    case DataFormat::FormatBc7:
+        return true;
+    default:
+        return false;
+    }
+}
+
 enum class NumberClass : u8 {
     Float = 0,
     Sint = 1,

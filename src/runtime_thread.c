@@ -17,6 +17,8 @@
 #include <unistd.h>
 #ifdef _WIN32
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/mman.h>
 #else
 #include <sys/syscall.h>
 #include <sys/mman.h>
@@ -41,6 +43,10 @@ typedef struct GuestThread {
     uint64_t *tcb;
     unsigned char *tls_block;
     pthread_t host;
+#ifdef GOW3_ARM64
+    void *guest_stack;
+    size_t guest_stack_size;
+#endif
     GuestEntry entry;
     void *argument, *result;
     ThreadAttr attr;
@@ -82,6 +88,32 @@ static void set_gs(void *base) {
     if (!TlsSetValue(tls_slot,base)) { fprintf(stderr,"STOP: TlsSetValue failed (%lu)\n",GetLastError()); exit(21); }
 }
 #define tls_block_alloc(size) _aligned_malloc(size,64)
+#elif defined(GOW3_ARM64)
+uint32_t runtime_thread_tcb_offset(void) { return 0; }
+static void set_gs(void *base) { bbcpu_set_thread_pointer((uintptr_t)base); }
+#define tls_block_alloc(size) gow3_macos_malloc(size)
+#elif defined(__APPLE__)
+/* Darwin owns GS. Keep its base and patch the guest's GS load to a pthread
+ * key, as the Windows port already does with a TEB slot. */
+static pthread_once_t tls_once=PTHREAD_ONCE_INIT;
+static pthread_key_t tls_key;
+static void make_tls_key(void) {
+    if (pthread_key_create(&tls_key,NULL) || tls_key>UINT32_MAX/8) {
+        fputs("STOP: cannot allocate Darwin guest TLS key\n",stderr); exit(21);
+    }
+}
+uint32_t runtime_thread_tcb_offset(void) {
+    pthread_once(&tls_once,make_tls_key);
+    return (uint32_t)tls_key*8;
+}
+static void set_gs(void *base) {
+    runtime_thread_tcb_offset();
+    if (pthread_setspecific(tls_key,base)) { fputs("STOP: Darwin guest TLS failed\n",stderr); exit(21); }
+    void *check;
+    __asm__ volatile("movq %%gs:(,%1,8), %0" : "=r"(check) : "r"((uintptr_t)tls_key));
+    if (check!=base) { fputs("STOP: unsupported Darwin GS/TLS layout\n",stderr); exit(21); }
+}
+#define tls_block_alloc(size) gow3_macos_malloc(size)
 #else
 static void set_gs(void *base) {
     if (syscall(SYS_arch_prctl,ARCH_SET_GS,(unsigned long)base)) { perror("STOP: arch_prctl(ARCH_SET_GS)"); exit(21); }
@@ -243,7 +275,11 @@ static ABI int32_t attr_set_guard(ThreadAttr **slot,uint64_t size) {
 static void set_host_name(const char *name) {
     char host[16]={0};
     memcpy(host,name,strnlen(name,sizeof(host)-1));
+#ifdef __APPLE__
+    pthread_setname_np(host);
+#else
     pthread_setname_np(pthread_self(),host);
+#endif
 }
 #ifdef _WIN32
 #define exit_setjmp(t) gow3_setjmp((t)->exit_jump)
@@ -256,7 +292,16 @@ static void *host_start(void *p) {
     GuestThread *t=p;
     attach(t);
     set_host_name(t->name);
-    if (!exit_setjmp(t)) t->result=t->entry(t->argument);
+    if (!exit_setjmp(t)) {
+#ifdef GOW3_ARM64
+        uint64_t argument=(uintptr_t)t->argument;
+        if (bbcpu_is_guest((uintptr_t)t->entry))
+            t->result=(void *)(uintptr_t)bbcpu_call_on_stack((uintptr_t)t->entry,1,&argument,t->guest_stack,t->guest_stack_size);
+        else t->result=t->entry(t->argument);
+#else
+        t->result=t->entry(t->argument);
+#endif
+    }
     runtime_thread_keys_cleanup();
     pthread_mutex_lock(&lock); t->finished=1; ++exited; pthread_mutex_unlock(&lock);
     return t->result;
@@ -281,8 +326,14 @@ static int32_t create(GuestThread **out,ThreadAttr **attr_slot,GuestEntry entry,
     pthread_attr_setstacksize(&host,stack_bytes);
 #else
     void *stack_memory=runtime_low_map(stack_bytes,PROT_READ|PROT_WRITE);
+#ifdef GOW3_ARM64
+    if (!stack_memory) { fputs("STOP: cannot allocate guest thread stack\n",stderr); exit(21); }
+    t->guest_stack=stack_memory; t->guest_stack_size=stack_bytes;
+    pthread_attr_setstacksize(&host,1024*1024);
+#else
     if (stack_memory) pthread_attr_setstack(&host,stack_memory,stack_bytes);
     else pthread_attr_setstacksize(&host,stack_bytes);
+#endif
 #endif
     publish(t);
     /* Publish the handle before the thread can run and inspect itself. */

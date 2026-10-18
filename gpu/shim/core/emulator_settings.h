@@ -57,7 +57,10 @@ public:
     bool IsPatchShaders() { return false; }
     bool IsPipelineCacheArchived() { return false; }
     bool IsPipelineCacheEnabled() { static const auto value = Flag("GOW3_PIPELINE_CACHE", true); return value; }
-    bool IsReadbackLinearImagesEnabled() { static const auto value = Flag("GOW3_READBACK_LINEAR", false); return value; }
+    // GOW3 uploads textures with compute writes to linear storage images over its
+    // texture pool. BC views at offsets in that pool need those writes in guest
+    // memory. Direct/native launches must match run.py's required default too.
+    bool IsReadbackLinearImagesEnabled() { static const auto value = Flag("GOW3_READBACK_LINEAR", true); return value; }
     bool IsRenderdocEnabled() { return false; }
     bool IsShaderCollect() { return false; }
     bool IsUserfaultfdTracking() { return false; }

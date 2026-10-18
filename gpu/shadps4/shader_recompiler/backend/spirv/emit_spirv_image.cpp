@@ -227,6 +227,7 @@ Id EmitImageGradient(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id
 
 Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod, Id ms) {
     const auto& texture = ctx.images[handle & 0xFFFF];
+    if (texture.is_null) return ctx.ConstantNull(ctx.F32[4]);
     const Id color_type = texture.data_types->Get(4);
     ImageOperands operands;
     Id texel;
@@ -274,6 +275,7 @@ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod
 void EmitImageWrite(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod, Id ms,
                     Id color) {
     const auto& texture = ctx.images[handle & 0xFFFF];
+    if (texture.is_null) return;
     Id image_ptr = texture.id;
     const Id color_type = texture.data_types->Get(4);
     ImageOperands operands;

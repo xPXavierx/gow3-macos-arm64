@@ -21,6 +21,11 @@
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <sys/stat.h>
+#endif
 #include <unistd.h>
 #endif
 /* sceKernelGetDirectMemorySize on retail PS4: 5056 MiB. GOW3_DMEM_MB raises it (the resolution
@@ -38,8 +43,15 @@ static uint64_t pool_size_bytes(void) {
 #define POOL_SIZE pool_size_bytes()
 #define FLEXIBLE_SIZE (UINT64_C(448) * 1024 * 1024)
 #define PAGE UINT64_C(16384)
+/* Native Darwin mappings avoid Apple's shared region and driver allocations.
+ * Layout follows bloodborne-native/bloodborne-runtime platform.h (GPL-2.0+). */
+#ifdef GOW3_ARM64
+#define USER_MIN UINT64_C(0x8000000000)
+#define USER_MAX UINT64_C(0xf400000000)
+#else
 #define USER_MIN UINT64_C(0x1000000000)
 #define USER_MAX UINT64_C(0xfc00000000)
+#endif
 #define LIMIT 4096
 #define INVALID ((int32_t)UINT32_C(0x80020016))
 #define NO_MEMORY ((int32_t)UINT32_C(0x8002000c))
@@ -245,7 +257,14 @@ static int pool(void) {
 /* Direct memory occupies [0,POOL_SIZE) of the memfd, flexible memory [POOL_SIZE,+FLEX_SPAN). */
 static int pool(void) {
     if (pool_fd>=0) return 0;
+#ifdef __APPLE__
+    char name[96];
+    snprintf(name,sizeof(name),"/gow3-%d-%08x",getpid(),arc4random());
+    pool_fd=shm_open(name,O_CREAT|O_EXCL|O_RDWR,0600);
+    if (pool_fd>=0) { shm_unlink(name); fcntl(pool_fd,F_SETFD,FD_CLOEXEC); }
+#else
     pool_fd=memfd_create("gow3-guest-memory", MFD_CLOEXEC);
+#endif
     if (pool_fd<0 || ftruncate(pool_fd,(off_t)(POOL_SIZE+FLEX_SPAN))) return -1;
     void *view=mmap(NULL,POOL_SIZE+FLEX_SPAN,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_NORESERVE,pool_fd,0);
     if (view==MAP_FAILED) return -1;
@@ -253,16 +272,47 @@ static int pool(void) {
     return 0;
 }
 void runtime_memory_reserve(void) {}
+#ifdef __APPLE__
+/* Reserve only holes in our VMA table, without overwriting unrelated mappings.
+ * On failure roll back reservations, leaving existing mappings untouched. */
+static int reserve_holes(uintptr_t address,uint64_t size,int rollback) {
+    uintptr_t end=address+size, at=address;
+    for (size_t i=0;at<end;++i) {
+        if (i<vma_count && vmas[i].end<=at) continue;
+        uintptr_t stop=i<vma_count && vmas[i].start<end ? vmas[i].start : end;
+        if (stop>at) {
+            mach_vm_address_t hole=at;
+            if (rollback) mach_vm_deallocate(mach_task_self(),hole,stop-at);
+            else if (mach_vm_allocate(mach_task_self(),&hole,stop-at,VM_FLAGS_FIXED)!=KERN_SUCCESS) {
+                reserve_holes(address,at-address,1); return -1;
+            }
+        }
+        at=i<vma_count && vmas[i].end>stop ? vmas[i].end : stop;
+    }
+    return 0;
+}
+#endif
 static int host_map(uintptr_t address, uint64_t size, int prot, int reserved, uint64_t phys) {
+#ifdef __APPLE__
+    if (reserve_holes(address,size,0)) return -1;
+#endif
     void *mapped = !reserved
         ? mmap((void *)address,size,prot,MAP_SHARED|MAP_FIXED,pool_fd,(off_t)phys)
         : mmap((void *)address,size,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE|MAP_FIXED,-1,0);
+#ifdef __APPLE__
+    if (mapped==MAP_FAILED) reserve_holes(address,size,1);
+#endif
     return mapped==MAP_FAILED ? -1 : 0;
 }
 static int host_unmap(uintptr_t address, uint64_t size) { return munmap((void *)address,size); }
 static int host_protect(uintptr_t address, uint64_t size, int prot) { return mprotect((void *)address,size,prot); }
 static void host_discard(uint64_t phys, uint64_t size) {
+#ifdef __APPLE__
+    /* Shared backing means every surviving alias observes the zeroing. */
+    memset(backing_base+phys,0,size);
+#else
     fallocate(pool_fd,FALLOC_FL_PUNCH_HOLE|FALLOC_FL_KEEP_SIZE,(off_t)phys,(off_t)size);
+#endif
 }
 #endif
 static void queue_hook(int kind, uintptr_t address, uint64_t size) {
@@ -665,14 +715,20 @@ uintptr_t runtime_memory_resolve(const char *name) {
 }
 /* Host-owned memory the guest can see (image, stacks, trampolines) lives in
  * [LOW_MIN, USER_MIN): PS4 code packs pointers into 40-bit fields. */
+#ifdef GOW3_ARM64
+#define LOW_MIN UINT64_C(0xf400000000)
+#define LOW_MAX UINT64_C(0xfc00000000)
+#else
 #define LOW_MIN UINT64_C(0x0800000000)
+#define LOW_MAX USER_MIN
+#endif
 static uintptr_t low_next=LOW_MIN;
 void *runtime_low_map(size_t size, int prot) {
     size=align_up(size,PAGE);
     write_lock();
 #ifdef _WIN32
     void *p=NULL;
-    while (!p && low_next+size<=USER_MIN) {
+    while (!p && low_next+size<=LOW_MAX) {
         p=VirtualAlloc((void *)low_next,size,MEM_RESERVE|MEM_COMMIT,win_prot(prot));
         low_next+=size+UINT64_C(65536); /* unmapped gap catches overruns; allocation granularity */
     }
@@ -680,8 +736,16 @@ void *runtime_low_map(size_t size, int prot) {
     return p;
 #else
     void *p=MAP_FAILED;
-    while (low_next+size<=USER_MIN) {
+    while (low_next+size<=LOW_MAX) {
+#ifdef __APPLE__
+        mach_vm_address_t address=low_next;
+        if (mach_vm_allocate(mach_task_self(),&address,size,VM_FLAGS_FIXED)==KERN_SUCCESS) {
+            p=(void *)(uintptr_t)address;
+            if (mprotect(p,size,prot)) { mach_vm_deallocate(mach_task_self(),address,size); p=MAP_FAILED; }
+        }
+#else
         p=mmap((void *)low_next,size,prot,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
+#endif
         low_next+=size+PAGE; /* unmapped gap catches overruns */
         if (p!=MAP_FAILED) break;
     }

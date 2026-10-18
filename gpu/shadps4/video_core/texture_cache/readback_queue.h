@@ -8,7 +8,7 @@
 namespace VideoCore {
 
 // Copies retire in submission order, including overlapping guest ranges.
-template <typename Payload>
+template <typename Payload, unsigned PageBits = 12>
 class ReadbackQueue {
 public:
     struct Entry {
@@ -72,8 +72,12 @@ public:
 private:
     static bool OverlapsPage(const Entry& entry, std::uint64_t address, std::uint64_t size) {
         if (!size) return false;
-        const auto begin = entry.address & ~std::uint64_t{4095};
-        const auto end = (entry.address + entry.size + 4095) & ~std::uint64_t{4095};
+        // This must match PageManager's protection granularity. A 4 KiB test
+        // misses writes to a sibling subpage on a 16 KiB Apple Silicon page,
+        // leaving its watcher in place and retrying the fault forever.
+        constexpr auto mask = (std::uint64_t{1} << PageBits)-1;
+        const auto begin = entry.address & ~mask;
+        const auto end = (entry.address + entry.size + mask) & ~mask;
         return address < end && begin < address + size;
     }
     static constexpr std::uint64_t MaxBytes = 64ull << 20;

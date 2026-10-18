@@ -8,7 +8,11 @@
 
 namespace VideoCore {
 
-constexpr u64 TRACKER_PAGE_BITS = 12; // 4K pages
+#if defined(__APPLE__) && defined(__aarch64__)
+constexpr u64 TRACKER_PAGE_BITS = 14; // Host mprotect granularity on Apple Silicon.
+#else
+constexpr u64 TRACKER_PAGE_BITS = 12;
+#endif
 constexpr u64 TRACKER_BYTES_PER_PAGE = 1ULL << TRACKER_PAGE_BITS;
 
 constexpr u64 TRACKER_HIGHER_PAGE_BITS = 22; // each region is 4MB

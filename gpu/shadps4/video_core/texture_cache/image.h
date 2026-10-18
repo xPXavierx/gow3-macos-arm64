@@ -128,6 +128,7 @@ struct Image {
     }
 
     ImageView& FindView(const ImageViewInfo& view_info, bool ensure_guest_samples = true);
+    void TryCompactMinTarget();
 
     using Barriers = boost::container::small_vector<vk::ImageMemoryBarrier2, 32>;
     void GetBarriers(Barriers& out_barriers, vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
@@ -180,8 +181,14 @@ public:
         vk::AccessFlags2 access_mask = vk::AccessFlagBits2::eNone;
         vk::ImageLayout layout = vk::ImageLayout::eUndefined;
     };
+    bool compact_min_attempted = false;
     struct BackingImage {
         UniqueImage image;
+        // Deque entries remain alive until the owning Image is destroyed. Copied
+        // image create infos may therefore retain this chain across sample changes.
+        std::array<vk::Format, 2> color_view_formats{};
+        vk::ImageFormatListCreateInfo color_format_list{};
+        bool limited_color_formats{};
         State state;
         std::vector<State> subresource_states;
         boost::container::small_vector<ImageViewInfo, 4> image_view_infos;

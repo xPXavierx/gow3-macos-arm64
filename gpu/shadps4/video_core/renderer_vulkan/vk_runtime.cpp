@@ -709,6 +709,49 @@ void Runtime::ClearImage(VideoCore::Image* dst, const VideoCore::SubresourceRang
     dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
 }
 
+void Runtime::ReallocateColorBacking(VideoCore::Image* image, bool requires_storage, bool compact) {
+    BeforeImageAccess();
+    scheduler.EndRendering();
+    auto* previous = image->backing;
+    ASSERT(previous);
+    ASSERT(image->info.resources.levels == 1 && image->info.resources.layers == 1);
+    const bool initialized = previous->state.layout != vk::ImageLayout::eUndefined ||
+                             !previous->subresource_states.empty();
+    if (initialized) Transit(image, vk::ImageLayout::eTransferSrcOptimal,
+                             vk::PipelineStageFlagBits2::eCopy, vk::AccessFlagBits2::eTransferRead);
+    auto create_info = previous->image.image_ci;
+    create_info.pNext = nullptr;
+    if (compact) create_info.usage &= ~vk::ImageUsageFlagBits::eStorage;
+    else if (requires_storage) create_info.usage |= vk::ImageUsageFlagBits::eStorage;
+    auto& expanded = image->backing_images.emplace_back();
+    expanded.num_samples = previous->num_samples;
+    expanded.image = VideoCore::UniqueImage{instance.GetDevice(), instance.GetAllocator()};
+    if (compact) {
+        expanded.color_view_formats = {vk::Format::eR8G8B8A8Unorm, vk::Format::eR8G8B8A8Srgb};
+        expanded.color_format_list = {.viewFormatCount = 2,
+                                     .pViewFormats = expanded.color_view_formats.data()};
+        create_info.pNext = &expanded.color_format_list;
+        expanded.limited_color_formats = true;
+    }
+    expanded.image.Create(create_info);
+    image->backing = &expanded;
+    image->usage_flags = create_info.usage;
+    if (!initialized) return;
+    Transit(image, vk::ImageLayout::eTransferDstOptimal, vk::PipelineStageFlagBits2::eCopy,
+            vk::AccessFlagBits2::eTransferWrite);
+    FlushBarriers();
+    const vk::ImageCopy region{
+        .srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .dstSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
+        .extent = {image->info.size.width, image->info.size.height, 1},
+    };
+    scheduler.Record([src = previous->image.image, dst = expanded.image.image,
+                      region](vk::CommandBuffer cmd) {
+        cmd.copyImage(src, vk::ImageLayout::eTransferSrcOptimal, dst,
+                      vk::ImageLayout::eTransferDstOptimal, region);
+    });
+}
+
 void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool copy_backing) {
     BeforeImageAccess();
     auto& backing = image->backing;
@@ -724,8 +767,12 @@ void Runtime::SetBackingSamples(VideoCore::Image* image, u32 num_samples, bool c
     if (it == backing_images.end()) {
         auto new_image_ci = backing->image.image_ci;
         new_image_ci.samples = LiverpoolToVK::NumSamples(num_samples, image->supported_samples);
+        if (num_samples > 1 && !instance.IsMultisampledStorageImageSupported()) {
+            new_image_ci.usage &= ~vk::ImageUsageFlagBits::eStorage;
+        }
 
         new_backing = &backing_images.emplace_back();
+        new_backing->limited_color_formats = backing->limited_color_formats;
         new_backing->num_samples = num_samples;
         new_backing->image = VideoCore::UniqueImage{instance.GetDevice(), instance.GetAllocator()};
         new_backing->image.Create(new_image_ci);

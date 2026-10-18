@@ -13,21 +13,29 @@
 #include "actor_hook.h"
 #include "damage_hook.h"
 #include "gpu/gow3gpu.h"
-#if !defined(__x86_64__) || !defined(__GNUC__)
+#if (!defined(__x86_64__) && !defined(GOW3_ARM64)) || !defined(__GNUC__)
 #error This prototype requires x86-64 GCC or Clang (including MinGW).
 #endif
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#ifndef __APPLE__
 #include <malloc.h>
+#endif
 #include <unistd.h>
 #include <signal.h>
+#ifdef __APPLE__
+#include <sys/ucontext.h>
+#else
 #include <ucontext.h>
+#endif
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <execinfo.h>
+#ifndef __APPLE__
 #include <sys/syscall.h>
+#endif
 #include <sys/uio.h>
 #endif
 
@@ -77,6 +85,9 @@ static void protect(void *p, size_t size, unsigned flags) {
     if (!VirtualProtect(p, size, mode, &old)) fail("VirtualProtect failed");
     FlushInstructionCache(GetCurrentProcess(), p, size);
 #else
+#ifdef GOW3_ARM64
+    if (flags & 1) flags=(flags & ~1u)|4u; /* x86 bytes must never execute on the host CPU */
+#endif
     int mode = ((flags & 4) ? PROT_READ : 0) | ((flags & 2) ? PROT_WRITE : 0) | ((flags & 1) ? PROT_EXEC : 0);
     if (mprotect(p, size, mode)) fail("mprotect failed");
 #endif
@@ -85,22 +96,31 @@ static ABI __attribute__((noreturn)) void unresolved(uint32_t id, uintptr_t argu
     if (id >= import_count) fail("bad import trap index");
     printf("STOP: first unsupported PS4 import: %s (index %u)\n", names[id], id);
     printf("API: %s\n", runtime_import_name(names[id]));
+#ifndef GOW3_ARM64
     printf("Caller return offset: 0x%" PRIxPTR "; first argument: 0x%" PRIxPTR "\n",
            (uintptr_t)__builtin_return_address(0) - (uintptr_t)image, argument);
     uintptr_t caller=(uintptr_t)__builtin_return_address(0)-(uintptr_t)image;
     for (uint64_t m=0;m<module_count;++m)
         if (caller>=modules[m].base && caller-modules[m].base<modules[m].size)
-            printf("Caller in linked module %" PRIu64 " (%s): +0x%" PRIxPTR "\n",m,m==0 ? "libc.prx" : "system module",caller-modules[m].base);
+            printf("Caller in linked module %" PRIu64 " (%s): +0x%" PRIxPTR "\n",m,m==0 ? "libc.prx" : "system module",(uintptr_t)(caller-modules[m].base));
+#else
+    printf("ARM64 import adapter; first argument: 0x%" PRIxPTR "\n",argument);
+#endif
     runtime_report();
     puts(entered_game ? "Original guest entry instructions executed; game initialization is incomplete." :
                         "Native libc initialization is incomplete; game entry has not run.");
     fflush(NULL);
     _exit(20); /* no destructors: GPU, audio and guest threads are still running */
 }
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(GOW3_ARM64)
 /* enter_on_stack(entry, arg0, arg1, stack_top): call entry(arg0,arg1) on a new stack. */
 void enter_on_stack(void *entry, void *arg0, void *arg1, void *top);
-__asm__(".text\n.globl enter_on_stack\nenter_on_stack:\n"
+#ifdef __APPLE__
+#define STACK_SYMBOL "_enter_on_stack"
+#else
+#define STACK_SYMBOL "enter_on_stack"
+#endif
+__asm__(".text\n.globl " STACK_SYMBOL "\n" STACK_SYMBOL ":\n"
         " push %rbp\n mov %rsp,%rbp\n and $-16,%rcx\n mov %rcx,%rsp\n"
         " mov %rdi,%rax\n mov %rsi,%rdi\n mov %rdx,%rsi\n call *%rax\n"
         " mov %rbp,%rsp\n pop %rbp\n ret\n");
@@ -209,6 +229,8 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 static LONG WINAPI unhandled_fault(EXCEPTION_POINTERS *info) { return fatal_exception(info); }
+#endif
+#if defined(_WIN32) || defined(__APPLE__)
 /* Guest code reads its TCB with `mov rax, gs:[0]` (link_*.py rewrote fs:[0]); on Windows
  * the displacement becomes the TEB TLS slot that holds the guest TCB (runtime_thread.c). */
 uint32_t runtime_thread_tcb_offset(void);
@@ -227,25 +249,49 @@ static uint64_t patch_tcb_loads(const Segment *segments, uint64_t count) {
 #endif
 #ifndef _WIN32
 /* ucontext gregs of IsaRegs.gpr (x86 numbering). */
-static const int isa_gregs[16]={REG_RAX,REG_RCX,REG_RDX,REG_RBX,REG_RSP,REG_RBP,REG_RSI,REG_RDI,
-                                REG_R8,REG_R9,REG_R10,REG_R11,REG_R12,REG_R13,REG_R14,REG_R15};
+static void context_regs(void *context,IsaRegs *regs,uintptr_t *rip,int write_back) {
+#ifdef __APPLE__
+    ucontext_t *uc=context;
+#ifdef GOW3_ARM64
+    (void)write_back;
+    memset(regs,0,sizeof(*regs));
+    *rip=uc->uc_mcontext->__ss.__pc;
+    return;
+#else
+#define COPY_REG(index,field) do { if (write_back) uc->uc_mcontext->__ss.field=regs->gpr[index]; \
+    else regs->gpr[index]=uc->uc_mcontext->__ss.field; } while (0)
+    COPY_REG(0,__rax); COPY_REG(1,__rcx); COPY_REG(2,__rdx); COPY_REG(3,__rbx);
+    COPY_REG(4,__rsp); COPY_REG(5,__rbp); COPY_REG(6,__rsi); COPY_REG(7,__rdi);
+    COPY_REG(8,__r8); COPY_REG(9,__r9); COPY_REG(10,__r10); COPY_REG(11,__r11);
+    COPY_REG(12,__r12); COPY_REG(13,__r13); COPY_REG(14,__r14); COPY_REG(15,__r15);
+#undef COPY_REG
+    if (write_back) { uc->uc_mcontext->__ss.__rflags=regs->rflags; uc->uc_mcontext->__ss.__rip=*rip; }
+    else { regs->rflags=uc->uc_mcontext->__ss.__rflags; *rip=uc->uc_mcontext->__ss.__rip; }
+#endif
+#else
+    static const int indices[16]={REG_RAX,REG_RCX,REG_RDX,REG_RBX,REG_RSP,REG_RBP,REG_RSI,REG_RDI,
+        REG_R8,REG_R9,REG_R10,REG_R11,REG_R12,REG_R13,REG_R14,REG_R15};
+    greg_t *g=((ucontext_t *)context)->uc_mcontext.gregs;
+    for (int i=0;i<16;++i) {
+        if (write_back) g[indices[i]]=(greg_t)regs->gpr[i]; else regs->gpr[i]=(uint64_t)g[indices[i]];
+    }
+    if (write_back) { g[REG_EFL]=(greg_t)regs->rflags; g[REG_RIP]=(greg_t)*rip; }
+    else { regs->rflags=(uint64_t)g[REG_EFL]; *rip=(uintptr_t)g[REG_RIP]; }
+#endif
+}
 static void fault(int sig, siginfo_t *info, void *context) {
     if (sig == SIGTRAP && isa_table) {
         /* An int3 ISA site (RIP is past the CC byte); any other trap ends in the report below. */
-        greg_t *g = ((ucontext_t *)context)->uc_mcontext.gregs;
         IsaRegs regs;
         uintptr_t rip;
-        for (int i = 0; i < 16; ++i) regs.gpr[i] = (uint64_t)g[isa_gregs[i]];
-        regs.rflags = (uint64_t)g[REG_EFL];
-        if (isa_rewrite_trap(isa_table, (uintptr_t)g[REG_RIP] - 1, &regs, &rip)) {
-            for (int i = 0; i < 16; ++i) g[isa_gregs[i]] = (greg_t)regs.gpr[i];
-            g[REG_EFL] = (greg_t)regs.rflags;
-            g[REG_RIP] = (greg_t)rip;
+        context_regs(context,&regs,&rip,0);
+        if (isa_rewrite_trap(isa_table,rip-1,&regs,&rip)) {
+            context_regs(context,&regs,&rip,1);
             return;
         }
     }
     /* GPU page tracking (write-protected guest pages) is resolved first. */
-    if (gpu_enabled && sig == SIGSEGV && gow3gpu_handle_fault(context, info->si_addr)) return;
+    if (gpu_enabled && (sig == SIGSEGV || sig == SIGBUS) && gow3gpu_handle_fault(context, info->si_addr)) return;
     /* A speculative guest memory read (runtime_memory.c) failed: resume its recovery point. */
     if ((sig == SIGSEGV || sig == SIGBUS) && runtime_fault_recover) {
         sigjmp_buf *recover = runtime_fault_recover;
@@ -257,8 +303,9 @@ static void fault(int sig, siginfo_t *info, void *context) {
         siglongjmp(*recover, 1);
     }
     /* The process is terminating: dladdr/snprintf are acceptable here. */
-    ucontext_t *uc = context;
-    uintptr_t rip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+    IsaRegs regs;
+    uintptr_t rip;
+    context_regs(context,&regs,&rip,0);
     char line[512];
     Dl_info where;
     int site = isa_table ? isa_rewrite_site_of_stub(isa_table, rip) : -1;
@@ -291,7 +338,17 @@ static void fault(int sig, siginfo_t *info, void *context) {
     _exit(128 + sig);
 }
 #endif
-#ifndef _WIN32
+#if defined(__APPLE__)
+/* Darwin bootstrap watchdog: current interrupted thread, no /proc traversal. */
+static void watchdog(int sig,siginfo_t *info,void *context) {
+    (void)info;
+    IsaRegs regs; uintptr_t rip;
+    context_regs(context,&regs,&rip,0);
+    dprintf(2,"STOP: Darwin watchdog timeout at RIP=%p (image-relative=%#llx)\n",
+            (void *)rip,(unsigned long long)(rip-(uintptr_t)image));
+    _exit(128+sig);
+}
+#elif !defined(_WIN32)
 /* Watchdog: dump RIP and the rbp frame chain of every thread (guest offsets
  * when inside the image). Reads use process_vm_readv so bad frames cannot fault. */
 static uintptr_t exe_base;
@@ -562,6 +619,15 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
  * released before the new process opens its own. */
 void runtime_restart(void) {
     fflush(NULL);
+#if defined(__APPLE__) && defined(__aarch64__)
+    /* The native supervisor re-reads run.py's options after this GPU process exits.
+     * Do not exec a nested launcher while its single-instance lock is still held. */
+    if (getenv("GOW3_NATIVE_SUPERVISED")) {
+        puts("Runtime: native supervisor restart requested");
+        fflush(NULL);
+        _exit(75);
+    }
+#endif
 #ifdef _WIN32
     /* run.py sets GOW3_RESTART_COMMAND: the launch command line, started again (new patches). */
     const char *command=getenv("GOW3_RESTART_COMMAND");
@@ -581,7 +647,11 @@ void runtime_restart(void) {
     TerminateProcess(GetCurrentProcess(),0);
 #else
     const char *command = getenv("GOW3_RESTART_COMMAND");
+#ifdef __APPLE__
+    for (int fd=3, limit=getdtablesize(); fd<limit; ++fd) close(fd);
+#else
     syscall(SYS_close_range, 3u, ~0u, 0u);
+#endif
     if (command && *command) {
         puts("Runtime: restarting through GOW3_RESTART_COMMAND");
         execl("/bin/sh", "sh", "-c", command, (char *)NULL);
@@ -599,6 +669,10 @@ void runtime_restart(void) {
  * in missing. */
 static int cpu_supported(char *missing, size_t size) {
     missing[0] = 0;
+#ifdef GOW3_ARM64
+    (void)size;
+    return 1; /* No native x86 execution: strict static ARM64 dispatch. */
+#else
     const char *check = getenv("GOW3_CPU_CHECK");
     if (check && !strcmp(check, "0")) return 1;
     const CpuFeatureWords words = cpu_feature_words();
@@ -609,11 +683,80 @@ static int cpu_supported(char *missing, size_t size) {
     }
     cpu_missing_sets = cpu_missing_rewritable(words, missing, size);
     return 1;
+#endif
+}
+
+typedef struct {
+    Segment *segments;
+    uint64_t ns, nb, procparam, entry, *main_tls;
+    int native_libc;
+} GuestLaunch;
+
+static void *run_guest(void *opaque) {
+    GuestLaunch *launch=opaque;
+    Segment *segments=launch->segments;
+    uint64_t ns=launch->ns, nb=launch->nb, procparam=launch->procparam;
+    uint64_t entry=launch->entry, *main_tls=launch->main_tls;
+    int native_libc=launch->native_libc;
+    if (native_libc) {
+        for (uint64_t m=0;m<module_count;++m) {
+            int init_executable=0;
+            for (uint64_t i=0;i<ns;++i)
+                if ((segments[i].flags&1) && modules[m].init>=segments[i].address && modules[m].init-segments[i].address<segments[i].size) init_executable=1;
+            if (!init_executable) fail("module init is not executable");
+            if (modules[m].tls_module)
+                runtime_set_module_tls(modules[m].tls_module,image+modules[m].tls_address,modules[m].tls_filesz,modules[m].tls_memsz);
+        }
+        runtime_set_main_tls(image+main_tls[0],main_tls[1],main_tls[2],main_tls[3]);
+        runtime_thread_attach_main();
+        runtime_set_procparam(image+procparam);
+        /* Dependencies start in link order (libc first), as the PS4 dynamic linker does. */
+        for (uint64_t m=0;m<module_count;++m) {
+            printf("Starting linked module %" PRIu64 " at image offset 0x%" PRIx64 "; native bindings=%" PRIu64 "\n",m,modules[m].init,nb);
+#ifdef GOW3_ARM64
+            const uint64_t init_args[3]={0,0,0};
+            int result=(int)runtime_guest_call(image+modules[m].init,3,init_args);
+#else
+            typedef int (ABI *ModuleInit)(uint64_t,void *,void *);
+            int result=((ModuleInit)(image+modules[m].init))(0,NULL,NULL);
+#endif
+            printf("Module %" PRIu64 " initializer returned %d\n",m,result);
+            if (result) fail("module initializer failed");
+        }
+    }
+#ifdef GOW3_ARM64
+    printf("Entering ARM64 recompiled function at guest offset 0x%" PRIx64 "\n",entry);
+#else
+    printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
+#endif
+    entered_game=1;
+    struct EntryParams { uint64_t argc; const char *argv[2]; };
+    struct EntryParams *params=malloc(sizeof(*params));
+    char *program=strdup("/app0/eboot.bin");
+    if (!params || !program) fail("cannot allocate guest parameters");
+    *params=(struct EntryParams){1,{program,NULL}};
+#ifdef _WIN32
+    typedef void (ABI *Entry)(void *, void (ABI *)(void));
+    ((Entry)(image + entry))(params, guest_exit);
+#else
+    /* The guest main thread runs on a stack below 1 TiB like PS4 stacks. */
+    enum { MAIN_STACK=8*1024*1024 };
+    unsigned char *stack=runtime_low_map(MAIN_STACK,PROT_READ|PROT_WRITE);
+    if (!stack) fail("cannot allocate guest main stack");
+#ifdef GOW3_ARM64
+    const uint64_t entry_args[2]={(uintptr_t)params,(uintptr_t)guest_exit};
+    bbcpu_call_on_stack((uintptr_t)(image+entry),2,entry_args,stack,MAIN_STACK-64);
+#else
+    enter_on_stack(image+entry,params,(void *)guest_exit,stack+MAIN_STACK-64);
+#endif
+#endif
+    fail("entry unexpectedly returned");
+    return NULL;
 }
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__APPLE__)
     /* Keep host heap objects handed to the guest (thread handles, TLS) in the
        non-PIE brk heap, i.e. below 1 TiB: the guest packs pointers into 40 bits. */
     mallopt(M_ARENA_MAX,1);
@@ -677,6 +820,9 @@ int main(int argc, char **argv) {
         printf("STOP: this CPU lacks %s and no rewrite table matches the image\n", missing);
         return 20;
     }
+#ifdef GOW3_ARM64
+    if (isa_file || isa_sets) fail("x86 ISA rewriting is not used by the ARM64 AOT loader");
+#endif
     if (content_profile) {
         FILE *profile=fopen(content_profile,"rb");
         unsigned char data[28];
@@ -725,10 +871,12 @@ int main(int argc, char **argv) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL); sigaction(SIGILL, &sa, NULL); sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGTRAP, &sa, NULL); /* int3 ISA sites */
+#ifndef __APPLE__
     Dl_info self_info;
     if (dladdr((void *)main,&self_info)) exe_base=(uintptr_t)self_info.dli_fbase;
     struct sigaction dump = {0}; dump.sa_sigaction = thread_dump; dump.sa_flags = SA_SIGINFO|SA_RESTART;
     sigemptyset(&dump.sa_mask); sigaction(SIGUSR2, &dump, NULL);
+#endif
     struct sigaction alarm_action = {0}; alarm_action.sa_sigaction = watchdog; alarm_action.sa_flags = SA_SIGINFO;
     sigemptyset(&alarm_action.sa_mask); sigaction(SIGALRM, &alarm_action, NULL);
     alarm(timeout_seconds); /* 0 disables the watchdog */
@@ -904,12 +1052,21 @@ int main(int argc, char **argv) {
         _exit(missing ? 1 : 0); /* no destructors: GPU threads are running */
     }
     if (patch_file) apply_patches(patch_file, segments, ns, relocs, nr);
+#ifndef GOW3_ARM64
     if (gpu_enabled) install_orb_multiplier(segments, ns, size);
     if (gpu_enabled) install_cheats(segments, ns, size);
     if (gpu_enabled) install_actor_watch(segments, ns, size);
     if (gpu_enabled) install_stat_multipliers(segments, ns, size);
-#ifdef _WIN32
-    printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
+#else
+    /* x86 hook trampolines are not ARM64 game functions. Keep these optional cheats disabled. */
+    (void)install_orb_multiplier; (void)install_cheats; (void)install_actor_watch; (void)install_stat_multipliers;
+#endif
+#if defined(_WIN32) || defined(__APPLE__)
+#ifdef GOW3_ARM64
+    printf("Guest TCB loads handled by ARM64 register-state bridge: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
+#else
+    printf("Guest TCB loads redirected to host TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
+#endif
 #endif
     if (isa_table) {
         IsaReport r = isa_rewrite_apply(isa_table, image, stubs, isa_sets);
@@ -934,39 +1091,32 @@ int main(int argc, char **argv) {
     }
     if (!executable_entry) fail("entry is not executable");
     printf("Mapped %" PRIu64 " bytes, %" PRIu64 " segments; applied %" PRIu64 " relocations\n", size, ns, nr);
-    if (native_libc) {
-        for (uint64_t m=0;m<module_count;++m) {
-            int init_executable=0;
-            for (uint64_t i=0;i<ns;++i)
-                if ((segments[i].flags&1) && modules[m].init>=segments[i].address && modules[m].init-segments[i].address<segments[i].size) init_executable=1;
-            if (!init_executable) fail("module init is not executable");
-            if (modules[m].tls_module)
-                runtime_set_module_tls(modules[m].tls_module,image+modules[m].tls_address,modules[m].tls_filesz,modules[m].tls_memsz);
-        }
-        runtime_set_main_tls(image+main_tls[0],main_tls[1],main_tls[2],main_tls[3]);
-        runtime_thread_attach_main();
-        runtime_set_procparam(image+procparam);
-        /* Dependencies start in link order (libc first), as the PS4 dynamic linker does. */
-        for (uint64_t m=0;m<module_count;++m) {
-            printf("Starting linked module %" PRIu64 " at image offset 0x%" PRIx64 "; native bindings=%" PRIu64 "\n",m,modules[m].init,nb);
-            typedef int (ABI *ModuleInit)(uint64_t,void *,void *);
-            int result=((ModuleInit)(image+modules[m].init))(0,NULL,NULL);
-            printf("Module %" PRIu64 " initializer returned %d\n",m,result);
-            if (result) fail("module initializer failed");
-        }
-    }
-    printf("Entering original x86-64 code at guest offset 0x%" PRIx64 "\n", entry);
-    entered_game=1;
-    struct { uint64_t argc; const char *argv[2]; } params = {1, {"/app0/eboot.bin", NULL}};
-#ifdef _WIN32
-    typedef void (ABI *Entry)(void *, void (ABI *)(void));
-    ((Entry)(image + entry))(&params, guest_exit);
-#else
-    /* The guest main thread runs on a stack below 1 TiB like PS4 stacks. */
-    enum { MAIN_STACK=8*1024*1024 };
-    unsigned char *stack=runtime_low_map(MAIN_STACK,PROT_READ|PROT_WRITE);
-    if (!stack) fail("cannot allocate guest main stack");
-    enter_on_stack(image+entry,&params,(void *)guest_exit,stack+MAIN_STACK-64);
+#ifdef GOW3_ARM64
+    extern uint64_t bb_image_base;
+    bb_image_base=(uintptr_t)image;
+    for (uint64_t s=0;s<ns;++s)
+        if (segments[s].flags&1) bbcpu_add_guest_code((uintptr_t)image+segments[s].address,segments[s].size);
+    bbcpu_add_guest_code((uintptr_t)traps,round_page((import_count+1)*32));
+    extern void runtime_arm64_unresolved_traps(uintptr_t base,size_t count,void (*handler)(uint32_t,uintptr_t));
+    runtime_arm64_unresolved_traps((uintptr_t)traps,import_count,unresolved);
+    bbcpu_set_tls_displacement(0);
+    const char *recomp=getenv("GOW3_RECOMP_LIB");
+    if (!recomp || !*recomp) fail("set GOW3_RECOMP_LIB to the matching ARM64 recompiled library");
+    setenv("BB_RECOMP_LIB",recomp,1);
+    bbcpu_recomp_load(bb_image_base);
+    puts("CPU: ARM64 static recompilation; interpreter/JIT fallbacks are disabled");
+    runtime_set_report_hook(bbcpu_report);
 #endif
-    fail("entry unexpectedly returned");
+    GuestLaunch launch={segments,ns,nb,procparam,entry,main_tls,native_libc};
+#if defined(__APPLE__) && defined(GOW3_ARM64)
+    if (gpu_enabled) {
+        /* Cocoa owns the main thread. Module initializers and guest TLS belong to the worker. */
+        pthread_t guest;
+        if (pthread_create(&guest,NULL,run_guest,&launch)) fail("cannot start guest main thread");
+        gow3gpu_window_loop();
+        fail("window event loop unexpectedly returned");
+    }
+#endif
+    run_guest(&launch);
+    return 1;
 }

@@ -3,13 +3,13 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "vulkan_portability.h"
 #define CHECK(call) do { VkResult r = (call); if (r != VK_SUCCESS) { \
     fprintf(stderr, "Vulkan: %s returned %d\n", #call, r); exit(1); } } while (0)
 
 int vulkan_smoke(void) {
     VkApplicationInfo app = {.sType=VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName="God of War III native probe", .apiVersion=VK_API_VERSION_1_0};
-    VkInstanceCreateInfo ici = {.sType=VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo=&app};
-    VkInstance instance; CHECK(vkCreateInstance(&ici, NULL, &instance));
+    VkInstance instance; CHECK(gow3_vk_instance(&app, &instance));
     uint32_t count = 0; CHECK(vkEnumeratePhysicalDevices(instance, &count, NULL));
     if (!count) { fprintf(stderr, "Vulkan: no physical devices\n"); vkDestroyInstance(instance, NULL); return 1; }
     VkPhysicalDevice *devices = calloc(count, sizeof(*devices));
@@ -28,6 +28,9 @@ int vulkan_smoke(void) {
     float priority = 1;
     VkDeviceQueueCreateInfo qci = {.sType=VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex=family, .queueCount=1, .pQueuePriorities=&priority};
     VkDeviceCreateInfo dci = {.sType=VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount=1, .pQueueCreateInfos=&qci};
+    int portability=0; CHECK(gow3_vk_portability_device(physical,&portability));
+    const char *portability_extension="VK_KHR_portability_subset";
+    if (portability) { dci.enabledExtensionCount=1; dci.ppEnabledExtensionNames=&portability_extension; }
     VkDevice device; CHECK(vkCreateDevice(physical, &dci, NULL, &device));
     VkQueue queue; vkGetDeviceQueue(device, family, 0, &queue);
     VkBufferCreateInfo bci = {.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size=4096, .usage=VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode=VK_SHARING_MODE_EXCLUSIVE};

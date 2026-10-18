@@ -2,10 +2,14 @@
 #include "gow3_perf_stats.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 #include <vector>
 #include "video_core/renderer_vulkan/vk_instance.h"
+#ifdef __APPLE__
+#include "gow3_host_stats_macos.h"
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -113,6 +117,28 @@ void Run(const Vulkan::Instance* instance) {
         {
             std::scoped_lock lock{mutex};
             latest = std::move(s);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+}
+#elif defined(__APPLE__)
+void Run(const Vulkan::Instance* instance) {
+    MacHostStats host;
+    const char* trace=std::getenv("GOW3_HOST_STATS");
+    unsigned samples=0;
+    while (true) {
+        Sample s=host.Read();
+        s.gpu_name=std::string(instance->GetModelName());
+        if (instance->CanReportMemoryUsage()) {
+            s.vram_used_gb=double(instance->GetDeviceMemoryUsage())/(1024.0*1024*1024);
+            s.vram_total_gb=double(instance->GetDeviceMemoryBudgetNow())/(1024.0*1024*1024);
+        }
+        if (trace && trace[0]=='1' && ++samples%10==0)
+            std::printf("Host stats: process CPU %.1f%% total, busiest thread %.1f%%; GPU %.1f%% (system); process %.2f GiB\n",
+                        s.cpu_percent,s.cpu_busiest_thread_percent,s.gpu_percent,s.ram_used_gb);
+        {
+            std::scoped_lock lock{mutex};
+            latest=std::move(s);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }

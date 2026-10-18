@@ -42,6 +42,12 @@ void ShowNotice(const std::string& text, int milliseconds = 3000);
 /// Present thread: draws into `view` (layout ColorAttachmentOptimal).
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);
 
+/// Separate rendered and generated frame submissions; never label both as real FPS.
+void SetFrameGenerationRates(float rendered, float generated);
+/// Actual game-image input/output for this presented frame, before window fitting.
+void SetDisplayInfo(int input_width, int input_height, int output_width, int output_height,
+                    bool metalfx_applied);
+
 /// The menu is open or a text entry is shown: the game's input is held neutral.
 bool CapturesInput();
 
@@ -55,5 +61,7 @@ void SetTextEntry(bool active, const std::string& prompt, const std::string& tex
 void BeginChoice(const std::string& title, const std::vector<std::string>& items,
                  std::vector<Gow3Png::Image> pictures, int focus);
 int PollChoice();
+/// Opt-in local test control; consumes commands only while a choice dialog is open.
+void PollTestChoice();
 
 } // namespace Gow3Overlay

@@ -29,11 +29,13 @@ struct BufferSpecialization {
     u32 num_format : 4;
     u32 index_stride : 2;
     u32 element_size : 2;
+    u32 shared_constants : 1;
     AmdGpu::CompMapping dst_select{};
     AmdGpu::NumberConversion num_conversion{};
 
     bool operator==(const BufferSpecialization& other) const {
-        return stride == other.stride && is_formatted == other.is_formatted &&
+        return shared_constants == other.shared_constants &&
+               stride == other.stride && is_formatted == other.is_formatted &&
                swizzle_enable == other.swizzle_enable &&
                (!is_formatted ||
                 (data_format == other.data_format && num_format == other.num_format &&
@@ -44,11 +46,13 @@ struct BufferSpecialization {
 };
 
 struct ImageSpecialization {
+    bool is_null = true;
     AmdGpu::ImageType type = AmdGpu::ImageType::Color2D;
     bool is_integer = false;
     bool is_storage = false;
     bool is_cube = false;
     bool is_srgb = false;
+    bool has_unorm_sample_range = false;
     AmdGpu::CompMapping dst_select{};
     AmdGpu::NumberConversion num_conversion{};
     // FIXME any pipeline cache changes needed?
@@ -67,6 +71,7 @@ struct FMaskSpecialization {
 struct SamplerSpecialization {
     u8 force_unnormalized : 1;
     u8 force_degamma : 1;
+    u8 has_custom_border : 1;
 
     bool operator==(const SamplerSpecialization&) const = default;
 };
@@ -116,6 +121,7 @@ struct StageSpecialization {
         u32 binding{};
         ForEachSharp(binding, buffers, info->buffers,
                      [](auto& spec, const auto& desc, AmdGpu::Buffer sharp) {
+                         spec.shared_constants = desc.uniform_span && sharp.mtype == 3;
                          spec.stride = sharp.GetStride();
                          spec.is_formatted = desc.is_formatted;
                          spec.swizzle_enable = sharp.swizzle_enable;
@@ -132,6 +138,7 @@ struct StageSpecialization {
                      });
         ForEachSharp(binding, images, info->images,
                      [&](auto& spec, const auto& desc, AmdGpu::Image sharp) {
+                         spec.is_null = false;
                          spec.type = sharp.GetViewType(desc.is_array);
                          spec.is_integer = AmdGpu::IsInteger(sharp.GetNumberFmt());
                          spec.is_storage = desc.is_written;
@@ -141,6 +148,8 @@ struct StageSpecialization {
                          } else {
                              spec.is_srgb = sharp.GetNumberFmt() == AmdGpu::NumberFormat::Srgb;
                          }
+                         spec.has_unorm_sample_range =
+                             AmdGpu::HasUnormSampleRange(sharp.GetDataFmt(), sharp.GetNumberFmt());
                          spec.num_conversion = sharp.GetNumberConversion();
                          spec.num_bindings = desc.NumBindings(*info);
                      });
@@ -153,6 +162,8 @@ struct StageSpecialization {
                      [](auto& spec, const auto& desc, AmdGpu::Sampler sharp) {
                          spec.force_unnormalized = sharp.force_unnormalized;
                          spec.force_degamma = sharp.force_degamma;
+                         spec.has_custom_border =
+                             sharp.border_color_type == AmdGpu::BorderColor::Custom;
                      });
 
         // Initialize runtime_info fields that rely on analysis in tessellation passes
@@ -232,7 +243,10 @@ struct StageSpecialization {
             }
         }
         for (u32 i = 0; i < images.size(); i++) {
-            if (other.bitset[binding++] && images[i] != other.images[i]) {
+            // Null storage accesses are compiled away; null/live permutations cannot
+            // share code in either direction, even when the old wildcard bit is clear.
+            ++binding;
+            if (images[i] != other.images[i]) {
                 return false;
             }
         }

@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <array>
+
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "video_core/amdgpu/pixel_format.h"
 
@@ -23,21 +25,45 @@ inline Value ApplySwizzle(IREmitter& ir, const Value& vector, const AmdGpu::Comp
 
 /// Converts gamma corrected value to linear space
 inline F32 ApplyGammaToLinear(IREmitter& ir, const F32& c) {
-    const F32 a =
-        ir.FPPow(ir.FPMul(ir.FPAdd(c, ir.Imm32(0.055f)), ir.Imm32(1.0f / 1.055f)), ir.Imm32(2.4f));
+    // The nonlinear branch only contributes for c > 0.04045, so its base is
+    // positive. Use the native log2/exp2 operations instead of general pow;
+    // preserve the post-filter conversion, threshold, linear branch and alpha.
+    const F32 base = ir.FPMul(ir.FPAdd(c, ir.Imm32(0.055f)), ir.Imm32(1.0f / 1.055f));
+    const F32 a = ir.FPExp2(ir.FPMul(ir.FPLog2(base), ir.Imm32(2.4f)));
     const F32 b = ir.FPMul(c, ir.Imm32(1.0f / 12.92f));
     return IR::F32{ir.Select(ir.FPGreaterThan(c, ir.Imm32(0.04045f)), a, b)};
 }
 
-inline Value ApplyForceDegamma(IREmitter& ir, const Value& value) {
+// Bounded post-filter sRGB conversion for normalized texture samples only. Two
+// degree-six fits on [0.04045, 0.35] and [0.35, 1] replace the transcendental
+// operations with FMAs. The linear branch and alpha remain exact. Never use this
+// for float/HDR textures: their existing full-range conversion stays unchanged.
+inline F32 ApplyUnormGammaToLinear(IREmitter& ir, const F32& c) {
+    constexpr std::array<float, 7> low{0.000841916597f, 0.0358769633f, 0.476204336f,
+        0.928877831f, -1.09857428f, 1.29599965f, -0.761302233f};
+    constexpr std::array<float, 7> high{0.00188418047f, 0.0210191794f, 0.572105467f,
+        0.562709272f, -0.224387035f, 0.0809520110f, -0.0142832091f};
+    const auto lower = ir.FPLessThan(c, ir.Imm32(0.35f));
+    const auto coefficient = [&](size_t i) {
+        return F32{ir.Select(lower, ir.Imm32(low[i]), ir.Imm32(high[i]))};
+    };
+    F32 nonlinear = coefficient(6);
+    for (int i = 5; i >= 0; --i) {
+        nonlinear = ir.FPFma(nonlinear, c, coefficient(i));
+    }
+    const F32 linear = ir.FPMul(c, ir.Imm32(1.0f / 12.92f));
+    return F32{ir.Select(ir.FPGreaterThan(c, ir.Imm32(0.04045f)), nonlinear, linear)};
+}
+
+inline Value ApplyForceDegamma(IREmitter& ir, const Value& value, bool normalized = false) {
     auto x = F32{ir.CompositeExtract(value, 0)};
     auto y = F32{ir.CompositeExtract(value, 1)};
     auto z = F32{ir.CompositeExtract(value, 2)};
     auto w = F32{ir.CompositeExtract(value, 3)};
     // Gamma correction is only applied to RGB components
-    x = ApplyGammaToLinear(ir, x);
-    y = ApplyGammaToLinear(ir, y);
-    z = ApplyGammaToLinear(ir, z);
+    x = normalized ? ApplyUnormGammaToLinear(ir, x) : ApplyGammaToLinear(ir, x);
+    y = normalized ? ApplyUnormGammaToLinear(ir, y) : ApplyGammaToLinear(ir, y);
+    z = normalized ? ApplyUnormGammaToLinear(ir, z) : ApplyGammaToLinear(ir, z);
     return ir.CompositeConstruct(x, y, z, w);
 }
 

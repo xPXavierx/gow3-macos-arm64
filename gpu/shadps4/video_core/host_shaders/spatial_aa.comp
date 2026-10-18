@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Spatial-only wrappers for NVIDIA FXAA and iryoku SMAA; see spatial_aa/ licenses.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=8, local_size_y=8) in;
+layout(binding=0) uniform sampler2D colorTex; // display view, perceptual UNORM
+layout(binding=1) uniform sampler2D auxTex;
+layout(binding=2) uniform sampler2D areaTex;
+layout(binding=3) uniform sampler2D searchTex;
+layout(binding=4) uniform sampler2D linearColorTex; // same display view, sRGB
+layout(binding=5, rgba8) uniform writeonly image2D outputTex;
+layout(push_constant) uniform Params { vec4 metrics; int strong; } pc;
+
+#if AA_PASS == 0
+#define FXAA_PC 1
+#define FXAA_GLSL_130 1
+#define FXAA_QUALITY__PRESET 39
+#define FXAA_GATHER4_ALPHA 0
+#define FXAA_COMPUTE_LUMA 1
+#include "spatial_aa/Fxaa3_11.h"
+#else
+#define SMAA_CUSTOM_SL 1
+#define SMAA_PRESET_HIGH
+#define SMAA_REPROJECTION 0
+#define SMAA_RT_METRICS pc.metrics
+#define SMAA_DISCARD return vec2(0.0)
+#define SMAATexture2D(tex) sampler2D tex
+#define SMAATexturePass2D(tex) tex
+#define SMAASampleLevelZero(tex, coord) textureLod(tex, coord, 0.0)
+#define SMAASampleLevelZeroPoint(tex, coord) textureLod(tex, coord, 0.0)
+#define SMAASampleLevelZeroOffset(tex, coord, offset) textureLodOffset(tex, coord, 0.0, offset)
+#define SMAASample(tex, coord) textureLod(tex, coord, 0.0)
+#define SMAASamplePoint(tex, coord) textureLod(tex, coord, 0.0)
+#define SMAASampleOffset(tex, coord, offset) textureLodOffset(tex, coord, 0.0, offset)
+#define SMAAGather(tex, coord) textureGather(tex, coord)
+#define SMAA_FLATTEN
+#define SMAA_BRANCH
+#define lerp(a,b,t) mix(a,b,t)
+#define saturate(a) clamp(a,0.0,1.0)
+#define mad(a,b,c) fma(a,b,c)
+#define float2 vec2
+#define float3 vec3
+#define float4 vec4
+#define int2 ivec2
+#define int3 ivec3
+#define int4 ivec4
+#define bool2 bvec2
+#define bool3 bvec3
+#define bool4 bvec4
+#include "spatial_aa/SMAA.hlsl"
+#endif
+
+void main() {
+    ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+    if(any(greaterThanEqual(p,ivec2(pc.metrics.zw)))) return;
+    vec2 uv=(vec2(p)+0.5)*pc.metrics.xy;
+    vec4 result;
+#if AA_PASS == 0
+    result=FxaaPixelShader(uv,vec4(0),colorTex,colorTex,colorTex,colorTex,
+        pc.metrics.xy,vec4(0),vec4(0),vec4(0),
+        pc.strong!=0?1.0:0.75,pc.strong!=0?0.063:0.125,
+        pc.strong!=0?0.016:0.0312,0.0,0.0,0.0,vec4(0));
+#elif AA_PASS == 1
+    vec4 offsets[3]; SMAAEdgeDetectionVS(uv,offsets);
+    result=vec4(SMAAColorEdgeDetectionPS(uv,offsets,colorTex),0,0);
+#elif AA_PASS == 2
+    vec4 offsets[3]; vec2 pixel;
+    SMAABlendingWeightCalculationVS(uv,pixel,offsets);
+    result=SMAABlendingWeightCalculationPS(uv,pixel,offsets,auxTex,areaTex,searchTex,vec4(0));
+#else
+    vec4 offset; SMAANeighborhoodBlendingVS(uv,offset);
+    vec4 weights=vec4(textureLod(auxTex,offset.xy,0.0).a,
+        textureLod(auxTex,offset.zw,0.0).g,textureLod(auxTex,uv,0.0).xz);
+    if(dot(weights,vec4(1))<1e-5) {
+        result=textureLod(colorTex,uv,0.0); // preserve flat/textured pixels exactly
+    } else {
+        vec3 rgb=SMAANeighborhoodBlendingPS(uv,offset,linearColorTex,auxTex).rgb;
+        // Only edge pixels need re-encoding; blending is in linear light.
+        result=vec4(mix(1.055*pow(max(rgb,0.0),vec3(1.0/2.4))-0.055,
+            12.92*rgb,lessThanEqual(rgb,vec3(0.0031308))),1);
+    }
+#endif
+#if AA_PASS == 0 || AA_PASS == 3
+    result.a=1.0;
+#endif
+    imageStore(outputTex,p,result);
+}

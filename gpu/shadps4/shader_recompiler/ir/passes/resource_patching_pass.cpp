@@ -109,6 +109,8 @@ public:
         buffer.used_types |= desc.used_types;
         buffer.is_written |= desc.is_written;
         buffer.is_formatted |= desc.is_formatted;
+        buffer.uniform_span = buffer.uniform_span && desc.uniform_span
+            ? std::max(buffer.uniform_span, desc.uniform_span) : 0;
         return index;
     }
 
@@ -208,6 +210,10 @@ void PatchBufferSharp(const ResourceDiscovery& resource, Info& info, Descriptors
                         inst.GetOpcode() == IR::Opcode::StoreBufferFormatF32,
         .post_op = resource.sharps[0].post_op,
         .post_op_dw1_mask = resource.sharps[0].post_op_data.dw1_mask,
+        .uniform_span = profile.native_constant_buffers &&
+                        inst.GetOpcode() == IR::Opcode::ReadConstBuffer &&
+                        inst.Arg(1).IsImmediate()
+            ? UniformAliasSpan(inst.Arg(1).U32()) : 0,
     });
 
     // Replace handle with binding index in buffer resource list.
@@ -836,7 +842,11 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
 
     auto converted = ApplyReadNumberConversionVec4(ir, texel, image.GetNumberConversion());
     if (sampler.force_degamma && image.GetNumberFmt() != AmdGpu::NumberFormat::Srgb) {
-        converted = ApplyForceDegamma(ir, texel);
+        // Only formats whose sampled components are guaranteed to stay in [0,1].
+        // In particular, exclude BC6 and every float/scaled/integer format.
+        const bool normalized = sampler.border_color_type != AmdGpu::BorderColor::Custom &&
+            AmdGpu::HasUnormSampleRange(image.GetDataFmt(), image.GetNumberFmt());
+        converted = ApplyForceDegamma(ir, texel, normalized);
     }
     inst.ReplaceUsesWith(converted);
 }
@@ -962,6 +972,14 @@ void ResourcePatchingPass(Shader::Info& info, const ResourceDiscoveryList& resou
             PatchGlobalDataShareAccess(inst, info, descriptors, profile);
         }
     }
+    // Constant-address-space reads must not alias in-shader writes. Keep the
+    // storage implementation for stages with observable memory side effects.
+    const bool writes = info.uses_dma ||
+        std::ranges::any_of(info.buffers, [](const auto& b) {
+            return b.is_written || b.buffer_type == BufferType::GdsBuffer ||
+                   b.buffer_type == BufferType::SharedMemory || b.buffer_type == BufferType::FaultBuffer;
+        }) || std::ranges::any_of(info.images, [](const auto& i) { return i.is_written || i.is_atomic; });
+    if (writes) for (auto& b : info.buffers) b.uniform_span = 0;
 }
 
 } // namespace Shader::Optimization

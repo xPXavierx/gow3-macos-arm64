@@ -45,6 +45,9 @@ private:
     int text_state{};
     std::string text, text_prompt, base_title;
     void UpdateTextTitle();
+#ifdef __APPLE__
+    void* metal_view{};
+#endif
     SDL_Window* window{};
     WindowSystemInfo window_info{};
 };

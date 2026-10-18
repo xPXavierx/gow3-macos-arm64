@@ -274,6 +274,9 @@ static void read_inject(void) {
     /* Whole-second mtimes: the size tells two edits within a second apart. */
     if (st.st_mtime==mtime.tv_sec && st.st_size==mtime.tv_nsec) return;
     mtime=(struct timespec){st.st_mtime,(long)st.st_size};
+#elif defined(__APPLE__)
+    if (st.st_mtimespec.tv_sec==mtime.tv_sec && st.st_mtimespec.tv_nsec==mtime.tv_nsec) return;
+    mtime=st.st_mtimespec;
 #else
     if (st.st_mtim.tv_sec==mtime.tv_sec && st.st_mtim.tv_nsec==mtime.tv_nsec) return;
     mtime=st.st_mtim;
@@ -400,11 +403,38 @@ static ABI int32_t pad_close(int32_t handle) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     opened=0; return 0;
 }
+/* Optional bounded input-delivery trace, shared by real pads, keys and scripted input.
+ * This observes what scePadRead receives; it does not infer animation latency. */
+static void trace_delivery(const PadData *d, uint64_t begin) {
+    static int checked;
+    static FILE *file;
+    static uint64_t previous;
+    static unsigned rows;
+    if (!checked) {
+        checked=1;
+        const char *path=getenv("GOW3_PAD_TRACE_FILE");
+        if (path && *path) {
+            file=fopen(path,"w");
+            if (file) fputs("host_us,sample_us,gap_us,read,buttons,lx,ly,rx,ry\n",file);
+        }
+    }
+    if (!file) return;
+    const uint64_t end=now_us();
+    fprintf(file,"%llu,%llu,%llu,%zu,%u,%u,%u,%u,%u\n",
+            (unsigned long long)end,(unsigned long long)(end-begin),
+            (unsigned long long)(previous ? end-previous : 0),reads,d->buttons,
+            d->left_x,d->left_y,d->right_x,d->right_y);
+    previous=end;
+    fflush(file);
+    if (++rows==16384) { fclose(file); file=NULL; }
+}
 static ABI int32_t pad_read_state(int32_t handle, PadData *data) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!data) return ERR_INVALID_ARG;
     pthread_mutex_lock(&lock);
+    const uint64_t begin=now_us();
     sample(data); ++reads;
+    trace_delivery(data,begin);
     pthread_mutex_unlock(&lock);
     return 0;
 }

@@ -151,13 +151,13 @@ void UniqueBuffer::Create(vk::BufferCreateInfo& buffer_ci, MemoryType mem_type,
 }
 
 Buffer::Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes_,
-               MemoryType mem_type_, std::string_view debug_name)
+               MemoryType mem_type_, std::string_view debug_name, vk::BufferUsageFlags usage)
     : cpu_addr{cpu_addr_}, size_bytes{size_bytes_}, mem_type{mem_type_},
       buffer{instance.GetDevice(), instance.GetAllocator()} {
 
     vk::BufferCreateInfo buffer_ci = {
         .size = size_bytes,
-        .usage = AllFlags,
+        .usage = usage,
         .sharingMode = vk::SharingMode::eExclusive,
     };
     VmaAllocationInfo alloc_info{};
@@ -199,8 +199,8 @@ constexpr u64 WATCHES_INITIAL_RESERVE = 0x100;
 constexpr u64 WATCHES_RESERVE_CHUNK = 0x100;
 
 StreamBuffer::StreamBuffer(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler_,
-                           MemoryType mem_type, u64 size_bytes)
-    : Buffer{instance, 0, size_bytes, mem_type}, scheduler{scheduler_},
+                           MemoryType mem_type, u64 size_bytes, vk::BufferUsageFlags usage)
+    : Buffer{instance, 0, size_bytes, mem_type, "", usage}, scheduler{scheduler_},
       non_coherent_atom_size{instance.NonCoherentAtomSize()} {
     ReserveWatches(current_watches, WATCHES_INITIAL_RESERVE);
     ReserveWatches(previous_watches, WATCHES_INITIAL_RESERVE);

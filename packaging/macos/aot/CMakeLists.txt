@@ -1,0 +1,43 @@
+cmake_minimum_required(VERSION 3.24)
+set(CMAKE_OSX_ARCHITECTURES arm64 CACHE STRING "Native recompiler architecture")
+project(gow3_aot_tools LANGUAGES C ASM)
+if(NOT APPLE OR NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+    message(FATAL_ERROR "This integration requires macOS ARM64; Rosetta is not a supported target")
+endif()
+# GPL-2.0-or-later bloodborne-native/bloodborne-recomp, descended from bbport.
+# Validated revision: 4b23a301944642f1e4e9e921418d4519dc36c315.
+set(GOW3_RECOMP_SOURCE_DIRECTORY "" CACHE PATH "bloodborne-recomp checkout")
+set(RECOMP "${GOW3_RECOMP_SOURCE_DIRECTORY}")
+if(NOT EXISTS "${RECOMP}/src/recomp/rc.h")
+    message(FATAL_ERROR "Set GOW3_RECOMP_SOURCE_DIRECTORY to the pinned bloodborne-recomp checkout")
+endif()
+find_package(zycore CONFIG REQUIRED)
+# Zydis 4.1.1 exports an unqualified Zycore dependency with system Zycore.
+if(NOT TARGET Zycore)
+    add_library(Zycore ALIAS Zycore::Zycore)
+endif()
+find_package(zydis CONFIG REQUIRED)
+find_path(ZYDIS_INCLUDE_DIR Zydis/Zydis.h REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+file(GLOB CPU_SOURCES CONFIGURE_DEPENDS "${RECOMP}/src/cpu/*.c")
+add_library(bbcpu STATIC ${CPU_SOURCES} "${RECOMP}/src/cpu/hostcall.S")
+target_link_libraries(bbcpu PUBLIC Zydis::Zydis)
+target_compile_options(bbcpu PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
+set_property(TARGET bbcpu PROPERTY C_STANDARD 11)
+add_executable(gow3-aot-scan "${RECOMP}/tools/recomp/scan.c")
+target_link_libraries(gow3-aot-scan PRIVATE Zydis::Zydis)
+add_executable(gow3-aot-recomp "${RECOMP}/tools/recomp/bbrecomp.c")
+target_link_libraries(gow3-aot-recomp PRIVATE bbcpu)
+add_executable(aot-differential "${RECOMP}/tests/fuzz_recomp.c")
+target_link_libraries(aot-differential PRIVATE bbcpu)
+enable_testing()
+add_test(NAME arm64-static-recompilation COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_LIST_DIR}/verify_aot.py"
+    "$<TARGET_FILE:gow3-aot-recomp>" "$<TARGET_FILE:aot-differential>"
+    "${RECOMP}" "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_BINARY_DIR}/verification" "${ZYDIS_INCLUDE_DIR}")
+set_tests_properties(arm64-static-recompilation PROPERTIES TIMEOUT 60)
+if(CMAKE_OSX_SYSROOT)
+    set_tests_properties(arm64-static-recompilation PROPERTIES
+        ENVIRONMENT "SDKROOT=${CMAKE_OSX_SYSROOT}")
+endif()
+message(STATUS "AOT generator and differential oracle; use ../native for the strict ARM64 loader")

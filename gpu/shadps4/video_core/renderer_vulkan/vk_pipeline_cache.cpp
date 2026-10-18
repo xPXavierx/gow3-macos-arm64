@@ -23,6 +23,7 @@
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
 #include "gow3_settings.h"
+#include "video_core/renderer_vulkan/vk_framegen_inputs.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -82,7 +83,7 @@ struct AsyncGraphicsCompilation {
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
 
 constexpr static std::array DescriptorHeapSizes = {
-    vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 512},
+    vk::DescriptorPoolSize{vk::DescriptorType::eUniformBuffer, 8192},
     vk::DescriptorPoolSize{vk::DescriptorType::eStorageBuffer, 8192},
     vk::DescriptorPoolSize{vk::DescriptorType::eSampledImage, 8192},
     vk::DescriptorPoolSize{vk::DescriptorType::eStorageImage, 1024},
@@ -154,6 +155,20 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
         info.props.fp_round_mode16_64 = program.settings.fp_round_mode64;
     };
     info.Initialize(stage, l_stage);
+#if defined(__APPLE__) && defined(ARCH_ARM64)
+    if (stage == HwStage::Fragment || stage == HwStage::Vertex) {
+        const auto bit = stage == HwStage::Fragment ? Gow3Toggle::ExplicitRoundedMath
+                                                   : Gow3Toggle::ExplicitRoundedVertexMath;
+        // Normal sessions keep one strategy for their lifetime. Live shader
+        // permutation switches are a diagnostic, only safe in a frozen scene.
+        static const bool diagnostic_ab = [] {
+            const char* value = std::getenv("GOW3_SHADER_AB_TEST");
+            return value && value[0] == '1';
+        }();
+        info.props.explicit_rounded_math = instance.GetDriverID() == vk::DriverId::eMoltenvk &&
+            (!diagnostic_ab || !Gow3Toggle::Disabled(bit));
+    }
+#endif
     switch (stage) {
     case HwStage::Local: {
         BuildCommon(regs.ls_program);
@@ -334,6 +349,10 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supported_spirv = SpirvVersion1_6,
         .subgroup_size = instance.SubgroupSize(),
         .sparse_page_shift = sparse_page_shift,
+        .manual_buffer_bounds = !instance.IsRobustBufferAccess2Supported(),
+        .native_constant_buffers = instance.GetDriverID() == vk::DriverId::eMoltenvk &&
+            instance.UniformMinAlignment() <= 128 && instance.StorageMinAlignment() <= 128,
+        .manual_null_images = !instance.IsNullDescriptorSupported(),
         .support_int8 = instance.IsShaderInt8Supported(),
         .support_int16 = instance.IsShaderInt16Supported(),
         .support_int64 = instance.IsShaderInt64Supported(),
@@ -371,6 +390,7 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         .supports_amd_shader_explicit_vertex_parameter =
             instance_.IsAmdShaderExplicitVertexParameterSupported(),
         .supports_fragment_shader_barycentric = instance_.IsFragmentShaderBarycentricSupported(),
+        .needs_single_barycentric_mode = instance.GetDriverID() == vk::DriverId::eMoltenvk,
         .supports_shader_subgroup_clock = instance_.IsShaderSubgroupClockSupported(),
         .needs_manual_interpolation = instance.IsFragmentShaderBarycentricSupported() &&
                                       instance.GetDriverID() == vk::DriverId::eNvidiaProprietary,
@@ -821,7 +841,25 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
 
     // gow3: a depth/stencil buffer that cannot affect the draw is not attached: on the PC a
     // smaller one would crop a full-screen pass (eltutz, vk_depth_stencil_state.h).
-    const bool db_enabled = GetEffectiveDepthStencilState(regs).needs_attachment;
+    const auto db = GetEffectiveDepthStencilState(
+        regs, Gow3Toggle::SplitUnusedDepthEnabled(),
+        instance.IsDepthBoundsSupported());
+    const bool db_enabled = db.needs_attachment;
+    // Keep the backing image's combined format for stencil-only rendering.
+    key.omit_depth_attachment = db_enabled && !db.needs_depth;
+    if (std::getenv("GOW3_DEPTH_DIAGNOSTICS")) {
+        static std::mutex mutex;
+        static std::vector<std::array<u32, 3>> seen;
+        const std::array data{std::bit_cast<u32>(regs.depth_control),
+                              std::bit_cast<u32>(regs.depth_render_control),
+                              std::bit_cast<u32>(regs.depth_render_override)};
+        std::scoped_lock lock(mutex);
+        if (seen.size() < 32 && std::ranges::find(seen, data) == seen.end()) {
+            seen.push_back(data);
+            std::printf("Depth decision: omit=%u control=%08x render=%08x override=%08x\n",
+                        key.omit_depth_attachment, data[0], data[1], data[2]);
+        }
+    }
 
     key.z_format = db_enabled && regs.depth_buffer.DepthValid()
                        ? regs.depth_buffer.z_info.format
@@ -853,7 +891,10 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         for (s32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS && !skip_cb_binding; ++cb) {
             bound += (regs.color_buffers[cb] && regs.color_target_mask.GetMask(cb)) ? 1 : 0;
         }
-        motion_possible = Shader::MotionVectors::positions_address != 0 && bound >= 5 &&
+        motion_possible = Shader::MotionVectors::enabled &&
+                          (bound >= 5 || (bound>0 && db_enabled && regs.depth_control.depth_enable &&
+                           (regs.num_indices>6 || regs.num_instances.NumInstances()>1) &&
+                           FrameGen::GeometryDepth(regs.depth_buffer.DepthAddress()))) &&
                           !regs.color_buffers[Shader::MotionVectors::Output] &&
                           regs.depth_buffer.DepthValid() &&
                           regs.depth_buffer.NumSamples() == 1 && !regs.IsClipDisabled() &&
@@ -926,8 +967,15 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
             const char* value = std::getenv("GOW3_OBJECT_MOTION_ALL");
             return value && value[0] == '1';
         }();
-        if (all_motion) {
+        if (all_motion || FrameGen::GeometryDepth(regs.depth_buffer.DepthAddress())) {
             sel.motion = true;
+        }
+        // A guest varying (including the clip-distance emulation shift) must
+        // never alias the two extra vectors. Keep such draws on the real path.
+        const auto* fs=sel.infos[static_cast<u32>(Shader::SwStage::Fragment)];
+        for(u32 i=Shader::MotionVectors::CurrentLocation-1;i<Shader::IR::NumParams;++i){
+            const auto attr=Shader::IR::Attribute::Param0+i;
+            if((vs && vs->stores.GetAny(attr)) || (fs && fs->loads.GetAny(attr)))sel.motion=false;
         }
         if (sel.motion && !RefreshGraphicsStages(sel)) {
             return false;
@@ -970,7 +1018,7 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         key.mrt_mask |= 1u << mv;
         key.num_color_attachments = mv + 1;
         auto& color_buffer = key.color_buffers[mv];
-        color_buffer.data_format = AmdGpu::DataFormat::Format32_32_32_32;
+        color_buffer.data_format = FrameGen::Requested()?AmdGpu::DataFormat::Format16_16_16_16:AmdGpu::DataFormat::Format32_32_32_32;
         color_buffer.num_format = AmdGpu::NumberFormat::Float;
         color_buffer.swizzle = AmdGpu::IdentityMapping;
         key.write_masks[mv] = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
@@ -1115,6 +1163,16 @@ bool PipelineCache::RefreshGraphicsStages(PipelineSelection& sel) {
         u32 vertex_binding = 0;
         for (const auto& attrib : sel.fetch_shader->attributes) {
             const auto& buffer = attrib.GetSharp(*vs_info);
+            // Preparation is speculative: the guest may still be filling the V#.
+            // Match PrepareVertexInputs' fallback before the fixed-input path
+            // asserts. The submitted draw is checked again by the GPU thread.
+            if (sel.worker &&
+                Vulkan::LiverpoolToVK::TrySurfaceFormat(buffer.GetDataFmt(),
+                                                        buffer.GetNumberFmt()) ==
+                    vk::Format::eUndefined &&
+                buffer.GetDataFmt() != AmdGpu::DataFormat::FormatInvalid) {
+                return false;
+            }
             ASSERT_MSG(vertex_binding < MaxVertexBufferCount,
                        "Vertex attribute binding count exceeded limit: {} >= {}", vertex_binding,
                        MaxVertexBufferCount);

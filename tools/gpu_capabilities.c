@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
+#include "../src/vulkan_portability.h"
 
 #include "video_core/amdgpu/gow3_msaa_default.h"
 
@@ -66,6 +67,42 @@ static int live_resolution_suits(VkPhysicalDevice device) {
     return suits;
 }
 
+/* Check the explicit startup requirements in vk_instance.cpp. Passing this is
+ * not a renderer validation: shaders, formats and presentation need testing. */
+static int renderer_requirements(VkPhysicalDevice device) {
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(device,&props);
+    printf("GPU: %s; Vulkan %u.%u.%u\n",props.deviceName,
+           VK_API_VERSION_MAJOR(props.apiVersion),VK_API_VERSION_MINOR(props.apiVersion),
+           VK_API_VERSION_PATCH(props.apiVersion));
+    int missing=props.apiVersion<VK_API_VERSION_1_3;
+    printf("Required Vulkan 1.3: %s\n",missing ? "MISSING" : "present");
+    const char *required[]={"VK_KHR_swapchain","VK_KHR_push_descriptor",
+        "VK_EXT_vertex_attribute_divisor","VK_EXT_robustness2"};
+    for (size_t i=0;i<sizeof(required)/sizeof(required[0]);++i) {
+        int present=has_extension(device,required[i]);
+        printf("Required %s: %s\n",required[i],present ? "present" : "MISSING");
+        missing+=!present;
+    }
+    VkPhysicalDeviceFeatures features;
+    vkGetPhysicalDeviceFeatures(device,&features);
+    printf("Informational: geometryShader=%u shaderInt64=%u sparseBinding=%u sparseResidencyBuffer=%u\n",
+           features.geometryShader,features.shaderInt64,features.sparseBinding,features.sparseResidencyBuffer);
+    if (props.apiVersion>=VK_API_VERSION_1_1 && has_extension(device,"VK_EXT_robustness2")) {
+        VkPhysicalDeviceRobustness2FeaturesEXT robustness={
+            .sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
+        VkPhysicalDeviceFeatures2 chain={.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+            .pNext=&robustness};
+        vkGetPhysicalDeviceFeatures2(device,&chain);
+        printf("Required robustness2: robustBufferAccess2=%u robustImageAccess2=%u nullDescriptor=%u\n",
+               robustness.robustBufferAccess2,robustness.robustImageAccess2,robustness.nullDescriptor);
+        missing+=!robustness.robustBufferAccess2 || !robustness.robustImageAccess2 || !robustness.nullDescriptor;
+    }
+    puts(missing ? "Renderer startup requirements NOT met." :
+         "Listed startup requirements met; full renderer compatibility NOT tested.");
+    return missing ? 2 : 0;
+}
+
 int main(int argc, char **argv) {
     const int live_mode = argc > 1 && !strcmp(argv[1], "--live-resolution");
     const VkApplicationInfo app = {
@@ -73,12 +110,8 @@ int main(int argc, char **argv) {
         .pApplicationName = "gow3 scene scaling probe",
         .apiVersion = VK_API_VERSION_1_3,
     };
-    const VkInstanceCreateInfo create = {
-        .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pApplicationInfo = &app,
-    };
     VkInstance instance = VK_NULL_HANDLE;
-    if (vkCreateInstance(&create, NULL, &instance) != VK_SUCCESS) {
+    if (gow3_vk_instance(&app, &instance) != VK_SUCCESS) {
         fputs("GPU scene scaling: cannot create Vulkan instance\n", stderr);
         return 1;
     }
@@ -137,6 +170,12 @@ int main(int argc, char **argv) {
     } else {
         for (uint32_t i = 1; i < count; ++i)
             if (better_device(devices[i], selected)) selected = devices[i];
+    }
+    if (argc > 1 && !strcmp(argv[1], "--renderer-requirements")) {
+        int result=renderer_requirements(selected);
+        free(devices);
+        vkDestroyInstance(instance,NULL);
+        return result;
     }
     if (live_mode) {
         printf("%d\n", live_resolution_suits(selected));

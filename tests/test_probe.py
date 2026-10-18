@@ -8,8 +8,8 @@ import sys
 import tempfile
 import unittest
 
-EXE = ROOT / 'out/gow3-probe'
-HOST_EXE = ROOT / ('out/gow3-probe' + ('.exe' if sys.platform == 'win32' else ''))
+EXE = Path(os.environ.get('GOW3_TEST_PROBE', ROOT / 'out/gow3-probe'))
+HOST_EXE = Path(os.environ.get('GOW3_TEST_PROBE', ROOT / ('out/gow3-probe' + ('.exe' if sys.platform == 'win32' else ''))))
 
 
 def package(code, relocs=(), names=(), capabilities=None):

@@ -9,6 +9,10 @@
 #include "video_core/texture_cache/image_view.h"
 
 #include <magic_enum/magic_enum.hpp>
+#ifdef __APPLE__
+#include <cstdlib>
+#include <vulkan/vulkan_metal.h>
+#endif
 
 namespace VideoCore {
 
@@ -92,7 +96,12 @@ ImageViewInfo::ImageViewInfo(const AmdGpu::DepthBuffer& depth_buffer, AmdGpu::De
 ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info_,
                      const Image& image)
     : info{info_} {
-    vk::ImageViewUsageCreateInfo usage_ci{.usage = image.usage_flags};
+    vk::ImageViewUsageCreateInfo usage_ci{.usage = image.backing->image.image_ci.usage};
+#ifdef __APPLE__
+    // MetalFX must export the actual view, including MoltenVK's format swizzle.
+    VkExportMetalObjectCreateInfoEXT metal_export{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT};
+    metal_export.exportObjectType = VK_EXPORT_METAL_OBJECT_TYPE_METAL_TEXTURE_BIT_EXT;
+#endif
     if (!info.is_storage) {
         usage_ci.usage &= ~vk::ImageUsageFlagBits::eStorage;
     }
@@ -103,6 +112,13 @@ ImageView::ImageView(const Vulkan::Instance& instance, const ImageViewInfo& info
         min_lod_ci.minLod = std::min(static_cast<float>(info.min_lod) / 256.f, last_level);
         usage_ci.pNext = &min_lod_ci;
     }
+#ifdef __APPLE__
+    const char* framegen=std::getenv("GOW3_FRAMEGEN");
+    if (std::getenv("GOW3_METALFX_MODE") || (framegen && framegen[0]=='1')) {
+        metal_export.pNext = usage_ci.pNext;
+        usage_ci.pNext = &metal_export;
+    }
+#endif
     // When sampling D32/D16 texture from shader, the T# specifies R32/R16 format so adjust it.
     vk::Format format = info.format;
     vk::ImageAspectFlags aspect = image.aspect_mask;

@@ -20,6 +20,10 @@
 #include "video_core/renderer_vulkan/vk_warmup_inbox.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
+#include <thread>
+#ifdef __APPLE__
+#include <vulkan/vulkan_metal.h>
+#endif
 
 #include <miniz.h>
 
@@ -317,7 +321,31 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
         free_queue.push(&frame);
     }
 
+#ifdef __APPLE__
+    if(FrameGen::Requested()){
+        frame_interpolator=std::make_unique<FrameInterpolator>(instance.GetInstance(),device,VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr);
+        std::printf("Framegen: requested native MetalFX, available=%d problem=%s\n",frame_interpolator->Available(),frame_interpolator->Problem()?frame_interpolator->Problem():"none");
+    }
+    if (const char* mode = std::getenv("GOW3_METALFX_MODE")) {
+        if (std::strcmp(mode,"spatial") == 0) {
+            metalfx = std::make_unique<MetalFx>(instance.GetInstance(),
+                device,VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr);
+            ASSERT_MSG(Gow3Settings::Get().upscaler == Gow3Settings::UpscalerOff,
+                "Set the legacy upscaler to none when using MetalFX spatial");
+            metalfx_float_output = EmulatorSettingsImpl::Flag("GOW3_METALFX_FLOAT_OUTPUT", false);
+            ASSERT_MSG(metalfx->Available(),"MetalFX native GPU interop is unavailable");
+            if (const char* size = std::getenv("GOW3_METALFX_OUTPUT")) {
+                ASSERT_MSG(std::sscanf(size,"%ux%u",&metalfx_width,&metalfx_height)==2 &&
+                    metalfx_width>=640 && metalfx_height>=360 && metalfx_width<=7680 && metalfx_height<=4320,
+                    "Invalid MetalFX output resolution");
+            }
+        } else {
+            ASSERT_MSG(false,"Only MetalFX spatial is integrated; temporal camera data is not calibrated");
+        }
+    }
+#endif
     fsr_pass.Create(device, instance.GetAllocator(), num_images);
+    spatial_aa.Create(device,instance.GetAllocator());
     pp_pass.Create(device, swapchain.GetSurfaceFormat().format);
     Gow3Overlay::Init(instance, swapchain.GetSurfaceFormat().format, num_images);
 
@@ -364,8 +392,16 @@ Presenter::~Presenter() {
     Check(present_scheduler.CommandBuffer().reset());
     Check(flip_scheduler.CommandBuffer().reset());
 
+#ifdef __APPLE__
+    interpolation_linear.reset();interpolation_view.reset();
+    interpolation_output=VideoCore::UniqueImage{};frame_interpolator.reset();
+    metalfx_view.reset();
+    metalfx_output = VideoCore::UniqueImage{};
+    metalfx.reset();
+#endif
     const vk::Device device = instance.GetDevice();
     for (auto& frame : present_frames) {
+        if(frame.generated){auto& g=*frame.generated;vmaDestroyImage(instance.GetAllocator(),g.image,g.allocation);device.destroyImageView(g.image_view);device.destroyFence(g.present_done);}
         vmaDestroyImage(instance.GetAllocator(), frame.image, frame.allocation);
         device.destroyImageView(frame.image_view);
         device.destroyFence(frame.present_done);
@@ -516,9 +552,9 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
 // gow3: raw copy of an image for GOW3_FRAME_DUMP_TRIGGER, written once the GPU is done.
 static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandBuffer cmdbuf,
                     vk::Image image, vk::ImageLayout layout, u32 w, u32 h, const char* name,
-                    int index) {
+                    int index, u32 bytes_per_pixel = 4) {
     const VkBufferCreateInfo buffer_ci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                                       .size = VkDeviceSize(w) * h * 4,
+                                       .size = VkDeviceSize(w) * h * bytes_per_pixel,
                                        .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     const VmaAllocationCreateInfo alloc_ci{
         .flags = VMA_ALLOCATION_CREATE_MAPPED_BIT | VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
@@ -547,6 +583,253 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
         vmaDestroyBuffer(allocator, buffer, allocation);
     });
 }
+
+#ifdef __APPLE__
+vk::ImageView Presenter::UpscaleMetalFx(vk::ImageView perceptual_view, vk::CommandBuffer& cmd,
+        vk::Extent2D& size, bool encoded_srgb, bool dump, int index) {
+    if (!metalfx_output) {
+        draw_scheduler.Finish();
+        cmd = draw_scheduler.CommandBuffer();
+        metalfx_output = VideoCore::UniqueImage(instance.GetDevice(),instance.GetAllocator());
+        const auto format = metalfx_float_output ? vk::Format::eR16G16B16A16Sfloat : vk::Format::eR8G8B8A8Unorm;
+        metalfx_output.Create(vk::ImageCreateInfo{
+            .flags=vk::ImageCreateFlagBits::eMutableFormat,
+            .imageType=vk::ImageType::e2D, .format=format,
+            .extent={metalfx_width,metalfx_height,1}, .mipLevels=1, .arrayLayers=1,
+            .samples=vk::SampleCountFlagBits::e1, .tiling=vk::ImageTiling::eOptimal,
+            .usage=vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eSampled |
+                vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferSrc,
+            .initialLayout=vk::ImageLayout::eUndefined});
+        metalfx_view=Check(instance.GetDevice().createImageViewUnique({
+            .image=vk::Image(metalfx_output), .viewType=vk::ImageViewType::e2D,
+            .format=metalfx_float_output ? format : encoded_srgb ? vk::Format::eR8G8B8A8Srgb : format,
+            .components={vk::ComponentSwizzle::eIdentity,vk::ComponentSwizzle::eIdentity,vk::ComponentSwizzle::eIdentity,vk::ComponentSwizzle::eOne},
+            .subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}}));
+    }
+    ASSERT_MSG(metalfx->Configure(size.width,size.height,metalfx_width,metalfx_height,
+        perceptual_view,vk::Image(metalfx_output)),"MetalFX spatial scaler configuration failed");
+    vk::ImageMemoryBarrier2 barrier{
+        .srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask=vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask=vk::AccessFlagBits2::eMemoryWrite,
+        .oldLayout=metalfx_initialized?vk::ImageLayout::eShaderReadOnlyOptimal:vk::ImageLayout::eUndefined,
+        .newLayout=vk::ImageLayout::eGeneral,
+        .srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+        .image=vk::Image(metalfx_output),.subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}};
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&barrier});
+    const u64 value=metalfx->NextValue();
+    SubmitInfo ready{};ready.AddSignal(metalfx->ReadySemaphore(),value);
+    draw_scheduler.Flush(ready);
+    ASSERT_MSG(metalfx->Encode(perceptual_view,vk::Image(metalfx_output),value),"MetalFX spatial GPU encode failed");
+    draw_scheduler.WaitExternal(metalfx->DoneSemaphore(),value);
+    cmd=draw_scheduler.CommandBuffer();
+    barrier.oldLayout=vk::ImageLayout::eGeneral;
+    barrier.srcAccessMask=vk::AccessFlagBits2::eMemoryWrite;
+    barrier.dstAccessMask=vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead;
+    barrier.newLayout=dump?vk::ImageLayout::eGeneral:vk::ImageLayout::eShaderReadOnlyOptimal;
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&barrier});
+    metalfx_initialized=true;
+    if(dump) {
+        DumpRaw(instance,draw_scheduler,cmd,vk::Image(metalfx_output),vk::ImageLayout::eGeneral,
+            metalfx_width,metalfx_height,metalfx_float_output?"metalfx-perceptual-f16":"metalfx-perceptual-rgba8",index,metalfx_float_output?8:4);
+        barrier.srcAccessMask=vk::AccessFlagBits2::eMemoryRead|vk::AccessFlagBits2::eMemoryWrite;
+        barrier.dstAccessMask=vk::AccessFlagBits2::eShaderRead;
+        barrier.newLayout=vk::ImageLayout::eShaderReadOnlyOptimal;
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&barrier});
+    }
+    static bool reported=false;
+    if(!reported){
+        std::printf("MetalFX: spatial scaler input=%ux%u output=%ux%u perceptual=%d includes_game_HUD=1 (interpolation is a separate stage)\n",
+            size.width,size.height,metalfx_width,metalfx_height,encoded_srgb);
+        reported=true;
+    }
+    size={metalfx_width,metalfx_height};
+    return *metalfx_view;
+}
+#endif
+
+#ifdef __APPLE__
+void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_id,
+                              const VideoCore::ImageViewInfo& ui_view, vk::CommandBuffer& cmd,
+                              bool dump, int index) {
+    frame->has_generated = false;
+    auto* inputs = rasterizer->GetFrameGenInputs();
+    if (!inputs)
+        return;
+    // A menu, movie, missing scene snapshot or unsupported format must show the
+    // real frame only. A reset on the next valid frame prevents cross-scene ghosts.
+    if (!frame_interpolator || !frame_interpolator->Available() || frame->is_hdr || !ui_id ||
+        !inputs->Ready(address) || !Gow3Settings::Get().vsync ||
+        std::getenv("GOW3_FRAMEGEN_INPUTS_ONLY")) {
+        if (frame_interpolator)
+            frame_interpolator->ResetHistory();
+        inputs->FinishFrame();
+        return;
+    }
+    const auto size = inputs->Size();
+    const auto device = instance.GetDevice();
+    constexpr vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+    if (interpolation_size != size) {
+        draw_scheduler.Finish();
+        cmd = draw_scheduler.CommandBuffer();
+        interpolation_linear.reset();
+        interpolation_view.reset();
+        interpolation_output = VideoCore::UniqueImage(device, instance.GetAllocator());
+        interpolation_output.Create({.flags = vk::ImageCreateFlagBits::eMutableFormat,
+                                     .imageType = vk::ImageType::e2D,
+                                     .format = vk::Format::eB8G8R8A8Unorm,
+                                     .extent = {size.width, size.height, 1},
+                                     .mipLevels = 1,
+                                     .arrayLayers = 1,
+                                     .samples = vk::SampleCountFlagBits::e1,
+                                     .tiling = vk::ImageTiling::eOptimal,
+                                     .usage = vk::ImageUsageFlagBits::eColorAttachment |
+                                              vk::ImageUsageFlagBits::eSampled |
+                                              vk::ImageUsageFlagBits::eTransferSrc});
+        VkExportMetalObjectCreateInfoEXT e{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT};
+        e.exportObjectType = VK_EXPORT_METAL_OBJECT_TYPE_METAL_TEXTURE_BIT_EXT;
+        interpolation_view =
+            Check(device.createImageViewUnique({.pNext = &e,
+                                                .image = vk::Image(interpolation_output),
+                                                .viewType = vk::ImageViewType::e2D,
+                                                .format = vk::Format::eB8G8R8A8Unorm,
+                                                .subresourceRange = range}));
+        interpolation_linear =
+            Check(device.createImageViewUnique({.image = vk::Image(interpolation_output),
+                                                .viewType = vk::ImageViewType::e2D,
+                                                .format = vk::Format::eB8G8R8A8Srgb,
+                                                .subresourceRange = range}));
+        interpolation_size = size;
+        interpolation_initialized = false;
+    }
+    if (!frame->generated) {
+        frame->generated = std::make_unique<Frame>();
+        frame->generated->id = frame->id;
+        frame->generated->present_done =
+            Check(device.createFence({.flags = vk::FenceCreateFlagBits::eSignaled}));
+    }
+    auto* generated = frame->generated.get();
+    if (generated->width != frame->width || generated->height != frame->height || !generated->image)
+        RecreateFrame(generated, frame->width, frame->height);
+    auto& ui = texture_cache.GetImage(ui_id);
+    auto view = ui_view;
+    if (view.format == vk::Format::eR8G8B8A8Srgb)
+        view.format = vk::Format::eR8G8B8A8Unorm;
+    if (view.format == vk::Format::eB8G8R8A8Srgb)
+        view.format = vk::Format::eB8G8R8A8Unorm;
+    const auto ui_handle = *ui.FindView(view).image_view;
+    runtime.Transit(&ui, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eAllCommands,
+                    vk::AccessFlagBits2::eShaderRead);
+    runtime.FlushBarriers();
+    const auto resources = inputs->Inputs(ui_handle);
+    auto parameters = inputs->Parameters();
+    const auto temporal_size = inputs->TemporalSize();
+    const bool configured =
+        frame_interpolator->Configure(temporal_size.width, temporal_size.height, size.width,
+                                      size.height, resources, vk::Image(interpolation_output));
+    if (!configured) {
+        frame_interpolator->ResetHistory();
+        inputs->FinishFrame();
+        return;
+    }
+    if (dump) {
+        const vk::MemoryBarrier2 read{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+                                      .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+                                      .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
+                                      .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
+        cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &read});
+        DumpRaw(instance, draw_scheduler, cmd, inputs->ColorImage(), vk::ImageLayout::eGeneral,
+                size.width, size.height, "framegen-color", index);
+        DumpRaw(instance, draw_scheduler, cmd, inputs->PreviousColorImage(),
+                vk::ImageLayout::eGeneral, size.width, size.height, "framegen-previous", index);
+        DumpRaw(instance, draw_scheduler, cmd, inputs->DepthImage(), vk::ImageLayout::eGeneral,
+                temporal_size.width, temporal_size.height, "framegen-depth", index);
+        DumpRaw(instance, draw_scheduler, cmd, inputs->MotionImage(), vk::ImageLayout::eGeneral,
+                temporal_size.width, temporal_size.height, "framegen-motion", index);
+    }
+    vk::ImageMemoryBarrier2 b{
+        .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+        .dstStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+        .dstAccessMask = vk::AccessFlagBits2::eMemoryWrite,
+        .oldLayout = interpolation_initialized ? vk::ImageLayout::eShaderReadOnlyOptimal
+                                               : vk::ImageLayout::eUndefined,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = vk::Image(interpolation_output),
+        .subresourceRange = range};
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    const auto value = frame_interpolator->NextValue();
+    SubmitInfo ready{};
+    ready.AddSignal(frame_interpolator->ReadySemaphore(), value);
+    draw_scheduler.Flush(ready);
+    if (!frame_interpolator->Encode(resources, vk::Image(interpolation_output), parameters,
+                                    value)) {
+        frame_interpolator->ResetHistory();
+        interpolation_initialized = false;
+        inputs->FinishFrame();
+        return;
+    }
+    draw_scheduler.WaitExternal(frame_interpolator->DoneSemaphore(), value);
+    cmd = draw_scheduler.CommandBuffer();
+    if (dump) {
+        b.oldLayout = vk::ImageLayout::eGeneral;
+        b.newLayout = vk::ImageLayout::eGeneral;
+        b.dstAccessMask = vk::AccessFlagBits2::eTransferRead;
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+        DumpRaw(instance, draw_scheduler, cmd, vk::Image(interpolation_output),
+                vk::ImageLayout::eGeneral, size.width, size.height, "framegen-intermediate-bgra",
+                index);
+        b.srcAccessMask = vk::AccessFlagBits2::eTransferRead;
+    }
+    b.oldLayout = vk::ImageLayout::eGeneral;
+    b.newLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+    b.dstAccessMask = vk::AccessFlagBits2::eShaderRead;
+    cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+    interpolation_initialized = true;
+    if (frame_interpolator->OutputInterpolated()) {
+        vk::ImageView output = *interpolation_linear;
+        vk::Extent2D output_size = size;
+        const int aa = Gow3Settings::Get().spatial_aa;
+        if (aa) {
+            spatial_aa.Render(cmd, draw_scheduler, *interpolation_view, *interpolation_linear, size,
+                              aa);
+            output = spatial_aa.LinearView();
+        }
+        if (metalfx) {
+            if (!aa) {
+                b.oldLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
+                b.newLayout = vk::ImageLayout::eGeneral;
+                cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
+                interpolation_initialized = false;
+            }
+            output = UpscaleMetalFx(aa ? spatial_aa.PerceptualView() : *interpolation_view, cmd,
+                                    output_size, true, false, 0);
+        } else if (aa)
+            spatial_aa.PrepareForVulkan(cmd);
+        const vk::ImageMemoryBarrier2 target{
+            .srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
+            .dstStageMask = vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            .dstAccessMask = vk::AccessFlagBits2::eColorAttachmentWrite,
+            .oldLayout = vk::ImageLayout::eUndefined,
+            .newLayout = vk::ImageLayout::eColorAttachmentOptimal,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = generated->image,
+            .subresourceRange = range};
+        cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &target});
+        auto settings = pp_settings;
+        settings.srgb_input = metalfx && metalfx_float_output;
+        output = fsr_pass.Render(cmd, output, output_size, {generated->width, generated->height},
+                                 fsr_settings, false);
+        pp_pass.Render(cmd, output, output_size, *generated, settings);
+        frame->has_generated = true;
+    }
+    inputs->FinishFrame();
+}
+#endif
 
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
@@ -588,7 +871,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     };
 
     draw_scheduler.EndRendering();
-    const auto cmdbuf = draw_scheduler.CommandBuffer();
+    auto cmdbuf = draw_scheduler.CommandBuffer();
     cmdbuf.pipelineBarrier2(vk::DependencyInfo{
         .imageMemoryBarrierCount = 1,
         .pImageMemoryBarriers = &pre_barrier,
@@ -601,6 +884,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     vk::ImageView image_view{};
     vk::Extent2D image_size{};
+    bool metalfx_encoded = false;
     if (upscaled) {
         const auto device = instance.GetDevice();
         image_view = Check(device.createImageView({
@@ -637,10 +921,98 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         image_view = *image.FindView(view_info).image_view;
         image_size = vk::Extent2D{image.info.size.width, image.info.size.height};
         runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
-                        vk::PipelineStageFlagBits2::eFragmentShader,
+                        vk::PipelineStageFlagBits2::eFragmentShader|vk::PipelineStageFlagBits2::eComputeShader,
                         vk::AccessFlagBits2::eShaderRead);
         runtime.FlushBarriers();
     }
+    const int aa_mode=Gow3Settings::Get().spatial_aa;
+    const bool aa_used=aa_mode!=0&&!upscaled&&!frame->is_hdr&&
+        (view_info.format==vk::Format::eR8G8B8A8Srgb||view_info.format==vk::Format::eB8G8R8A8Srgb);
+    Gow3Settings::Get().spatial_aa_applied=aa_used;
+    if(aa_used) {
+        auto perceptual_info=view_info;
+        perceptual_info.format=view_info.format==vk::Format::eR8G8B8A8Srgb?
+            vk::Format::eR8G8B8A8Unorm:vk::Format::eB8G8R8A8Unorm;
+        auto perceptual=*texture_cache.GetImage(image_id).FindView(perceptual_info).image_view;
+        spatial_aa.Render(cmdbuf,draw_scheduler,perceptual,image_view,image_size,aa_mode);
+        if(frame_dump)DumpRaw(instance,draw_scheduler,cmdbuf,spatial_aa.Image(),vk::ImageLayout::eGeneral,
+            image_size.width,image_size.height,"spatial-aa",frame_dump_index);
+    }
+    static int last_aa=-1;
+    if(last_aa!=aa_mode) {
+        std::printf("Spatial AA: %s applied=%d %ux%u before_upscaling=1 history=0 jitter=0\n",
+            Gow3Graphics::SpatialAaNames[std::clamp(aa_mode,0,Gow3Graphics::SpatialAaCount-1)],
+            aa_used,image_size.width,image_size.height);
+        last_aa=aa_mode;
+    }
+    const auto hud_input_size = image_size;
+    bool hud_metalfx_applied = false;
+#ifdef __APPLE__
+    if (metalfx && !upscaled) {
+        static unsigned color_trace = 0;
+        if (color_trace++ < 3) std::printf("MetalFX display: base=%s view=%s presentation=%s pixel_format=%u\n",
+            vk::to_string(texture_cache.GetImage(image_id).info.pixel_format).c_str(),
+            vk::to_string(view_info.format).c_str(), vk::to_string(frame->format).c_str(),
+            static_cast<unsigned>(attribute.attrib.pixel_format));
+        ASSERT_MSG(!frame->is_hdr, "MetalFX spatial currently supports SDR output only");
+        metalfx_encoded = view_info.format == vk::Format::eR8G8B8A8Srgb ||
+            view_info.format == vk::Format::eB8G8R8A8Srgb ||
+            attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
+        if (frame_dump) {
+            // Same-frame color reference through the original sampled display
+            // view. Only the explicit diagnostic trigger adds this extra pass.
+            auto reference_settings = pp_settings;
+            reference_settings.srgb_input = attribute.attrib.pixel_format ==
+                Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
+            reference_settings.picture = MovieBars::Cutscenes().Bars(
+                image_size.width, image_size.height, MovieBars::NowMs());
+            pp_pass.Render(cmdbuf,image_view,image_size,*frame,reference_settings);
+            const vk::MemoryBarrier2 readable{
+                .srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask=vk::AccessFlagBits2::eMemoryWrite,
+                .dstStageMask=vk::PipelineStageFlagBits2::eTransfer,
+                .dstAccessMask=vk::AccessFlagBits2::eTransferRead};
+            cmdbuf.pipelineBarrier2({.memoryBarrierCount=1,.pMemoryBarriers=&readable});
+            DumpRaw(instance,draw_scheduler,cmdbuf,frame->image,vk::ImageLayout::eGeneral,
+                frame->width,frame->height,"reference-presentation",frame_dump_index);
+            const vk::ImageMemoryBarrier2 reuse{
+                .srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+                .srcAccessMask=vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+                .dstStageMask=vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                .dstAccessMask=vk::AccessFlagBits2::eColorAttachmentWrite,
+                .oldLayout=vk::ImageLayout::eGeneral,.newLayout=vk::ImageLayout::eColorAttachmentOptimal,
+                .srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
+                .image=frame->image,.subresourceRange=frame_subresources};
+            cmdbuf.pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&reuse});
+        }
+        // Preserve the original display's format and component mapping. MetalFX
+        // perceptual mode consumes encoded RGB; only remove the sRGB decode.
+        auto perceptual_info = view_info;
+        if (perceptual_info.format == vk::Format::eR8G8B8A8Srgb)
+            perceptual_info.format = vk::Format::eR8G8B8A8Unorm;
+        if (perceptual_info.format == vk::Format::eB8G8R8A8Srgb)
+            perceptual_info.format = vk::Format::eB8G8R8A8Unorm;
+        const auto perceptual_view = aa_used?spatial_aa.PerceptualView():
+            *texture_cache.GetImage(image_id).FindView(perceptual_info).image_view;
+        if(!aa_used) {
+            runtime.Transit(&texture_cache.GetImage(image_id),vk::ImageLayout::eGeneral,
+                vk::PipelineStageFlagBits2::eAllCommands,vk::AccessFlagBits2::eShaderRead);
+            runtime.FlushBarriers();
+        }
+        image_view = UpscaleMetalFx(perceptual_view,cmdbuf,image_size,
+                                   metalfx_encoded,frame_dump,frame_dump_index);
+        hud_metalfx_applied = true;
+        // The SDR output uses an sRGB sampling view, matching the original display.
+        if (!metalfx_float_output) metalfx_encoded = false;
+    }
+    else
+#endif
+    if(aa_used) {
+        spatial_aa.PrepareForVulkan(cmdbuf);
+        image_view=spatial_aa.LinearView();
+    }
+    Gow3Overlay::SetDisplayInfo(hud_input_size.width, hud_input_size.height,
+                                image_size.width, image_size.height, hud_metalfx_applied);
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
     // gow3: FSR 1, RCAS and its strength come from the in-game menu, every frame.
@@ -648,6 +1020,18 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     fsr_settings.enable = graphics.fsr1;
     fsr_settings.use_rcas = graphics.rcas;
     fsr_settings.rcas_attenuation = Gow3Graphics::RcasAttenuation(graphics.rcas_strength);
+    // Opt-in resolution evidence separates guest rendering from window presentation.
+    static const bool trace_resolution = EmulatorSettingsImpl::Flag("GOW3_TRACE_RESOLUTION", false);
+    static std::array<int, 6> last_resolution{};
+    const std::array<int, 6> resolution{graphics.active_render_width.load(),
+        graphics.active_render_height.load(), int(image_size.width), int(image_size.height),
+        int(frame->width), int(frame->height)};
+    if (trace_resolution && resolution != last_resolution) {
+        std::printf("Resolution: proxy_setting=%dx%d display=%dx%d presentation=%dx%d\n",
+                    resolution[0], resolution[1], resolution[2], resolution[3],
+                    resolution[4], resolution[5]);
+        last_resolution = resolution;
+    }
     Gow3Settings::Get().image_width = int(image_size.width);
     Gow3Settings::Get().image_height = int(image_size.height);
     Gow3Settings::Get().window_width = int(frame->width);
@@ -662,7 +1046,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
     pp_settings.srgb_input =
-        attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
+        metalfx_encoded || attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
     // gow3: black bars around a cutscene when the render resolution is not 16:9 (movie_bars.h).
     pp_settings.picture = MovieBars::Cutscenes().Bars(image_size.width, image_size.height,
                                                       MovieBars::NowMs());
@@ -679,11 +1063,15 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         ++frame_dump_index;
     }
 
+#ifdef __APPLE__
+    GenerateFrame(frame,cpu_address,image_id,view_info,cmdbuf,frame_dump,frame_dump_index-1);
+#endif
     // Flush frame creation commands.
     frame->ready_semaphore = draw_scheduler.GetWorkSemaphore()->Handle();
     frame->ready_tick = draw_scheduler.CurrentTick();
     SubmitInfo info{};
     draw_scheduler.Flush(info);
+    if(frame->has_generated){frame->generated->ready_semaphore=frame->ready_semaphore;frame->generated->ready_tick=frame->ready_tick;}
 
     // gow3: the GPU command thread runs at most GOW3_FRAMES_AHEAD (default 1) guest frames
     // ahead of the GPU: it waits here for the frame that many flips back. When the GPU is the
@@ -837,6 +1225,33 @@ void Presenter::PresentLoadingFrame() {
 }
 
 void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
+#ifdef __APPLE__
+    if (is_game_frame && !is_reusing_frame && frame->has_generated) {
+        // VSync/FIFO queues the midpoint before the current frame. Do not add a
+        // CPU sleep: drawable acquisition already supplies presentation pacing.
+        Present(frame->generated.get(), true, false);
+    }
+    if (frame_interpolator && is_game_frame && !is_reusing_frame) {
+        const auto now = std::chrono::steady_clock::now();
+        if (interpolation_stats_time.time_since_epoch().count() == 0)
+            interpolation_stats_time = now;
+        ++interpolation_real_count;
+        if (frame->has_generated)
+            ++interpolation_generated_count;
+        const double seconds =
+            std::chrono::duration<double>(now - interpolation_stats_time).count();
+        if (seconds >= 5) {
+            Gow3Overlay::SetFrameGenerationRates(float(interpolation_real_count / seconds),
+                                                 float(interpolation_generated_count / seconds));
+            std::printf("Framegen stats: real=%.3f generated=%.3f presents=%.3f per second "
+                        "(submission counters; actual presentation is in Display timing)\n",
+                        interpolation_real_count / seconds, interpolation_generated_count / seconds,
+                        (interpolation_real_count + interpolation_generated_count) / seconds);
+            interpolation_real_count = interpolation_generated_count = 0;
+            interpolation_stats_time = now;
+        }
+    }
+#endif
     // Free the frame for reuse
     const auto free_frame = [&] {
         if (!is_reusing_frame) {
@@ -935,7 +1350,22 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                          vk::ImageLayout::eTransferDstOptimal,
                          MakeImageBlitFit(frame->width, frame->height, extent.width, extent.height),
                          vk::Filter::eLinear);
-        if (VideoCore::ConsumeGameOnlyScreenshotRequests() != 0) {
+        // Capture a specified presented game frame for unattended port verification.
+        // This reads the game's render target, never the desktop or other applications.
+        static const u64 capture_frame = [] {
+            const char* value = std::getenv("GOW3_CAPTURE_FRAME");
+            return value ? std::strtoull(value, nullptr, 10) : 0ull;
+        }();
+        static const u64 capture_every = [] {
+            const char* value = std::getenv("GOW3_CAPTURE_EVERY");
+            return value ? std::strtoull(value, nullptr, 10) : 0ull;
+        }();
+        static u64 presented_frames = 0;
+        const bool new_game_frame = is_game_frame && !is_reusing_frame;
+        if (new_game_frame) ++presented_frames;
+        if (is_game_frame && (VideoCore::ConsumeGameOnlyScreenshotRequests() != 0 ||
+            (new_game_frame && ((capture_frame && presented_frames == capture_frame) ||
+                                (capture_every && presented_frames % capture_every == 0))))) {
             CaptureScreenshot(instance, scheduler, cmdbuf, *frame);
         }
         // gow3: the settings menu / FPS counter over the frame, at display resolution.
@@ -984,6 +1414,29 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
                                    vk::PipelineStageFlagBits::eBottomOfPipe,
                                    vk::DependencyFlagBits::eByRegion, {}, {}, to_present);
         }
+        // Explicit diagnostics can include our in-game HUD. Read only this
+        // swapchain image; the desktop and Apple's system overlay are excluded.
+        if (is_game_frame && VideoCore::ConsumeWithOverlaysScreenshotRequests() != 0) {
+            vk::ImageMemoryBarrier capture_barrier{
+                .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
+                .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+                .oldLayout = vk::ImageLayout::ePresentSrcKHR,
+                .newLayout = vk::ImageLayout::eTransferSrcOptimal,
+                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .image = swapchain_image, .subresourceRange = color_range};
+            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+                vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, capture_barrier);
+            const Frame snapshot{.width = extent.width, .height = extent.height,
+                .image = swapchain_image, .format = swapchain.GetSurfaceFormat().format};
+            CaptureScreenshot(instance, scheduler, cmdbuf, snapshot);
+            capture_barrier.srcAccessMask = vk::AccessFlagBits::eTransferRead;
+            capture_barrier.dstAccessMask = {};
+            capture_barrier.oldLayout = vk::ImageLayout::eTransferSrcOptimal;
+            capture_barrier.newLayout = vk::ImageLayout::ePresentSrcKHR;
+            cmdbuf.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+                vk::PipelineStageFlagBits::eBottomOfPipe, {}, {}, {}, capture_barrier);
+        }
     }
     if (EmulatorSettings.IsVkHostMarkersEnabled()) {
         cmdbuf.endDebugUtilsLabelEXT();
@@ -1001,7 +1454,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     // Present to swapchain.
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
-        if (!swapchain.Present() && window.GetWidth() != 0 && window.GetHeight() != 0) {
+        if (!swapchain.Present(!is_game_frame && is_reusing_frame) && window.GetWidth() != 0 && window.GetHeight() != 0) {
             swapchain.Recreate(window.GetWidth(), window.GetHeight());
         }
     }
@@ -1048,6 +1501,7 @@ Frame* Presenter::GetRenderFrame() {
         RecreateFrame(frame, expected_frame_width, expected_frame_height);
     }
 
+    frame->has_generated=false;
     return frame;
 }
 

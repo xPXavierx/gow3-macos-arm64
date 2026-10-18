@@ -45,6 +45,11 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eCompute,
         });
+        if (buffer.uniform_span) {
+            bindings.push_back({.binding = binding++,
+                .descriptorType = vk::DescriptorType::eUniformBuffer,
+                .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute});
+        }
     }
     for (const auto& image : info->images) {
         const u32 num_bindings = image.NumBindings(*info);

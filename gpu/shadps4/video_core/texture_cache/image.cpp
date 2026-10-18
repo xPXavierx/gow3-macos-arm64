@@ -12,12 +12,42 @@
 #include "video_core/texture_cache/image.h"
 
 #include <vk_mem_alloc.h>
+#ifdef __APPLE__
+#include <vulkan/vulkan_metal.h>
+#endif
+#include <cstdlib>
 
 namespace VideoCore {
 
 using namespace Vulkan;
 
 Common::IncrementalIdProvider<u64> Image::global_image_uid{};
+
+static int LazyColorMode() {
+#ifdef __APPLE__
+    // 1 compacts supported RGBA8 images; 3 only targets used for MIN reductions.
+    static const int mode = [] {
+        const char* value = std::getenv("GOW3_LAZY_COLOR");
+        return value && value[0] == '1' ? 1 : value && value[0] == '3' ? 3 : 0;
+    }();
+    return mode;
+#else
+    return 0;
+#endif
+}
+
+static bool SupportsCompactColor(const ImageInfo& info) {
+    return (info.type == AmdGpu::ImageType::Color2D ||
+                       info.type == AmdGpu::ImageType::Color2DMsaa) &&
+        info.resources.levels == 1 && info.resources.layers == 1 &&
+        !info.props.is_depth && !info.props.is_block &&
+        (info.pixel_format == vk::Format::eR8G8B8A8Unorm ||
+         info.pixel_format == vk::Format::eR8G8B8A8Srgb);
+}
+
+static bool UsesLazyColorUsage(const ImageInfo& info) {
+    return LazyColorMode() == 1 && SupportsCompactColor(info);
+}
 
 static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance& instance,
                                            const ImageInfo& info) {
@@ -44,6 +74,16 @@ static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance& instance,
         usage |= vk::ImageUsageFlagBits::eStorage;
     }
 
+    // Storage usage is speculative. It is illegal on multisampled images when this
+    // feature is absent, even if the image is only sampled/attached by the game.
+    if (info.num_samples > 1 && !instance.IsMultisampledStorageImageSupported()) {
+        usage &= ~vk::ImageUsageFlagBits::eStorage;
+    }
+    if (UsesLazyColorUsage(info)) {
+        // ShaderWrite also prevents Metal's lossless texture compression. Promote
+        // this allocation on its first actual storage view, preserving its pixels.
+        usage &= ~vk::ImageUsageFlagBits::eStorage;
+    }
     return usage;
 }
 
@@ -111,7 +151,15 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
         .pUserData = nullptr,
     };
 
-    const VkImageCreateInfo image_ci_unsafe = static_cast<VkImageCreateInfo>(image_ci);
+    VkImageCreateInfo image_ci_unsafe = static_cast<VkImageCreateInfo>(image_ci);
+#ifdef __APPLE__
+    VkExportMetalObjectCreateInfoEXT metal_export{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT};
+    if (std::getenv("GOW3_METALFX_MODE")) {
+        metal_export.exportObjectType=VK_EXPORT_METAL_OBJECT_TYPE_METAL_TEXTURE_BIT_EXT;
+        metal_export.pNext=image_ci_unsafe.pNext;
+        image_ci_unsafe.pNext=&metal_export;
+    }
+#endif
     VkImage unsafe_image{};
     VmaAllocationInfo alloc_info{};
     VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
@@ -188,7 +236,8 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
                             ? image_format_properties.value.imageFormatProperties.sampleCounts
                             : vk::SampleCountFlagBits::e1;
 
-    const vk::ImageCreateInfo image_ci = {
+    backing = &backing_images.emplace_back();
+    vk::ImageCreateInfo image_ci = {
         .flags = flags,
         .imageType = ConvertImageType(info.type),
         .format = supported_format,
@@ -205,7 +254,18 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
         .initialLayout = vk::ImageLayout::eUndefined,
     };
 
-    backing = &backing_images.emplace_back();
+    // An unrestricted mutable format forces Metal PixelFormatView usage, which
+    // prevents lossless render-target compression. RGBA8 targets normally
+    // need only the linear/sRGB pair; widen on demand before any different view.
+    if (UsesLazyColorUsage(info) &&
+        (supported_format == vk::Format::eR8G8B8A8Unorm ||
+         supported_format == vk::Format::eR8G8B8A8Srgb)) {
+        backing->color_view_formats = {vk::Format::eR8G8B8A8Unorm, vk::Format::eR8G8B8A8Srgb};
+        backing->color_format_list = {.viewFormatCount = 2,
+                                     .pViewFormats = backing->color_view_formats.data()};
+        image_ci.pNext = &backing->color_format_list;
+        backing->limited_color_formats = true;
+    }
     backing->num_samples = info.num_samples;
     backing->image = UniqueImage{instance.GetDevice(), instance.GetAllocator()};
     backing->image.Create(image_ci);
@@ -219,9 +279,23 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
 
 Image::~Image() = default;
 
+void Image::TryCompactMinTarget() {
+    if (LazyColorMode() != 3 || compact_min_attempted || !SupportsCompactColor(info)) return;
+    compact_min_attempted = true;
+    if (!backing->limited_color_formats) runtime->ReallocateColorBacking(this, false, true);
+}
+
 ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_samples) {
     if (ensure_guest_samples && backing->num_samples > 1 != info.num_samples > 1) {
         runtime->SetBackingSamples(this, info.num_samples);
+    }
+    const bool requires_storage = (LazyColorMode() == 1 || compact_min_attempted) &&
+        SupportsCompactColor(info) && view_info.is_storage &&
+        !(backing->image.image_ci.usage & vk::ImageUsageFlagBits::eStorage);
+    if (requires_storage || (backing->limited_color_formats &&
+        view_info.format != vk::Format::eR8G8B8A8Unorm &&
+        view_info.format != vk::Format::eR8G8B8A8Srgb)) {
+        runtime->ReallocateColorBacking(this, requires_storage);
     }
     const auto& view_infos = backing->image_view_infos;
     if (backing->last_view < view_infos.size() && view_infos[backing->last_view] == view_info) {

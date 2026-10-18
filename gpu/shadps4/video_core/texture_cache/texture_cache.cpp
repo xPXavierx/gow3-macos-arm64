@@ -18,6 +18,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
+#include "video_core/host_shaders/texture_audit_comp.h"
 #include "video_core/renderer_vulkan/vk_wait_diagnostics.h"
 #include "video_core/texture_cache/aliasing.h"
 #include "video_core/texture_cache/host_compatibility.h"
@@ -397,23 +398,32 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     }
 }
 
-void TextureCache::DiagDumpImage(ImageId image_id, const char* tag) {
+void TextureCache::DiagDumpImage(ImageId image_id, const char* tag, const ImageView* bound_view) {
     Image& image = slot_images[image_id];
     const u32 bytes_per_pixel = image.info.num_bits / 8;
-    if (image.info.props.is_depth || image.info.props.is_block || bytes_per_pixel == 0) {
+    if (image.info.props.is_depth || bytes_per_pixel == 0 || image.info.num_samples != 1) {
         return;
     }
-    const u32 size = image.info.pitch * image.info.size.height * bytes_per_pixel;
+    const bool all_levels = image.info.props.is_block && std::string_view(tag) == "bound" &&
+                            image.info.resources.layers == 1 && !image.info.props.is_volume;
+    const u32 row_blocks = image.info.props.is_block ? (image.info.pitch + 3) / 4 : image.info.pitch;
+    const u32 rows = image.info.props.is_block ? (image.info.size.height + 3) / 4 : image.info.size.height;
+    const u32 size = all_levels ? image.info.guest_size : row_blocks * rows * bytes_per_pixel;
     const auto download = runtime.GetStagingPool().Request(size, MemoryType::HostCached, 16);
-    const vk::BufferImageCopy copy = {
-        .bufferOffset = download.offset,
-        .bufferRowLength = image.info.pitch,
-        .bufferImageHeight = image.info.size.height,
-        .imageSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1},
-        .imageOffset = {0, 0, 0},
-        .imageExtent = {image.info.size.width, image.info.size.height, 1},
-    };
-    runtime.DownloadImage(&image, download.buffer, std::span{&copy, 1});
+    std::vector<vk::BufferImageCopy> copies;
+    for (u32 mip = 0; mip < (all_levels ? image.info.resources.levels : 1u); ++mip) {
+        const auto& layout = image.info.mips_layout[mip];
+        copies.push_back({
+            .bufferOffset = download.offset + (all_levels ? layout.offset : 0u),
+            .bufferRowLength = all_levels ? layout.pitch : image.info.pitch,
+            .bufferImageHeight = all_levels ? layout.height : image.info.size.height,
+            .imageSubresource = {vk::ImageAspectFlagBits::eColor, mip, 0, 1},
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {std::max(image.info.size.width >> mip, 1u),
+                            std::max(image.info.size.height >> mip, 1u), 1},
+        });
+    }
+    runtime.DownloadImage(&image, download.buffer, copies);
     scheduler.Finish();
     download.Invalidate();
     static int sequence = 0;
@@ -430,6 +440,104 @@ void TextureCache::DiagDumpImage(ImageId image_id, const char* tag) {
         std::fwrite(download.mapped, 1, size, f);
         std::fclose(f);
         std::printf("Diag: %s\n", path);
+        // A paired source snapshot makes stale uploads distinguishable from bad shading.
+        // Private game memory; this opt-in diagnostic must stay outside source packages.
+        if (image.info.props.is_block && std::string_view(tag) == "bound" &&
+            image.info.guest_size <= 32_MB) {
+            std::vector<u8> source(image.info.guest_size);
+            Core::Memory::Instance()->CopySparseMemory(image.info.guest_address, source.data(), source.size());
+            const std::string prefix(path);
+            if (FILE* guest = std::fopen((prefix + ".guest").c_str(), "wb")) {
+                std::fwrite(source.data(), 1, source.size(), guest);
+                std::fclose(guest);
+            }
+            if (FILE* meta = std::fopen((prefix + ".meta").c_str(), "w")) {
+                std::fprintf(meta, "tile %u array %u bits %u block %u levels %u layers %u gpu_modified %u dump_levels %u\n",
+                    u32(image.info.tile_mode), u32(image.info.array_mode), image.info.num_bits,
+                    image.info.props.is_block, image.info.resources.levels, image.info.resources.layers,
+                    u32(True(image.flags & ImageFlagBits::GpuModified)),
+                    all_levels ? image.info.resources.levels : 1u);
+                for (u32 mip = 0; mip < image.info.resources.levels; ++mip) {
+                    const auto& m = image.info.mips_layout[mip];
+                    std::fprintf(meta, "mip %u pitch %u height %u size %u offset %u\n",
+                        mip, m.pitch, m.height, m.size, m.offset);
+                }
+                if (bound_view) {
+                    const auto& v = bound_view->info;
+                    std::fprintf(meta, "view format %u base %u levels %u mapping %u %u %u %u\n",
+                        u32(v.format), v.range.base.level, v.range.extent.levels,
+                        u32(v.mapping.r), u32(v.mapping.g), u32(v.mapping.b), u32(v.mapping.a));
+                }
+                std::fclose(meta);
+            }
+            // A byte-for-byte upload check does not validate sampling or the view swizzle.
+            // This small, independent host shader reads the very view used by the draw.
+            if (bound_view && bound_view->info.type == AmdGpu::ImageType::Color2D &&
+                bound_view->info.range.extent.layers == 1) {
+                const auto device = instance.GetDevice();
+                const u32 levels = bound_view->info.range.extent.levels;
+                const auto sampled = runtime.GetStagingPool().Request(levels * 256 * 16,
+                    MemoryType::HostCached, instance.StorageMinAlignment());
+                const std::array<vk::DescriptorSetLayoutBinding, 2> bindings{{
+                    {.binding=0, .descriptorType=vk::DescriptorType::eStorageBuffer,
+                     .descriptorCount=1, .stageFlags=vk::ShaderStageFlagBits::eCompute},
+                    {.binding=1, .descriptorType=vk::DescriptorType::eCombinedImageSampler,
+                     .descriptorCount=1, .stageFlags=vk::ShaderStageFlagBits::eCompute},
+                }};
+                auto descriptors = device.createDescriptorSetLayoutUnique({
+                    .bindingCount=2, .pBindings=bindings.data()}).value;
+                const vk::DescriptorSetLayout raw_layout = *descriptors;
+                auto layout = device.createPipelineLayoutUnique({
+                    .setLayoutCount=1, .pSetLayouts=&raw_layout}).value;
+                auto module = device.createShaderModuleUnique({
+                    .codeSize=sizeof(TEXTURE_AUDIT_COMP), .pCode=TEXTURE_AUDIT_COMP}).value;
+                auto pipeline = device.createComputePipelineUnique({}, {
+                    .stage={.stage=vk::ShaderStageFlagBits::eCompute, .module=*module, .pName="main"},
+                    .layout=*layout}).value;
+                auto sampler = device.createSamplerUnique({
+                    .magFilter=vk::Filter::eNearest, .minFilter=vk::Filter::eNearest,
+                    .mipmapMode=vk::SamplerMipmapMode::eNearest,
+                    .addressModeU=vk::SamplerAddressMode::eClampToEdge,
+                    .addressModeV=vk::SamplerAddressMode::eClampToEdge,
+                    .addressModeW=vk::SamplerAddressMode::eClampToEdge, .maxLod=float(levels)}).value;
+                const std::array<vk::DescriptorPoolSize, 2> sizes{{
+                    {vk::DescriptorType::eStorageBuffer, 1},
+                    {vk::DescriptorType::eCombinedImageSampler, 1}}};
+                auto pool = device.createDescriptorPoolUnique({
+                    .maxSets=1, .poolSizeCount=2, .pPoolSizes=sizes.data()}).value;
+                const auto set = device.allocateDescriptorSets({
+                    .descriptorPool=*pool, .descriptorSetCount=1, .pSetLayouts=&raw_layout}).value[0];
+                runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
+                    vk::PipelineStageFlagBits2::eComputeShader, vk::AccessFlagBits2::eShaderSampledRead);
+                scheduler.EndRendering();
+                runtime.FlushBarriers();
+                const vk::DescriptorBufferInfo buffer_info{sampled.buffer->Handle(), sampled.offset, sampled.size};
+                const vk::DescriptorImageInfo texture_info{*sampler, *bound_view->image_view,
+                    vk::ImageLayout::eShaderReadOnlyOptimal};
+                const std::array<vk::WriteDescriptorSet, 2> writes{{
+                    {.dstSet=set, .dstBinding=0, .descriptorCount=1,
+                     .descriptorType=vk::DescriptorType::eStorageBuffer, .pBufferInfo=&buffer_info},
+                    {.dstSet=set, .dstBinding=1, .descriptorCount=1,
+                     .descriptorType=vk::DescriptorType::eCombinedImageSampler, .pImageInfo=&texture_info}}};
+                device.updateDescriptorSets(writes, {});
+                const auto cmd = scheduler.CommandBuffer();
+                cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
+                cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *layout, 0, set, {});
+                cmd.dispatch(1, 1, levels);
+                const vk::MemoryBarrier2 ready{
+                    .srcStageMask=vk::PipelineStageFlagBits2::eComputeShader,
+                    .srcAccessMask=vk::AccessFlagBits2::eShaderWrite,
+                    .dstStageMask=vk::PipelineStageFlagBits2::eHost,
+                    .dstAccessMask=vk::AccessFlagBits2::eHostRead};
+                cmd.pipelineBarrier2({.memoryBarrierCount=1, .pMemoryBarriers=&ready});
+                scheduler.Finish();
+                sampled.Invalidate();
+                if (FILE* samples = std::fopen((prefix + ".samples").c_str(), "wb")) {
+                    std::fwrite(sampled.mapped, 1, sampled.size, samples);
+                    std::fclose(samples);
+                }
+            }
+        }
     } else {
         std::printf("Diag: cannot write %s\n", path);
     }
@@ -1269,7 +1377,7 @@ ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, Vi
     return image.FindView(desc.view_info);
 }
 
-ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc) {
+ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& desc, bool min_reduction) {
     Image& image = slot_images[image_id];
     image.flags |= ImageFlagBits::GpuModified;
     if (readback_linear_images && (!image.info.props.is_tiled || image.info.size.width <= 8)) {
@@ -1293,6 +1401,7 @@ ImageView& TextureCache::FindRenderTarget(ImageId image_id, const ImageDesc& des
         image.info.meta_info.fmask_addr = desc.info.meta_info.fmask_addr;
     }
 
+    if (min_reduction) image.TryCompactMinTarget();
     return image.FindView(desc.view_info, false);
 }
 

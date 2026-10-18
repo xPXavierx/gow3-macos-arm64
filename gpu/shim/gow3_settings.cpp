@@ -106,6 +106,8 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.fsr1 = false;
     } else if (key == "rcas") {
         v.rcas = i != 0;
+    } else if (key == "spatial_aa") {
+        v.spatial_aa = Gow3Graphics::ParseSpatialAa(value);
     } else if (key == "rcas_strength") {
         v.rcas_strength = Gow3Graphics::ParseRcasStrength(value.empty() ? -1 : i);
     } else if (key == "frames_queued") {
@@ -192,6 +194,7 @@ void Load() {
         {"GOW3_STALE_READBACK", "stale_readback"},     {"GOW3_FSR1", "fsr1"},
         {"GOW3_RCAS", "rcas"},                        {"GOW3_FRAMES_AHEAD", "frames_queued"},
         {"GOW3_ANISOTROPY", "anisotropy"},            {"GOW3_VIBRATION", "vibration"},
+        {"GOW3_SPATIAL_AA", "spatial_aa"},
     };
     for (const auto& [env, key] : env_keys) {
         if (const char* value = std::getenv(env); value && value[0]) {
@@ -309,6 +312,8 @@ void Save() {
                  int(v.overlay_items >> 6 & 1), v.overlay_scale.load(), v.overlay_corner.load(),
                  v.overlay_opacity.load(), v.overlay_layout.load(), v.menu_tab.load());
     const std::vector<std::string> resolution_names = Gow3Graphics::ResolutionNames();
+    std::fprintf(file,"spatial_aa=%s\n",Gow3Graphics::SpatialAaKeys[
+        std::clamp(v.spatial_aa.load(),0,Gow3Graphics::SpatialAaCount-1)].data());
     std::fprintf(file,
                  "display_mode=%s\nvsync=%d\nfps_limit=%d\nasync_shaders=%d\n"
                  "fsr1=%d\nrcas=%d\nrcas_strength=%d\nframes_queued=%d\n"

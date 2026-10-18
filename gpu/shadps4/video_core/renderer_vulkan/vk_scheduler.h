@@ -65,6 +65,24 @@ struct RenderState {
 };
 static_assert(std::has_unique_object_representations_v<RenderState>);
 
+inline bool HasRenderAttachments(const RenderState& state) {
+    if (state.depth_stencil_attachment.has_depth ||
+        state.depth_stencil_attachment.has_stencil) return true;
+    for (u32 i = 0; i < state.num_color_attachments; ++i) {
+        if (state.color_attachments[i].image_view) return true;
+    }
+    return false;
+}
+
+// Vertex-only work still needs a rendering scope in Vulkan. A discarded draw
+// without attachments cannot produce fragments or attachment load/store effects.
+// Do not ask a tile-based driver to allocate a maximum-size framebuffer for it.
+inline RenderState BoundDiscardedRenderArea(RenderState state, bool discard) {
+    if (!discard || HasRenderAttachments(state)) return state;
+    state.width = state.height = 1;
+    return state;
+}
+
 struct SubmitInfo {
     std::array<vk::Semaphore, 4> wait_semas;
     std::array<u64, 4> wait_ticks;
@@ -676,6 +694,12 @@ public:
     /// and increments the scheduler timeline semaphore.
     void Flush(SubmitInfo& info);
 
+    // The next Vulkan submission consumes the result of an external GPU encoder.
+    void WaitExternal(vk::Semaphore semaphore, u64 value) {
+        ASSERT(!external_wait);
+        external_wait = semaphore; external_wait_value = value;
+    }
+
     /// Sends the current execution context to the GPU
     /// and increments the scheduler timeline semaphore.
     void Flush();
@@ -831,12 +855,13 @@ public:
 
     /// Whether a render pass with exactly this state is open.
     [[nodiscard]] bool IsRenderingWith(const RenderState& state) const {
-        return is_rendering && render_state == state;
+        return is_rendering && render_state == BoundDiscardedRenderArea(
+            state, dynamic_state.rasterizer_discard_enable);
     }
 
     /// Whether BeginRendering(state) would start a new render pass.
     [[nodiscard]] bool WillBeginRendering(const RenderState& state) const {
-        return !(is_rendering && render_state == state);
+        return !IsRenderingWith(state);
     }
 
     /// CommandBuffer() calls that waited for a recording thread (GOW3_FRAME_STATS).
@@ -889,6 +914,8 @@ private:
     void RecorderThread(std::stop_token stoken);
 
     void SubmitExecution(SubmitInfo& info);
+    vk::Semaphore external_wait{};
+    u64 external_wait_value{};
 
     void PriorityPendingOpsThread(std::stop_token stoken);
 

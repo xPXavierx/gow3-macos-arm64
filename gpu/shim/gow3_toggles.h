@@ -68,14 +68,38 @@ enum : std::uint64_t {
     // On by default (bit set: off): history of a thin feature this jitter phase missed is kept
     // when nothing moves. Static-camera flicker of railings/window bars p99.9 -45% (2026-10-03).
     TaaKeepNearerHistory = 1ull << 55,
+    /// Disable the optional full-barrier diagnostic at runtime for same-scene A/B timing.
+    FullBarriers = 1ull << 56,
     SceneMipBias = 1ull << 57, ///< negative LOD bias of G-buffer samplers at reduced scene sizes
     /// A texture/storage request for the top rows of a cached image (same address and layout)
     /// uses that image, instead of creating and uploading a new one (texture_cache.cpp).
     PartialHeightViews = 1ull << 58,
+    SplitUnusedDepthPlane = 1ull << 59,
+    PreciseDepthAccess = 1ull << 62,
+    /// Explicit rounded scalar operations instead of Metal no-contraction helper calls.
+    ExplicitRoundedMath = 1ull << 60,
+    /// The same exact scalar lowering for vertex programs (independent diagnostic A/B).
+    ExplicitRoundedVertexMath = 1ull << 61,
     // Bits 20-29 are used as raw debug toggles by the camera/object motion and the upscaler.
 };
 inline bool Disabled(std::uint64_t bit) {
     return (__atomic_load_n(&runtime_disabled_optimizations, __ATOMIC_RELAXED) & bit) != 0;
+}
+// MoltenVK 1.4.2 needs the documented dynamic-rendering stencil-only fix.
+// Stock drivers retain the combined attachment unless explicitly enabled.
+inline bool SplitUnusedDepthEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_SPLIT_DEPTH_PLANE");
+        return value && value[0] == '1';
+    }();
+    return enabled && !Disabled(SplitUnusedDepthPlane);
+}
+inline bool PreciseDepthAccessEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_PRECISE_DEPTH_ACCESS");
+        return value && value[0] == '1';
+    }();
+    return enabled && !Disabled(PreciseDepthAccess);
 }
 } // namespace Gow3Toggle
 

@@ -26,9 +26,19 @@
 namespace Vulkan {
 
 std::mutex Scheduler::submit_mutex;
+namespace {
+std::atomic<bool> full_barriers{false};
+}
+
 
 Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
+    // Match upstream: full barriers are an opt-in diagnostic, not a driver default.
+    const char* barrier_env = std::getenv("GOW3_FULL_BARRIERS");
+    const bool conservative = barrier_env && barrier_env[0] == '1';
+    full_barriers.store(conservative, std::memory_order_relaxed);
+    std::printf("GPU: full barriers %s (%s)\n", conservative ? "on" : "off",
+                barrier_env ? "GOW3_FULL_BARRIERS override" : "upstream default");
     // gow3: GOW3_VK_RECORD_THREAD=0 records on the calling thread.
     const char* env = std::getenv("GOW3_VK_RECORD_THREAD");
     if (threaded_recording && !(env && env[0] == '0')) {
@@ -57,16 +67,8 @@ Scheduler::~Scheduler() {
 }
 
 bool Scheduler::FullBarriers() {
-    static const bool enabled = [] {
-        const char* env = std::getenv("GOW3_FULL_BARRIERS");
-        const bool on = env && env[0] == '1';
-        if (on) {
-            // In last_run.log whatever the GPU log level, so a tester's log shows the mode.
-            std::printf("GPU: full barriers on (GOW3_FULL_BARRIERS=1)\n");
-        }
-        return on;
-    }();
-    return enabled;
+    return full_barriers.load(std::memory_order_relaxed) &&
+           !Gow3Toggle::Disabled(Gow3Toggle::FullBarriers);
 }
 
 void Scheduler::RecordFullBarrier(vk::CommandBuffer cmdbuf) {
@@ -82,7 +84,20 @@ void Scheduler::RecordFullBarrier(vk::CommandBuffer cmdbuf) {
     });
 }
 
-void Scheduler::BeginRendering(const RenderState& new_state) {
+void Scheduler::BeginRendering(const RenderState& requested_state) {
+    const auto new_state = BoundDiscardedRenderArea(
+        requested_state, dynamic_state.rasterizer_discard_enable);
+    static const bool trace_area = std::getenv("GOW3_TRACE_ATTACHMENTLESS") != nullptr;
+    static unsigned traced = 0;
+    if (trace_area && traced < 24 && !requested_state.num_color_attachments &&
+        !requested_state.depth_stencil_attachment.has_depth &&
+        !requested_state.depth_stencil_attachment.has_stencil) {
+        ++traced;
+        std::printf("Attachmentless render area: %ux%u -> %ux%u, rasterizer discard %d\n",
+                    requested_state.width, requested_state.height,
+                    new_state.width, new_state.height,
+                    int(dynamic_state.rasterizer_discard_enable));
+    }
     if (is_rendering && render_state == new_state) {
         return;
     }
@@ -471,13 +486,24 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     WaitHostCopies();
     Check(current_cmdbuf.end());
 
+    u32 external_wait_index = info.wait_semas.size();
+    if (external_wait) {
+        external_wait_index = info.num_wait_semas;
+        ASSERT(info.num_wait_semas < info.wait_semas.size());
+        info.AddWait(external_wait, external_wait_value);
+        external_wait = nullptr;
+    }
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
 
-    static constexpr std::array<vk::PipelineStageFlags, 2> wait_stage_masks = {
-        vk::PipelineStageFlagBits::eAllCommands,
-        vk::PipelineStageFlagBits::eColorAttachmentOutput,
+    // Preserve presentation's normal wait scope. An external encoder result can
+    // be consumed before color processing, so its own slot waits at all stages.
+    std::array<vk::PipelineStageFlags, 4> wait_stage_masks = {
+        vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands,
     };
+    if (external_wait_index < wait_stage_masks.size())
+        wait_stage_masks[external_wait_index] = vk::PipelineStageFlagBits::eAllCommands;
 
     const vk::TimelineSemaphoreSubmitInfo timeline_si = {
         .waitSemaphoreValueCount = info.num_wait_semas,

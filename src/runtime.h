@@ -2,6 +2,9 @@
 #define GOW3_RUNTIME_H
 #include <stdint.h>
 #include <stddef.h>
+#if defined(__APPLE__) && !defined(GOW3_HOST_COMPONENT_TEST)
+#include "compat_macos.h"
+#endif
 #ifdef _WIN32
 #include "compat_win.h"
 /* No signals on Windows: the exception handler resumes the thread in gow3_longjmp
@@ -15,8 +18,20 @@ typedef gow3_jmp_buf sigjmp_buf;
 extern __thread sigjmp_buf *runtime_fault_recover;
 /* Restarts the game (in-game settings menu, render resolution change). */
 void runtime_restart(void);
+/* Host component tests never enter guest machine code. An ARM host ABI is NOT
+ * a replacement for the PS4 x86-64 ABI; production needs a translation bridge. */
+#if defined(__x86_64__) || defined(_M_X64)
 #define ABI __attribute__((sysv_abi))
+#elif defined(GOW3_ARM64) || defined(GOW3_HOST_COMPONENT_TEST)
+#define ABI
+#else
+#error "The guest runtime requires x86-64; ARM64 currently supports host component tests only."
+#endif
 typedef void (ABI *GuestCallback)(void);
+#ifdef GOW3_ARM64
+#include "cpu/bbcpu.h"
+uint64_t runtime_guest_call(const void *fn, int count, const uint64_t *args);
+#endif
 void runtime_start(uint64_t capabilities);
 uintptr_t runtime_resolve(const char *name, int is_data);
 void runtime_report(void);

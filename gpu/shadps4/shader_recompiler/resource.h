@@ -75,6 +75,15 @@ enum class BufferType : u8 {
     ClipPlanes,
 };
 
+// The storage descriptor remains the exact runtime bounds authority.
+// Uniform aliases have the same data/range, with a statically bounded std140 block.
+constexpr u32 UniformAliasMaxBytes = 4096;
+constexpr u32 UniformAliasOffsetSlack = 127;
+constexpr u32 UniformAliasSpan(u32 last_word) {
+    return last_word < (UniformAliasMaxBytes - UniformAliasOffsetSlack) / 4
+        ? ((last_word * 4 + 4 + UniformAliasOffsetSlack + 15) & ~15u) : 0;
+}
+
 struct BufferResource {
     SharpFetch<AmdGpu::Buffer> sharp_fetch{};
     IR::Type used_types{};
@@ -83,6 +92,7 @@ struct BufferResource {
     bool is_formatted{};
     SharpFetchPostOp post_op{};
     u32 post_op_dw1_mask{};
+    u32 uniform_span{}; ///< nonzero only for exclusively bounded static constant reads
 
     bool IsSpecial() const noexcept {
         return buffer_type != BufferType::Guest;

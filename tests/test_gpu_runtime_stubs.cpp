@@ -6,8 +6,9 @@
 #include <setjmp.h>
 // Renderer tests have no guest process. Clock/host-thread services work; guest accesses abort.
 extern "C" {
-thread_local sigjmp_buf* runtime_fault_recover = nullptr;
-uint32_t runtime_disabled_optimizations = 0;
+extern __thread sigjmp_buf* runtime_fault_recover;
+__thread __attribute__((used,visibility("default"))) sigjmp_buf* runtime_fault_recover = nullptr;
+uint64_t runtime_disabled_optimizations = 0;
 uint64_t runtime_tsc_frequency() { return 1000000000; }
 int runtime_file_translate(const char*, char*, size_t) { std::abort(); }
 uint64_t runtime_memory_clamp(uintptr_t, uint64_t) { std::abort(); }

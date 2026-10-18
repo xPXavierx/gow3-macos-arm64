@@ -8,6 +8,7 @@
 #include <atomic>
 #include "video_core/texture_cache/readback_queue.h"
 #include "video_core/texture_cache/readback_sources.h"
+#include "video_core/buffer_cache/region_definitions.h"
 #include <chrono>
 #include "gow3_toggles.h"
 #include <optional>
@@ -79,6 +80,12 @@ public:
         bool needs_native{true};
 
         ImageDesc() = default;
+        // An absent or rejected T# still has the descriptor type required by its shader.
+        explicit ImageDesc(const Shader::ImageResource& desc)
+            : type{desc.is_written ? BindingType::Storage : BindingType::Texture},
+              needs_native{desc.needs_native} {
+            view_info.is_storage = desc.is_written;
+        }
         ImageDesc(const AmdGpu::Image& image, const Shader::ImageResource& desc)
             : info{image, desc}, view_info{image, desc},
               type{desc.is_written ? BindingType::Storage : BindingType::Texture},
@@ -155,7 +162,8 @@ public:
                                          ViewMemo* memo = nullptr, bool refresh = true);
 
     /// Retrieves the render target with specified properties
-    [[nodiscard]] ImageView& FindRenderTarget(ImageId image_id, const ImageDesc& desc);
+    [[nodiscard]] ImageView& FindRenderTarget(ImageId image_id, const ImageDesc& desc,
+                                             bool min_reduction = false);
 
     /// Retrieves the depth target with specified properties
     [[nodiscard]] ImageView& FindDepthTarget(ImageId image_id, const ImageDesc& desc);
@@ -240,8 +248,9 @@ public:
     }
     /// gow3 diagnostics: writes level 0 of a color image to GOW3_DIAG_DIR as raw pixels
     /// (<seq>_<tag>_<address>_<w>x<h>_p<pitch>_b<bytes per pixel>_f<vk format>.raw). Waits for
-    /// the GPU.
-    void DiagDumpImage(ImageId image_id, const char* tag);
+    /// the GPU. Block-compressed images contain native blocks, with paired guest/layout
+    /// files for the opt-in "bound" tag. Multisampled/depth images are excluded.
+    void DiagDumpImage(ImageId image_id, const char* tag, const ImageView* bound_view = nullptr);
 
     [[nodiscard]] Image& GetImage(ImageId id) {
         auto& image = slot_images[id];
@@ -510,7 +519,7 @@ private:
     u64 partial_views = 0;
     void NotePartialView(const ImageInfo& request, const ImageInfo& used, BindingType binding);
     u64 readbacks_released = 0;
-    ReadbackQueue<Vulkan::StagingBufferRef> pending_readbacks;
+    ReadbackQueue<Vulkan::StagingBufferRef, TRACKER_PAGE_BITS> pending_readbacks;
     std::mutex readback_mutex;
     std::atomic<bool> has_pending_readbacks{false};
     u64 readbacks_queued = 0, readbacks_completed = 0, readbacks_waited = 0;

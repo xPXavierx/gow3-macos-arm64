@@ -53,6 +53,9 @@ public:
                                               const ImageInfo& info);
 
 private:
+    void VerifyMicroDetile(const Buffer* input, u64 input_offset, const Buffer* output,
+                           u64 output_offset, const ImageInfo& info);
+
     void RecordTilingDispatch(vk::Pipeline pipeline, const vk::DescriptorBufferInfo& tiled,
                               const vk::DescriptorBufferInfo& linear,
                               const vk::DescriptorBufferInfo& params, u32 dim_x);

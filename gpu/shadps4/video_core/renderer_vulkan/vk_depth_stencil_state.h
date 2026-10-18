@@ -10,14 +10,16 @@ namespace Vulkan {
 
 struct EffectiveDepthStencilState {
     bool needs_attachment{};
+    bool needs_depth{};
     bool depth_test_enable{};
     bool depth_write_enable{};
     bool depth_bounds_enable{};
     bool stencil_test_enable{};
+    bool stencil_write_enable{};
 };
 
 [[nodiscard]] constexpr EffectiveDepthStencilState GetEffectiveDepthStencilState(
-    const AmdGpu::Regs& regs) {
+    const AmdGpu::Regs& regs, bool split_unused_depth = false, bool depth_bounds_supported = true) {
     const auto& control = regs.depth_control;
     const auto& render_control = regs.depth_render_control;
     const auto& render_override = regs.depth_render_override;
@@ -33,7 +35,8 @@ struct EffectiveDepthStencilState {
     const bool depth_can_reject =
         depth_enabled && ((depth_can_fail && !control.enable_color_writes_on_depth_fail) ||
                           (depth_can_pass && control.disable_color_writes_on_depth_pass));
-    const bool depth_bounds = depth_valid && control.depth_bounds_enable;
+    const bool depth_bounds = depth_valid && control.depth_bounds_enable &&
+                              (!split_unused_depth || depth_bounds_supported);
 
     const auto stencil_op_writes = [](AmdGpu::StencilFunc fail, AmdGpu::StencilFunc zpass,
                                       AmdGpu::StencilFunc zfail, u8 write_mask) {
@@ -66,16 +69,22 @@ struct EffectiveDepthStencilState {
     const bool stencil_maintenance =
         stencil_valid && render_override.force_stencil_valid && render_override.force_stencil_dirty;
 
-    const bool needs_depth = depth_write || depth_can_reject || depth_bounds || depth_maintenance;
+    // Even when color is allowed on depth failure, stencil zfail/zpass can depend
+    // on the depth result. Keep that comparison conservatively.
+    const bool stencil_uses_depth = stencil_has_effect && depth_enabled && depth_can_fail;
+    const bool needs_depth = depth_write || depth_can_reject || depth_bounds || depth_maintenance ||
+                             stencil_uses_depth;
     const bool needs_stencil = stencil_has_effect || stencil_maintenance;
     const bool needs_attachment = needs_depth || needs_stencil;
 
     return {
         .needs_attachment = needs_attachment,
-        .depth_test_enable = needs_attachment && depth_enabled,
+        .needs_depth = split_unused_depth ? needs_depth : needs_attachment && depth_valid,
+        .depth_test_enable = (split_unused_depth ? needs_depth : needs_attachment) && depth_enabled,
         .depth_write_enable = needs_attachment && depth_write,
         .depth_bounds_enable = needs_attachment && depth_bounds,
         .stencil_test_enable = needs_attachment && stencil_has_effect,
+        .stencil_write_enable = stencil_can_write,
     };
 }
 

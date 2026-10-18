@@ -4,12 +4,18 @@
 #pragma once
 
 #include <deque>
+#include <chrono>
 
 #include <condition_variable>
 
 #include "core/libraries/videoout/buffer.h"
+#ifdef __APPLE__
+#include "video_core/renderer_vulkan/vk_metalfx.h"
+#include "video_core/renderer_vulkan/vk_frame_interpolator.h"
+#endif
 #include "video_core/renderer_vulkan/host_passes/fsr_pass.h"
 #include "video_core/renderer_vulkan/host_passes/pp_pass.h"
+#include "video_core/renderer_vulkan/host_passes/spatial_aa_pass.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
@@ -38,6 +44,8 @@ struct Frame {
     bool is_hdr{false};
     u8 id{};
     vk::Format format{}; ///< gow3: of `image` (screenshots)
+    std::unique_ptr<Frame> generated;
+    bool has_generated{};
 };
 
 enum SchedulerType {
@@ -111,6 +119,27 @@ private:
     void SetExpectedGameSize(s32 width, s32 height);
 
 private:
+#ifdef __APPLE__
+    void GenerateFrame(Frame* frame,u64 address,VideoCore::ImageId ui,
+                       const VideoCore::ImageViewInfo& view,vk::CommandBuffer& cmd,
+                       bool dump,int index);
+    std::unique_ptr<FrameInterpolator> frame_interpolator;
+    VideoCore::UniqueImage interpolation_output;
+    vk::UniqueImageView interpolation_view,interpolation_linear;
+    vk::Extent2D interpolation_size{};
+    bool interpolation_initialized{};
+    std::chrono::steady_clock::time_point interpolation_stats_time{};
+    u64 interpolation_real_count{},interpolation_generated_count{};
+    vk::ImageView UpscaleMetalFx(vk::ImageView perceptual_view, vk::CommandBuffer& cmd,
+                                vk::Extent2D& size, bool encoded_srgb, bool dump, int index);
+    std::unique_ptr<MetalFx> metalfx;
+    VideoCore::UniqueImage metalfx_output;
+    vk::UniqueImageView metalfx_view;
+    u32 metalfx_width{3840}, metalfx_height{2160};
+    bool metalfx_initialized{};
+    bool metalfx_float_output{};
+#endif
+    HostPasses::SpatialAaPass spatial_aa;
     float expected_ratio{1920.0 / 1080.0f};
     u32 expected_frame_width{1920};
     u32 expected_frame_height{1080};

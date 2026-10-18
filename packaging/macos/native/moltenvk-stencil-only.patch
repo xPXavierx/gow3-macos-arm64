@@ -1,0 +1,16 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+index 7eae64c..1258a0b 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKPipeline.mm
+@@ -2004,7 +2004,10 @@ void MVKGraphicsPipeline::addFragmentOutputToPipeline(MTLRenderPipelineDescripto
+ 
+ 	if (pixFmts->isDepthFormat(mtlDepthPixFmt)) {
+ 		plDesc.depthAttachmentPixelFormat = mtlDepthPixFmt;
+-	} else if (pixFmts->isDepthFormat(mtlStencilPixFmt)) {
++	} else if (pCreateInfo->renderPass && pixFmts->isDepthFormat(mtlStencilPixFmt)) {
++		// Dynamic rendering explicitly permits an undefined depth format with a
++		// combined stencil view. Its Metal pass has no depth texture; inferring
++		// one here makes the pipeline incompatible with that render encoder.
+ 		plDesc.depthAttachmentPixelFormat = mtlStencilPixFmt;
+ 	}
+ 

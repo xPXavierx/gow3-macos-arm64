@@ -1,0 +1,40 @@
+GOD OF WAR III — APLICATIVO MAC ARM64
+
+1. Abra “God of War III.app”. Você pode mover o aplicativo para Aplicativos.
+2. Na primeira abertura, escolha a pasta do dump extraído. O launcher aceita
+   também a pasta que contém “GOW ISO/CUSA01623”. Não selecione um .PKG ou .ISO.
+3. Escolha resolução, MetalFX e limite de quadros, e clique em Jogar.
+
+A pasta e as configurações ficam lembradas. Se o SSD estiver desconectado,
+reconecte-o ou use Alterar. Seu AUTOSAVE e o cache do checkpoint foram preservados.
+Não é necessário abrir o Terminal nem instalar Python, Homebrew ou Rosetta.
+Esta cópia local usa macOS 26 e Apple Silicon, com o executável do dump já validado.
+
+CONFIGURAÇÕES
+• Resolução: 720p, 1080p, 1440p ou 4K. Nativo mantém essa resolução interna.
+• MetalFX: Qualidade, Equilibrado ou Desempenho. A linha “Renderização” mostra
+  os pixels internos; a resolução escolhida continua sendo a resolução de saída.
+• 60 FPS: configuração recomendada para manter o frame pacing do checkpoint.
+• Ilimitado: remove o limite de 60. V-Sync e o teto de segurança do motor de
+  240 FPS continuam valendo; a tela e a carga gráfica limitam o resultado.
+  Este modo teve teste curto e pode apresentar cadência menos uniforme que 60 FPS.
+• Idioma: inglês, português brasileiro ou espanhol para a interface do launcher.
+• O HUD de desempenho do Metal pode ser ligado ou desligado. As linhas de
+  resolução interna e estado/preset do MetalFX permanecem visíveis no HUD do jogo.
+
+Retina, V-Sync e início em tela cheia permanecem ligados. O macOS ativa Game Mode
+em tela cheia; se você o desativou manualmente para o jogo, reative-o no painel
+Game Overlay (Command + Esc). Referência: https://support.apple.com/en-us/105118
+A resolução do drawable indicada pelo HUD pode diferir da renderização interna:
+a apresentação se adapta aos pixels físicos disponíveis na tela.
+Geração de quadros não é usada nem aparece como opção.
+
+DADOS E DIAGNÓSTICO
+Saves, cache, opções e logs ficam em:
+~/Library/Application Support/God of War III ARM64
+O botão “Abrir logs” abre os diagnósticos da execução. O launcher permite encerrar
+o jogo, mas prefira sair pelo menu do jogo para não interromper uma gravação.
+
+O dump completo permanece externo. O aplicativo contém código ARM64 gerado a
+partir do seu executável e é uma cópia local privada; não é um pacote público
+redistribuível. O arquivo de código-fonte do port é entregue separadamente.

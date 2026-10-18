@@ -82,7 +82,8 @@ struct UniqueBuffer {
 
 struct Buffer {
     explicit Buffer(const Vulkan::Instance& instance, VAddr cpu_addr_, u64 size_bytes_,
-                    MemoryType mem_type, std::string_view debug_name = "");
+                    MemoryType mem_type, std::string_view debug_name = "",
+                    vk::BufferUsageFlags usage = AllFlags);
 
     Buffer& operator=(const Buffer&) = delete;
     Buffer(const Buffer&) = delete;
@@ -131,7 +132,8 @@ struct Buffer {
 
 struct StreamBuffer : public Buffer {
     explicit StreamBuffer(const Vulkan::Instance& instance, Vulkan::Scheduler& scheduler,
-                          MemoryType mem_type, u64 size_bytes);
+                          MemoryType mem_type, u64 size_bytes,
+                          vk::BufferUsageFlags usage = AllFlags);
 
     /// Reserves a region of memory from the stream buffer. Must be followed by Commit().
     std::pair<u8*, u64> Map(u64 size, u64 alignment = 0, bool allow_wait = true);

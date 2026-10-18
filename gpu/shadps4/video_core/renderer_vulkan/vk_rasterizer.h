@@ -9,6 +9,7 @@
 #include "video_core/page_manager.h"
 #include "video_core/renderer_vulkan/vk_bind_helper.h"
 #include "video_core/renderer_vulkan/vk_camera_motion.h"
+#include "video_core/renderer_vulkan/vk_framegen_inputs.h"
 #include "video_core/renderer_vulkan/vk_constant_ring.h"
 #include "video_core/renderer_vulkan/vk_scene_resolution.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
@@ -29,6 +30,7 @@ class MemoryManager;
 
 namespace Vulkan {
 
+class NullResources;
 class GraphicsPipeline;
 class Runtime;
 
@@ -49,6 +51,7 @@ public:
     [[nodiscard]] TemporalUpscaler& GetUpscaler() noexcept {
         return *upscaler;
     }
+    FrameGenInputs* GetFrameGenInputs()const{return framegen_inputs.get();}
 
     [[nodiscard]] VideoCore::TextureCache& GetTextureCache() noexcept {
         return texture_cache;
@@ -171,6 +174,7 @@ private:
     /// state (RenderStateMemo); nothing can have broken the pass in between (barriers, copies and
     /// dispatches end it).
     struct BeginSignature {
+        u8 depth_write_access = 0;
         std::array<VideoCore::ImageId, AmdGpu::NUM_COLOR_BUFFERS + 1> ids{};
         std::array<VideoCore::ImageViewInfo, AmdGpu::NUM_COLOR_BUFFERS + 1> views{};
         u32 mrt_mask = 0;
@@ -199,7 +203,8 @@ private:
     void DepthStencilCopy(bool is_depth, bool is_stencil);
     void EliminateFastClear();
 
-    void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
+    void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed,
+                            const RenderState& render_state) const;
     void UpdateViewportScissorState() const;
     void UpdateDepthStencilState() const;
     /// gow3: the squaring pipeline of a scaled MIN/MAX blend when this draw can use it.
@@ -249,6 +254,8 @@ private:
     void BindBuffers(const Shader::Info& stage, const PreparedStage* prepared,
                      Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data, u32& write_index);
+    void DiagCheckBuffer(vk::Buffer buffer, u64 offset, u64 size,
+                         const void* source, VAddr address, u64 stage, u32 slot);
     /// `on_helper`: run by the texture binding helper; out-of-date images are not refreshed.
     void BindTextures(const Shader::Info& stage, const PreparedStage* prepared,
                       Shader::Backend::Bindings& binding, u32& write_index, bool& barrier,
@@ -317,6 +324,8 @@ private:
 private:
     friend class VideoCore::BufferCache;
 
+    std::unique_ptr<NullResources> null_resources;
+    vk::ImageView NullImageView(const Shader::ImageResource&, const AmdGpu::Image&) const;
     const Instance& instance;
     Scheduler& scheduler;
     Runtime& runtime;
@@ -330,12 +339,14 @@ private:
     PipelineCache pipeline_cache;
     std::unique_ptr<DrawPreparation> draw_prep;
     std::unique_ptr<CameraMotion> camera_motion; // gow3: motion vectors (docs/upscaler.md)
+    std::unique_ptr<FrameGenInputs> framegen_inputs;
     std::unique_ptr<SceneTargets> scene_targets;
     bool scene_started = false;
     std::unique_ptr<ObjectMotion> object_motion;
     bool motion_draw = false;
     u64 motion_geometry{};    ///< vertex-stream identity of the current direct draw
     bool gbuffer_draw = false;
+    bool diagnostic_color_pass = false;
     std::unique_ptr<TemporalUpscaler> upscaler; // gow3: FSR (docs/upscaler.md)
     std::array<float, 2> draw_jitter{};         ///< viewport offset of the current draw, pixels
     std::array<float, 2> target_scale{1.0f, 1.0f}; ///< pass drawn into the upscaler's output-size images
@@ -346,7 +357,7 @@ private:
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
-    boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
+    boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS * 2> buffer_infos;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
     /// gow3 diagnostics (GOW3_DIAG_IMAGES=1, draw pipe off): while a frame capture records, the
     /// color targets of a pass are written to files when the next pass or dispatch begins.
@@ -392,6 +403,7 @@ private:
     boost::container::static_vector<ImageDescCacheEntry, Shader::NUM_IMAGES> image_desc_overflow;
     boost::container::static_vector<VideoCore::TextureCache::ImageDesc, Shader::NUM_IMAGES * 2>
         image_desc_storage;
+    std::array<vk::ImageView, Shader::NUM_IMAGES> null_image_views{};
     u64 bind_epoch = 0;
     // gow3: render/depth target lookups memoized by their raw register bytes while image
     // registrations are unchanged (the descriptions depend only on those registers).

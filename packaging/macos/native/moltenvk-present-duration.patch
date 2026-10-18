@@ -1,0 +1,22 @@
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+index ef8ca60..8cb66dd 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
+@@ -1659,7 +1659,16 @@ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffe
+ 		if (presentInfo.desiredPresentTime) {
+ 			[mtlDrwbl presentAtTime: (double)presentInfo.desiredPresentTime * 1.0e-9];
+ 		} else {
+-			[mtlDrwbl present];
++			// Optional native-port pacing. Keep the normal Vulkan behavior unless
++			// explicitly selected; Immediate and generated-frame paths stay unchanged.
++			static const double minimumDuration = mvkGetEnvVarNumber("GOW3_METAL_PRESENT_INTERVAL", 0.0);
++			static const bool frameGeneration = mvkGetEnvVarNumber("GOW3_FRAMEGEN", 0.0) != 0.0;
++			if (!frameGeneration && minimumDuration > 0.0 && minimumDuration <= 0.1 &&
++				mtlDrwbl.layer.displaySyncEnabledMVK) {
++				[mtlDrwbl presentAfterMinimumDuration: minimumDuration];
++			} else {
++				[mtlDrwbl present];
++			}
+ 		}
+ 	}];
+ 

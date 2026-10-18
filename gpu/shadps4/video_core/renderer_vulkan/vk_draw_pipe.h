@@ -20,7 +20,9 @@
 #include <cstring>
 #include <memory>
 #include <thread>
+#if defined(__x86_64__)
 #include <x86intrin.h>
+#endif
 
 #include "common/assert.h"
 #include "common/thread.h"

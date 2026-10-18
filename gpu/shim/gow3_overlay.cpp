@@ -41,6 +41,17 @@ asm(".section .rdata,\"dr\"\n"
     ".global gow3_font_ttf_end\n"
     "gow3_font_ttf_end:\n"
     ".text\n");
+#elif defined(__APPLE__)
+asm(".section __TEXT,__const\n"
+    ".balign 16\n"
+    ".private_extern _gow3_font_ttf\n"
+    ".globl _gow3_font_ttf\n"
+    "_gow3_font_ttf:\n"
+    ".incbin \"" GOW3_FONT_PATH "\"\n"
+    ".private_extern _gow3_font_ttf_end\n"
+    ".globl _gow3_font_ttf_end\n"
+    "_gow3_font_ttf_end:\n"
+    ".text\n");
 #else
 asm(".section .rodata\n"
     ".balign 16\n"
@@ -92,6 +103,8 @@ float base_scale = 1.0f;
 // Present rate for the FPS counter.
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
+std::atomic<bool> framegen_rates_available{false};
+std::atomic<float> rendered_fps{},generated_fps{};
 
 void SetOpen(bool value) {
     if (menu_open.exchange(value) == value) {
@@ -277,6 +290,13 @@ void SliderRow(const char* label, std::atomic<int>& value, int lo, int hi, const
 }
 
 const char* UpscalerLabel(int upscaler) {
+#ifdef __APPLE__
+    static const bool metalfx = [] {
+        const char* mode = std::getenv("GOW3_METALFX_MODE");
+        return mode && std::strcmp(mode, "spatial") == 0;
+    }();
+    if (metalfx) return "MetalFX Spatial";
+#endif
     switch (upscaler) {
     case Gow3Settings::UpscalerFsr3: return "FSR 3.1";
     case Gow3Settings::UpscalerFsr4: return "FSR 4";
@@ -288,6 +308,9 @@ const char* UpscalerLabel(int upscaler) {
 }
 
 const Vulkan::Instance* overlay_instance = nullptr; // for the overlay's measurements
+// GPU preparation publishes to the present thread as one atomic snapshot.
+// Four 14-bit image dimensions and the applied-MetalFX bit fit in 57 bits.
+std::atomic<uint64_t> display_info{0};
 
 // The performance overlay's text with the current settings (also the menu's preview).
 std::string OverlayText() {
@@ -301,7 +324,50 @@ std::string OverlayText() {
     sample.fps = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
     sample.frame_ms = frame_ms_avg;
     sample.upscaler = UpscalerLabel(s.upscaler);
-    return P::Format(sample, items, s.overlay_layout == 0);
+    auto text = P::Format(sample, items, s.overlay_layout == 0);
+    static const bool display_hud = [] {
+        const char* value = std::getenv("GOW3_HUD_DISPLAY_INFO");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    const uint64_t display_bits = display_info.load(std::memory_order_relaxed);
+    const std::array<int, 4> display_size{int(display_bits & 0x3fff),
+        int((display_bits >> 14) & 0x3fff), int((display_bits >> 28) & 0x3fff),
+        int((display_bits >> 42) & 0x3fff)};
+    const bool display_metalfx = (display_bits >> 56) & 1;
+    if (display_hud && display_size[0] > 0 && display_size[1] > 0) {
+        static const std::string language = [] {
+            const char* value = std::getenv("GOW3_LAUNCHER_LANGUAGE");
+            return std::string(value ? value : "en");
+        }();
+        static const std::string preset = [] {
+            const char* value = std::getenv("GOW3_METALFX_PRESET");
+            return std::string(value ? value : "quality");
+        }();
+        const bool pt = language == "pt-BR", es = language == "es";
+        const char* mode = pt ? "Desligado (Nativo)" : es ? "Desactivado (Nativo)" : "Off (Native)";
+        if (display_metalfx) {
+            if (preset == "balanced") mode = pt ? "Ativado (Equilibrado)" : es ? "Activado (Equilibrado)" : "On (Balanced)";
+            else if (preset == "performance") mode = pt ? "Ativado (Desempenho)" : es ? "Activado (Rendimiento)" : "On (Performance)";
+            else mode = pt ? "Ativado (Qualidade)" : es ? "Activado (Calidad)" : "On (Quality)";
+        }
+        char info[200];
+        if (display_metalfx) {
+            std::snprintf(info, sizeof(info), "Render: %dx%d -> %dx%d\nMetalFX: %s",
+                display_size[0], display_size[1], display_size[2], display_size[3], mode);
+        } else {
+            std::snprintf(info, sizeof(info), "Render: %dx%d\nMetalFX: %s",
+                display_size[0], display_size[1], mode);
+        }
+        if (!text.empty()) text += '\n';
+        text += info;
+    }
+    if (framegen_rates_available && (items & P::Fps)) {
+        char rates[112];
+        std::snprintf(rates, sizeof(rates), "\nRendered: %.1f FPS | Generated: %.1f FPS",
+                      rendered_fps.load(), generated_fps.load());
+        text += rates;
+    }
+    return text;
 }
 
 constexpr const char* Unsupported = "Unavailable: game version or code signature mismatch.";
@@ -393,6 +459,12 @@ void ImageTab() {
     const bool downscaling = iw > ww || ih > wh;
     const bool rcas_blocked = s.rcas && !s.rcas_applied;
     ImGui::SeparatorText("Sharpening");
+    if (BeginRows("##spatial_aa")) {
+        ChoiceRow("Spatial anti-aliasing",s.spatial_aa,G::SpatialAaNames.data(),nullptr,
+            G::SpatialAaCount,"SMAA 1x or FXAA before upscaling. No history or temporal jitter. Strong FXAA softens more texture and HUD detail.");
+        InfoRow("Spatial AA",s.spatial_aa_applied?"applied before upscaling":"off / unavailable for this display format");
+        ImGui::EndTable();
+    }
     if (BeginRows("##scaling")) {
         ImGui::BeginDisabled(rcas_blocked);
         CheckRow("Sharpening (RCAS)", s.rcas,
@@ -874,6 +946,23 @@ void Notice() {
 
 } // namespace
 
+void SetFrameGenerationRates(float rendered, float generated) {
+    rendered_fps = rendered;
+    generated_fps = generated;
+    framegen_rates_available = true;
+}
+
+void SetDisplayInfo(int input_width, int input_height, int output_width, int output_height,
+                    bool metalfx_applied) {
+    for (int size : {input_width, input_height, output_width, output_height}) {
+        if (size <= 0 || size >= 16384) return;
+    }
+    const uint64_t bits = uint64_t(input_width) | (uint64_t(input_height) << 14) |
+        (uint64_t(output_width) << 28) | (uint64_t(output_height) << 42) |
+        (uint64_t(metalfx_applied) << 56);
+    display_info.store(bits, std::memory_order_relaxed);
+}
+
 void ShowNotice(const std::string& text, int milliseconds) {
     {
         std::scoped_lock lock{notice_mutex};
@@ -1197,6 +1286,30 @@ void BeginChoice(const std::string& title, const std::vector<std::string>& items
 
 int PollChoice() {
     return choice_result;
+}
+
+void PollTestChoice() {
+    static const char* path = std::getenv("GOW3_TEST_CHOICE_FILE");
+    if (!path || !*path) return;
+    std::scoped_lock lock{imgui_mutex};
+    if (!choice_active || menu_open) return;
+    FILE* file = std::fopen(path, "r");
+    if (!file) return;
+    char command[16]{};
+    const bool read = std::fscanf(file, "%15s", command) == 1;
+    std::fclose(file);
+    if (!read) return;
+    SDL_Event event{};
+    event.type = SDL_EVENT_KEY_DOWN;
+    if (std::strcmp(command, "confirm") == 0) event.key.key = SDLK_RETURN;
+    else if (std::strcmp(command, "cancel") == 0) event.key.key = SDLK_ESCAPE;
+    else if (std::strcmp(command, "up") == 0) event.key.key = SDLK_UP;
+    else if (std::strcmp(command, "down") == 0) event.key.key = SDLK_DOWN;
+    else return;
+    std::remove(path);
+    std::printf("Test choice: %s, dialog '%s', selected %d\n", command,
+                choice_title.c_str(), choice_index);
+    HandleChoiceEvent(event);
 }
 
 void SetTextEntry(bool active, const std::string& prompt, const std::string& text) {

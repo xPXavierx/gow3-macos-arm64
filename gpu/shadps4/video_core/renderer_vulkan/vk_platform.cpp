@@ -22,6 +22,9 @@
 #include "core/emulator_settings.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_platform.h"
+#ifdef __APPLE__
+#include <vulkan/vulkan_metal.h>
+#endif
 #include "video_core/renderer_vulkan/vk_dlss.h"
 
 #ifdef __APPLE__
@@ -193,9 +196,9 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
         break;
     }
 
-    if (window_type != Frontend::WindowSystemType::Headless) {
-        extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
-    }
+    // Instance enables VK_KHR_swapchain on the device even for offscreen renderer tests.
+    // Its instance dependency is required regardless of whether a surface is created.
+    extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
 
     if (EmulatorSettings.IsHdrAllowed()) {
         extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
@@ -203,6 +206,13 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
 
     if (enable_debug_utils) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    }
+
+    // MoltenVK exposes portability devices only when this extension and its flag are enabled.
+    if (std::ranges::any_of(properties, [](const auto& p) {
+            return std::strcmp(p.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0;
+        })) {
+        extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
     }
 
     // Sanitize extension list
@@ -224,7 +234,7 @@ std::vector<const char*> GetInstanceExtensions(Frontend::WindowSystemType window
 
 std::vector<const char*> GetInstanceLayers(bool enable_validation, bool enable_crash_diagnostic) {
     const auto [properties_result, properties] = vk::enumerateInstanceLayerProperties();
-    if (properties_result != vk::Result::eSuccess || properties.empty()) {
+    if (properties_result != vk::Result::eSuccess) {
         LOG_ERROR(Render_Vulkan, "Failed to query layer properties: {}",
                   vk::to_string(properties_result));
         return {};
@@ -259,17 +269,8 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
                                   bool enable_crash_diagnostic) {
     LOG_INFO(Render_Vulkan, "Creating vulkan instance");
 
-#if defined(__APPLE__)
-    // Initialize the environment with the path to the included ICD, so that the loader will
-    // find it.
-    static const auto icd_path = [] {
-        char path[PATH_MAX];
-        u32 length = PATH_MAX;
-        _NSGetExecutablePath(path, &length);
-        return std::filesystem::path(path).parent_path();
-    }();
-    setenv("VK_DRIVER_FILES", icd_path.c_str(), true);
-#endif
+    // Respect VK_DRIVER_FILES / VK_ICD_FILENAMES and the Vulkan loader's normal discovery.
+    // An executable directory is not an ICD manifest and must not replace user configuration.
 
     static vk::detail::DynamicLoader dl;
     VULKAN_HPP_DEFAULT_DISPATCHER.init(
@@ -406,6 +407,10 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
 
     vk::StructureChain<vk::InstanceCreateInfo, vk::LayerSettingsCreateInfoEXT> instance_ci_chain = {
         vk::InstanceCreateInfo{
+            .flags = std::ranges::any_of(extensions, [](const char* name) {
+                return std::strcmp(name, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0;
+            }) ? vk::InstanceCreateFlags{vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR}
+               : vk::InstanceCreateFlags{},
             .pApplicationInfo = &application_info,
             .enabledLayerCount = static_cast<u32>(layers.size()),
             .ppEnabledLayerNames = layers.data(),
@@ -418,6 +423,14 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
         },
     };
 
+#ifdef __APPLE__
+    VkExportMetalObjectCreateInfoEXT metal_export{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT};
+    if (std::getenv("GOW3_METALFX_MODE")) {
+        metal_export.exportObjectType=VK_EXPORT_METAL_OBJECT_TYPE_METAL_DEVICE_BIT_EXT;
+        metal_export.pNext=instance_ci_chain.get().pNext;
+        instance_ci_chain.get().pNext=&metal_export;
+    }
+#endif
     auto [instance_result, instance] = vk::createInstanceUnique(instance_ci_chain.get());
     ASSERT_MSG(instance_result == vk::Result::eSuccess, "Failed to create instance: {}",
                vk::to_string(instance_result));

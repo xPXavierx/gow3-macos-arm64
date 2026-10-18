@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // gow3: numbers for the performance overlay (gow3_overlay.cpp). A thread started once samples
-// CPU, RAM, GPU use (Windows counters) and VRAM (VK_EXT_memory_budget) twice a second;
+// CPU, RAM, GPU use and Vulkan allocations twice a second; macOS GPU use is system-wide.
 // a value that cannot be measured stays negative and shows as "n/a".
 
 #pragma once
@@ -34,6 +34,8 @@ struct Sample {
     std::string upscaler;
     std::string gpu_name;
     float gpu_percent = -1.0f, cpu_percent = -1.0f;
+    float cpu_busiest_thread_percent = -1.0f;
+    bool gpu_percent_is_system = false, unified_memory = false;
     double ram_used_gb = -1.0, ram_total_gb = -1.0, vram_used_gb = -1.0, vram_total_gb = -1.0;
 };
 
@@ -81,13 +83,17 @@ inline std::string Format(const Sample& s, unsigned mask, bool row) {
         if (s.gpu_percent < 0.0f) {
             std::snprintf(part, sizeof(part), "%s n/a", name);
         } else {
-            std::snprintf(part, sizeof(part), "%s %.0f%%", name, s.gpu_percent);
+            std::snprintf(part, sizeof(part), "%s %.0f%%%s", name, s.gpu_percent,
+                          s.gpu_percent_is_system ? " (system)" : "");
         }
         add();
     }
     if (mask & Cpu) {
         if (s.cpu_percent < 0.0f) {
             std::snprintf(part, sizeof(part), "CPU n/a");
+        } else if (s.cpu_busiest_thread_percent >= 0.0f) {
+            std::snprintf(part, sizeof(part), "CPU %.0f%% | busiest thread %.0f%%",
+                          s.cpu_percent, s.cpu_busiest_thread_percent);
         } else {
             std::snprintf(part, sizeof(part), "CPU %.0f%%", s.cpu_percent);
         }
@@ -98,7 +104,8 @@ inline std::string Format(const Sample& s, unsigned mask, bool row) {
         add();
     }
     if (mask & Vram) {
-        pair(part, sizeof(part), "VRAM", s.vram_used_gb, s.vram_total_gb);
+        pair(part, sizeof(part), s.unified_memory ? "GPU shared" : "VRAM",
+             s.vram_used_gb, s.vram_total_gb);
         add();
     }
     return out;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
+#include <atomic>
 
 #include <algorithm>
 #include <span>
@@ -82,13 +83,14 @@ struct SwVertexRuntimeInfo {
 /// clip-space positions per referenced vertex and read the previous frame's; the
 /// fragment shader writes the screen-space difference to an extra color attachment.
 struct MotionVectors {
-    static constexpr u32 CurrentLocation = 30;  ///< varying: current clip position
-    static constexpr u32 PreviousLocation = 31; ///< varying: previous clip position, z = valid
+    // Leave room for built-ins within Metal's 124-component interface limit.
+    // Pipeline selection rejects guest shaders that occupy this reserved range.
+    static constexpr u32 CurrentLocation = 26;  ///< varying: current clip position
+    static constexpr u32 PreviousLocation = 27; ///< varying: previous clip position, z = valid
     static constexpr u32 Output = 7;            ///< color attachment index
-    /// Per-draw parameters (u32x4: store base, load base, vertices per instance, flags) and
-    /// the position array (vec4 per vertex; element 0 is scratch), fixed for the session.
-    static inline u64 params_address = 0;
-    static inline u64 positions_address = 0;
+    // Set 1 binds per-draw parameters and vertex history explicitly. Physical
+    // addresses would make MoltenVK declare every BDA buffer as a read/write resource.
+    static inline std::atomic<bool> enabled = false;
     static constexpr u32 FlagStore = 1;
     static constexpr u32 FlagLoad = 2;
 };
@@ -270,6 +272,7 @@ struct RuntimeInfo {
         u32 num_user_data;
         u32 num_input_vgprs;
         u32 num_allocated_vgprs;
+        bool explicit_rounded_math{};
         bool operator==(const Properties&) const noexcept = default;
     } props;
     union SwInfo {

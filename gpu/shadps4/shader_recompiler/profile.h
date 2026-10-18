@@ -14,6 +14,9 @@ struct Profile {
     u32 supported_spirv{0x00010000};
     u32 subgroup_size{};
     u32 sparse_page_shift{};
+    bool manual_buffer_bounds{};
+    bool native_constant_buffers{};
+    bool manual_null_images{};
     bool support_int8{};
     bool support_int16{};
     bool support_int64{};
@@ -43,6 +46,8 @@ struct Profile {
     bool supports_workgroup_explicit_memory_layout{};
     bool supports_amd_shader_explicit_vertex_parameter{};
     bool supports_fragment_shader_barycentric{};
+    // Metal permits only one barycentric interpolation mode in a fragment shader.
+    bool needs_single_barycentric_mode{};
     bool supports_shader_subgroup_clock{};
     bool has_broken_spirv_clamp{};
     bool lower_left_origin_mode{};
