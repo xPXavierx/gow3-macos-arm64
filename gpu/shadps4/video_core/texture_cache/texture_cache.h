@@ -112,7 +112,7 @@ public:
     void TickTexturePack() {
         if (replacements.PollControl()) registry_generation.fetch_add(1,std::memory_order_release);
     }
-    std::optional<vk::ImageView> SampleReplacement(const Image& image, const ImageDesc& desc) {
+    std::optional<vk::ImageView> SampleReplacement(Image& image, const ImageDesc& desc) {
         return replacements.Sample(image, desc.view_info, desc.needs_native);
     }
 

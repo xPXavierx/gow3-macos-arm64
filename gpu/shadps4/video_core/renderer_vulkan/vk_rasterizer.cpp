@@ -2698,6 +2698,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                     continue;
                 }
             }
+            // A bounded identification retry can download the original image. Do this
+            // before its ordinary shader-read transition, which restores its layout.
+            const auto replacement = !is_storage && !on_helper
+                ? texture_cache.SampleReplacement(image, desc) : std::nullopt;
+
             // The image is either bound as storage in a separate descriptor or bound as render
             // target in feedback loop. Depth images are excluded because they can't be bound as
             // storage and feedback loop doesn't make sense for them
@@ -2734,15 +2739,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
 
             vk::ImageView view = *image_view.image_view;
             vk::ImageLayout layout = image.backing->state.layout;
-            if (!is_storage && !on_helper) {
-                if (auto replacement = texture_cache.SampleReplacement(image, desc)) {
-                    view = *replacement;
-                    layout = vk::ImageLayout::eShaderReadOnlyOptimal;
-                    // The original backing remains responsible for tracking/readback. A
-                    // replacement must be revalidated after every CPU/GPU write, so it
-                    // cannot use the existing native-image descriptor-set memo.
-                    set_ok = false;
-                }
+            if (replacement) {
+                view = *replacement;
+                layout = vk::ImageLayout::eShaderReadOnlyOptimal;
+                // The original backing remains responsible for tracking/readback. A
+                // replacement must be revalidated after every CPU/GPU write, so it
+                // cannot use the existing native-image descriptor-set memo.
+                set_ok = false;
             }
             if (upscaler->Enabled()) {
                 // gow3: the display pass reads the upscaled frame (scaled presets).

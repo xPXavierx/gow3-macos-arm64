@@ -78,6 +78,8 @@ std::unordered_map<vk::Format, vk::FormatProperties3> GetFormatProperties(
         vk::Format::eB8G8R8A8Unorm,
         vk::Format::eB8G8R8A8Srgb,
         vk::Format::eD24UnormS8Uint,
+        vk::Format::eAstc4x4UnormBlock,
+        vk::Format::eAstc4x4SrgbBlock,
     };
     for (const auto& format : misc_formats) {
         if (!format_properties.contains(format)) {

@@ -59,32 +59,38 @@ Start by measuring the resources rather than upscaling every file:
    format, before considering transient generation/upload buffers. Scale beyond
    the proof only after a visible, measured benefit.
 
-The 2026-10-18 experiment implemented an opt-in, content-keyed sampling cache and
-tested four locally restored 2x character/weapon color maps. All four original BC
-base levels were matched against actual GPU bytes. A separate RGBA8 mip chain
-retains guest image/readback behavior, with dirty/backing/alias/lifetime guards.
-See [the mechanism and developer workflow](macos-texture-replacements.md).
+The 2026-10-18 experiment implemented a content-keyed sampling cache, first with
+four character/weapon color maps and then with Kratos plus the POS050 opening
+area (ground, foliage, Gaia and loaded weapon/NPC dependencies). The expanded
+local set contains 437 unique GPU identities covering 459 distinct DDS payloads.
+It uses offline 2x color restoration and separately resampled packed data, ASTC
+4x4 compression, complete mip chains, preserved view colorspace/swizzles, lazy
+uploads and bounded asynchronous identification. Original guest images and the
+readback/coherence rules remain intact. See
+[the mechanism and developer workflow](macos-texture-replacements.md).
 
-In a frozen close Photo Mode view at native 4K, the original and 2x modes both
-showed about 60 confirmed presentations/s; presentation p95/p99 remained about
-20.83 ms. A second frozen scene rendered 59.64 vs 59.72 FPS, but its Metal
-presented-time callbacks were zero and cannot certify display cadence. The four
-uncompressed replacement images added 90.67 MiB of GPU allocations. They remain
-resident when switching the comparison control back to original sampling.
+The expanded native-4K run applied 194 different replacement images, adding about
+1501 MiB of GPU allocations. In four frozen 30-second comparison windows, original
+presentation rates were 59.99/60.00 FPS and replacement rates 51.69/59.99 FPS.
+The first replacement window included an isolated 545.1 ms renderer stall and
+some zero Metal presentation callbacks; retain this anomaly rather than claiming
+an uninterrupted 60 FPS result. There were no shader compiles or replacement
+uploads in that window. Its cause remains unassigned.
 
-Visual differences were modest, chiefly cleaner color edges on the blades.
-Unchanged normal maps, geometry and lighting still limit the overall result.
-An 80-second active gameplay regression also showed drops in both modes. Draw
-counts changed from roughly 2100 to 1200 as the fight progressed, so comparing
-those alternating windows cannot establish a small texture-only performance cost
-or prove sustained 60 FPS combat. The earlier bounded performance checkpoint
-does not cover every combat state.
+Across alternating 20-second active combat windows, originals presented
+58.75/59.99 FPS and replacements 60.01/60.01 FPS. Enemy/draw counts changed, so
+these are regression observations, not evidence of a texture-induced speedup.
+Presentation p95 remained near 20.83 ms, retaining the existing cadence issue.
+Separate validation with the final app reached gameplay and exercised sampling
+with no reported Vulkan validation errors. All CPU translation/interpreter
+counters remained zero. This does not cover the full campaign or other Macs.
 
-The local test launcher remembers Original / 2x Character (test). Without a local
-pack it hides that option; texture enhancement remains off by default. Keep
-derived packs private and outside community downloads. Whole-game restoration,
-compressed replacement formats, normal/packed-channel treatment, precise GPU-time
-cost and full-campaign validation remain open work.
+Visible improvements are modest; geometry and lighting are unchanged, and data
+resampling alone creates no new normal-map detail. The local test launcher
+remembers Original / 2x Kratos & opening. Without a pack it hides that option;
+enhancement remains off by default. Keep derived packs outside community downloads.
+Whole-campaign restoration, better authored/estimated surface detail, precise GPU
+texture-only cost, the isolated stall and broader validation remain open work.
 
 ## GPU work and smoothness
 

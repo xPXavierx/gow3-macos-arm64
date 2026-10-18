@@ -10,6 +10,32 @@ import io
 import json
 from pathlib import Path
 import struct
+import subprocess
+import tempfile
+
+def compress_pack(data: bytes, encoder: Path) -> bytes:
+    """Convert a v1 color fixture to mip-major ASTC 4x4. Compression is offline."""
+    from PIL import Image
+    width,height,block,original_size,out_width,out_height,count,flags=struct.unpack_from('<8I',data,8)
+    original=data[40:40+original_size]
+    offset=40+original_size
+    payload=[]
+    with tempfile.TemporaryDirectory(prefix='gow3-astc-') as directory:
+        directory=Path(directory)
+        for mip in range(count):
+            w=max(out_width>>mip,1);h=max(out_height>>mip,1);n=w*h*4
+            Image.frombytes('RGBA',(w,h),data[offset:offset+n]).save(directory/'input.png')
+            offset+=n
+            subprocess.run([str(encoder.resolve()),'-cl',str(directory/'input.png'),
+                            str(directory/'output.astc'),'4x4','-medium','-silent'],check=True)
+            astc=(directory/'output.astc').read_bytes()
+            if astc[:7]!=b'\x13\xab\xa1\x5c\x04\x04\x01' or len(astc)!=16+((w+3)//4)*((h+3)//4)*16:
+                raise ValueError('Invalid ASTC encoder output')
+            payload.append(astc[16:])
+    payload=b''.join(payload)
+    header=b'G3TXv002'+struct.pack('<IIIIQIIIIQQ',width,height,block,1,len(original),
+                                out_width,out_height,count,2,len(payload),0)
+    return header+original+payload
 
 def create(dds: bytes, restored: Path) -> bytes:
     import numpy as np
@@ -50,13 +76,16 @@ def create(dds: bytes, restored: Path) -> bytes:
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('original_dds',type=Path);p.add_argument('restored_png',type=Path)
-    p.add_argument('output',type=Path);a=p.parse_args()
+    p.add_argument('output',type=Path)
+    p.add_argument('--astc-encoder',type=Path,help='Optional native astcenc binary; creates a compressed v2 pack')
+    a=p.parse_args()
     data=create(a.original_dds.read_bytes(),a.restored_png)
+    if a.astc_encoder: data=compress_pack(data,a.astc_encoder)
     a.output.parent.mkdir(parents=True,exist_ok=True)
     a.output.write_bytes(data)
     manifest_path = a.output.parent / 'manifest.json'
-    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {'version':1,'files':{}}
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {'version':2,'files':{}}
     manifest['files'][a.output.name] = hashlib.sha256(data).hexdigest()
     manifest_path.write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
-    print(f'{a.output.name}: {len(data)/1048576:.2f} MiB, exact original BC base + 2x RGBA mip chain')
+    print(f'{a.output.name}: {len(data)/1048576:.2f} MiB, exact original BC base + complete 2x mip chain')
 if __name__=='__main__':main()

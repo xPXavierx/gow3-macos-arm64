@@ -52,7 +52,7 @@ struct Preferences: Codable {
 
 let translations: [String: [String: String]] = [
 "pt-BR": [
- "textures":"Texturas", "originalTextures":"Originais", "hdTextures":"2× · Personagem (teste)",
+ "textures":"Texturas", "originalTextures":"Originais", "hdTextures":"2× · Kratos e abertura",
  "quitMenu":"Sair de God of War III", "subtitle":"REMASTERED · APPLE SILICON", "settings":"Prepare sua próxima partida",
  "resolution":"Resolução de saída", "upscaling":"Upscaling", "framerate":"Limite de quadros",
  "native":"Nativo", "quality":"MetalFX · Qualidade", "balanced":"MetalFX · Equilibrado", "performance":"MetalFX · Desempenho",
@@ -86,7 +86,7 @@ let translations: [String: [String: String]] = [
  "quitPreparingMessage":"O trabalho já concluído será guardado. Na próxima abertura, clique em Jogar para continuar."
 ],
 "en": [
- "textures":"Textures", "originalTextures":"Original", "hdTextures":"2× · Character (test)",
+ "textures":"Textures", "originalTextures":"Original", "hdTextures":"2× · Kratos & opening",
  "quitMenu":"Quit God of War III", "subtitle":"REMASTERED · APPLE SILICON", "settings":"Ready for your next session",
  "resolution":"Output resolution", "upscaling":"Upscaling", "framerate":"Frame rate cap",
  "native":"Native", "quality":"MetalFX · Quality", "balanced":"MetalFX · Balanced", "performance":"MetalFX · Performance",
@@ -120,7 +120,7 @@ let translations: [String: [String: String]] = [
  "quitPreparingMessage":"Completed work will be kept. Click Play next time to continue."
 ],
 "es": [
- "textures":"Texturas", "originalTextures":"Originales", "hdTextures":"2× · Personaje (prueba)",
+ "textures":"Texturas", "originalTextures":"Originales", "hdTextures":"2× · Kratos e inicio",
  "quitMenu":"Salir de God of War III", "subtitle":"REMASTERED · APPLE SILICON", "settings":"Prepara tu próxima partida",
  "resolution":"Resolución de salida", "upscaling":"Reescalado", "framerate":"Límite de fotogramas",
  "native":"Nativo", "quality":"MetalFX · Calidad", "balanced":"MetalFX · Equilibrado", "performance":"MetalFX · Rendimiento",

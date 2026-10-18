@@ -154,7 +154,7 @@ def main():
             import hashlib
             manifest = json.loads((texture_pack / "manifest.json").read_text())
             files = manifest["files"]
-            if manifest.get("version") != 1 or not files or len(files) > 64:
+            if manifest.get("version") not in (1,2) or not files or len(files) > 2048:
                 raise ValueError("Invalid texture pack manifest")
             if set(files) != {p.name for p in texture_pack.glob("*.g3tx")}:
                 raise ValueError("Texture pack file list changed")
@@ -164,8 +164,8 @@ def main():
                     raise ValueError("Invalid texture pack filename")
                 path = texture_pack / name
                 total += path.stat().st_size
-                if path.stat().st_size > 96 * 1024**2 or total > 256 * 1024**2:
-                    raise ValueError("Texture pack exceeds the experimental memory limit")
+                if path.stat().st_size > 128 * 1024**2 or total > 4 * 1024**3:
+                    raise ValueError("Texture pack exceeds the experimental pack limit")
                 with path.open("rb") as stream:
                     actual = hashlib.file_digest(stream, "sha256").hexdigest()
                 if actual != expected:
