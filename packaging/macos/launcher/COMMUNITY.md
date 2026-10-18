@@ -55,6 +55,12 @@ controller uses its normal south face button. Existing saves are not bundled.
 - English on a fresh install; English, Brazilian Portuguese and Spanish thereafter.
 - 720p/1080p/1440p/4K, native or spatial MetalFX Quality/Balanced/Performance.
 - 60 FPS or Unlimited (upstream 240 FPS engine profile plus FIFO V-Sync).
+- With the 60 FPS cap, the launcher temporarily selects a matching 60 Hz mode
+  on the main display, preserving resolution and Retina scale. It restores the
+  previous mode at exit. The public CoreGraphics configuration is app-scoped,
+  so macOS also restores it if the helper crashes. If no matching mode exists,
+  the launcher keeps the current display setting and records the reason in the
+  session log. Unlimited does not change the display refresh rate.
 - Retina fullscreen, Game Mode metadata and V-Sync stay enabled. macOS controls
   actual Game Mode, including remembered manual opt-out.
 - No frame generation. The game HUD always displays render dimensions and MetalFX

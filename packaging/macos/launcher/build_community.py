@@ -71,6 +71,9 @@ def main():
     contents = a.out / 'Contents'
     resources = contents / 'Resources'
     shutil.copy2(a.launcher, contents / 'MacOS/GOW3Launcher')
+    subprocess.run(['/usr/bin/xcrun', 'swiftc', '-O', '-target', 'arm64-apple-macos14.0',
+        '-framework', 'CoreGraphics', str(source / 'DisplayMode.swift'),
+        '-o', str(resources / 'DisplayMode')], check=True)
     for name in ('session.py', 'community.py', 'Help-pt-BR.txt'):
         shutil.copy2(source / name, resources / ('Help.txt' if name == 'Help-pt-BR.txt' else name))
     runtime = resources / 'Runtime'

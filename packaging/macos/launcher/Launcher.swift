@@ -81,6 +81,7 @@ let translations: [String: [String: String]] = [
  "dump_missing":"O dump está incompleto. Selecione a pasta extraída com os executáveis e os arquivos de dados do jogo.",
  "disk_space":"Libere pelo menos 3 GB no disco do Mac para preparar o jogo.",
  "prepare_failed":"Não foi possível concluir a preparação. Abra os logs para ver o diagnóstico e clique em Jogar para tentar novamente.",
+ "runtime_aot":"O jogo foi encerrado por uma instrução ainda não suportada pelo recompilador ARM64. O diagnóstico está nos logs. Isso não indica corrupção do dump.", "runtime_failed":"O jogo foi encerrado inesperadamente. Abra os logs para consultar o erro. Este aviso, por si só, não indica problema no dump.",
  "architecture":"É necessário um Mac com Apple Silicon e macOS 26 ou superior. Rosetta não é usado.",
  "quitPreparingTitle":"Cancelar a preparação?",
  "quitPreparingMessage":"O trabalho já concluído será guardado. Na próxima abertura, clique em Jogar para continuar."
@@ -115,6 +116,7 @@ let translations: [String: [String: String]] = [
  "dump_missing":"The dump is incomplete. Select the extracted folder containing the executables and game data files.",
  "disk_space":"Free at least 3 GB on your Mac to prepare the game.",
  "prepare_failed":"Preparation could not finish. Open the logs for diagnostics, then click Play to try again.",
+ "runtime_aot":"The game stopped at an instruction not yet supported by the ARM64 recompiler. Diagnostics are in the logs. This does not indicate a corrupt dump.", "runtime_failed":"The game stopped unexpectedly. Open the logs for the error details. This message alone does not indicate a dump problem.",
  "architecture":"An Apple Silicon Mac with macOS 26 or later is required. Rosetta is not used.",
  "quitPreparingTitle":"Cancel preparation?",
  "quitPreparingMessage":"Completed work will be kept. Click Play next time to continue."
@@ -149,6 +151,7 @@ let translations: [String: [String: String]] = [
  "dump_missing":"El dump está incompleto. Selecciona la carpeta extraída con los ejecutables y los archivos de datos del juego.",
  "disk_space":"Libera al menos 3 GB en tu Mac para preparar el juego.",
  "prepare_failed":"No se pudo completar la preparación. Abre los logs para ver el diagnóstico y pulsa Jugar para reintentar.",
+ "runtime_aot":"El juego se detuvo en una instrucción aún no soportada por el recompilador ARM64. El diagnóstico está en los logs. Esto no indica corrupción del dump.", "runtime_failed":"El juego se cerró inesperadamente. Abre los logs para consultar el error. Este aviso, por sí solo, no indica un problema con el dump.",
  "architecture":"Se requiere un Mac con Apple Silicon y macOS 26 o posterior. No se usa Rosetta.",
  "quitPreparingTitle":"¿Cancelar la preparación?",
  "quitPreparingMessage":"Se conservará el trabajo completado. Pulsa Jugar la próxima vez para continuar."
@@ -187,6 +190,13 @@ struct PreparationState: Decodable {
     var completed: Int?
     var total: Int?
     var error_code: String?
+}
+
+func failureKey(log: String, preparation: PreparationState?) -> String {
+    if log.contains("ARM64 AOT coverage gap") { return "runtime_aot" }
+    if log.contains("DUMP_VERSION:") { return "dump_version" }
+    if let state = preparation, state.phase == "failed", let code = state.error_code { return code }
+    return "runtime_failed"
 }
 
 final class LauncherModel: ObservableObject {
@@ -302,7 +312,8 @@ final class LauncherModel: ObservableObject {
                     self.statusKey = self.stopping && !wasRunning ? "cancelled" : "finished"
                     if exitCode != 0 && !self.stopping {
                         self.statusKey = "failed"
-                        self.showError(self.t(self.statusState?.error_code ?? "error"))
+                        let diagnostic = (try? String(contentsOf:log,encoding:.utf8)) ?? ""
+                        self.showError(self.t(failureKey(log:diagnostic,preparation:self.statusState)))
                     }
                 }
             }
@@ -592,6 +603,10 @@ if let index = args.firstIndex(of:"--self-test"), index+1 < args.count {
     precondition(CTFontGetGlyphsForCharacters(menuFont,accented,&glyphs,accented.count))
     let keys = Set(translations["en"]!.keys)
     precondition(translations.values.allSatisfy { Set($0.keys) == keys && !$0.values.contains("") })
+    precondition(failureKey(log:"STOP: ARM64 AOT coverage gap",preparation:nil) == "runtime_aot")
+    precondition(failureKey(log:"Host fault",preparation:nil) == "runtime_failed")
+    precondition(failureKey(log:"DUMP_VERSION: incompatible",preparation:nil) == "dump_version")
+    precondition(failureKey(log:"",preparation:PreparationState(phase:"failed",error_code:"disk_space")) == "disk_space")
     let p = Preferences()
     let legacy = try! JSONDecoder().decode(Preferences.self,from:Data("{\"gamePath\":\"/example\"}".utf8))
     precondition(p.language == "en" && legacy.language == "en")

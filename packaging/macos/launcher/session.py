@@ -2,17 +2,53 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Relocatable desktop adapter. Startup policy remains exclusively in run.py."""
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import shutil
 import signal
+import select
 import subprocess
 import sys
 
 RESOLUTIONS = {"720": (1280, 720), "1080": (1920, 1080),
                "1440": (2560, 1440), "2160": (3840, 2160)}
 SCALES = {"native": 1, "quality": 1.5, "balanced": 1.7, "performance": 2}
+
+
+@contextmanager
+def display_refresh(resources, cap):
+    """The helper's stdin is a lease, closed even when the supervisor dies.
+
+    CoreGraphics app-scoped changes also revert if the helper is killed. This
+    never changes the display size/Retina scale or the user's permanent choice.
+    """
+    helper = resources / "DisplayMode"
+    process = None
+    try:
+        if cap == "60" and helper.is_file():
+            process = subprocess.Popen([str(helper)], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+            if select.select([process.stdout], [], [], 10)[0]:
+                print("Display refresh: " + process.stdout.readline().decode(errors="replace").strip(), flush=True)
+            else:
+                print("Display refresh: helper timed out; retaining the session mode", flush=True)
+                process.kill()
+                process.wait()
+        yield
+    finally:
+        if process is not None:
+            process.stdin.close()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            remainder = process.stdout.read().decode(errors="replace").strip()
+            if remainder:
+                print("Display refresh: " + remainder, flush=True)
+            process.stdout.close()
 
 
 def dimensions(resolution, upscaling):
@@ -176,16 +212,17 @@ def main():
         # Let the UI stop only the process belonging to this session.
         (support / "active-profile.txt").write_text(str(out))
         try:
-            child = subprocess.Popen([sys.executable, "-B", str(resources / "Runtime/run.py")],
-                                     env=env, start_new_session=True)
-            try:
-                return child.wait()
-            except KeyboardInterrupt:
-                # Includes Stop during preparation: don't leave an orphaned
-                # supervisor/game behind if no game PID has been written yet.
-                if child.poll() is None:
-                    os.killpg(child.pid, signal.SIGINT)
-                return child.wait()
+            with display_refresh(resources, a.cap):
+                child = subprocess.Popen([sys.executable, "-B", str(resources / "Runtime/run.py")],
+                                         env=env, start_new_session=True)
+                try:
+                    return child.wait()
+                except KeyboardInterrupt:
+                    # Includes Stop during preparation: don't leave an orphaned
+                    # supervisor/game behind if no game PID has been written yet.
+                    if child.poll() is None:
+                        os.killpg(child.pid, signal.SIGINT)
+                    return child.wait()
         finally:
             (support / "active-profile.txt").unlink(missing_ok=True)
 

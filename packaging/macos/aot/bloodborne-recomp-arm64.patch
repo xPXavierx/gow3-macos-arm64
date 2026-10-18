@@ -46,6 +46,36 @@ index 59f089d..8578c82 100644
 +#endif
      }
  }
+diff --git a/src/cpu/interp_x87.c b/src/cpu/interp_x87.c
+index a8062a5..3946fcc 100644
+--- a/src/cpu/interp_x87.c
++++ b/src/cpu/interp_x87.c
+@@ -247,19 +247,20 @@ int bbcpu_exec_x87(BbCpu *cpu, const BbInsn *in) {
+     case M(FLDCW): cpu->fcw = (uint16_t)bb_load(bbcpu_addr(cpu, in, &in->op[0]), 2); return 1;
+     case M(FNINIT): cpu->fcw = 0x37f; cpu->fsw = 0; cpu->top = 0; return 1;
+     case M(FNCLEX): cpu->fsw &= 0x7f00; return 1;
+-    case M(FNSTENV): { /* 28-byte protected-mode environment; then all exceptions masked */
++    case M(FNSTENV): { /* 14/28-byte environment; then all exceptions masked */
+         const uint64_t a = bbcpu_addr(cpu, in, &in->op[0]);
+-        memset((void *)a, 0, 28);
++        const int small = in->op[0].size == 14;
++        memset((void *)a, 0, small ? 14 : 28);
+         bb_store(a, 2, cpu->fcw);
+-        bb_store(a + 4, 2, (uint16_t)((cpu->fsw & ~0x3800) | ((cpu->top & 7) << 11)));
+-        bb_store(a + 8, 2, 0); /* tag word: all valid (values are kept as doubles) */
++        bb_store(a + (small ? 2 : 4), 2, (uint16_t)((cpu->fsw & ~0x3800) | ((cpu->top & 7) << 11)));
++        bb_store(a + (small ? 4 : 8), 2, 0); /* tag word: all valid (values are kept as doubles) */
+         cpu->fcw |= 0x3f;
+         return 1;
+     }
+     case M(FLDENV): {
+         const uint64_t a = bbcpu_addr(cpu, in, &in->op[0]);
+         cpu->fcw = (uint16_t)bb_load(a, 2);
+-        const uint16_t sw = (uint16_t)bb_load(a + 4, 2);
++        const uint16_t sw = (uint16_t)bb_load(a + (in->op[0].size == 14 ? 2 : 4), 2);
+         cpu->fsw = sw & ~0x3800;
+         cpu->top = (sw >> 11) & 7;
+         return 1;
 diff --git a/src/recomp/rc.h b/src/recomp/rc.h
 index f14280f..5ad3c63 100644
 --- a/src/recomp/rc.h
@@ -83,7 +113,7 @@ index f14280f..5ad3c63 100644
  enum { FK_CPU, FK_ADD, FK_SUB, FK_LOGIC, FK_INC, FK_DEC };
  static inline uint64_t rc_mask(int size) { return size >= 8 ? ~UINT64_C(0) : (UINT64_C(1) << (size * 8)) - 1; }
 diff --git a/tests/fuzz_recomp.c b/tests/fuzz_recomp.c
-index b1c06de..419d5fc 100644
+index b1c06de..064df59 100644
 --- a/tests/fuzz_recomp.c
 +++ b/tests/fuzz_recomp.c
 @@ -127,7 +127,7 @@ static int place_memory(const Insn *x, BbCpu *cpu) {
@@ -238,7 +268,7 @@ index b1c06de..419d5fc 100644
                  } else {
                      if (op->base == RAX || op->base == RDX || op->index == RAX || op->index == RDX) { placed = 0; break; }
                      const uint64_t at = bbcpu_addr(ci, &block->insn[0], op);
-@@ -295,10 +374,54 @@ int main(int argc, char **argv) {
+@@ -295,10 +374,59 @@ int main(int argc, char **argv) {
                  if (sgn) dx = ((ax >> (bytes * 8 - 1)) & 1) ? mask : 0;
                  else dx = rnd() % 4 ? 0 : (rnd() % d) & mask;
                  if (sgn && bytes == 8 && ax == UINT64_C(0x8000000000000000) && d == mask) ci->r[RAX] = 1;
@@ -264,6 +294,11 @@ index b1c06de..419d5fc 100644
 +                // The upstream reference casts the exponent to int without a guard.
 +                static const double powers[]={-2147483648.0,2147483647.0,-1075,-1022,-1.75,-0.5,0,0.5,1.75,1023,1075};
 +                ci->st[(ci->top+1)&7]=t<11 ? powers[t] : (double)((int)(rnd()%4097)-2048)/4.0;
++            }
++            if(mn==ZYDIS_MNEMONIC_FNSTENV || mn==ZYDIS_MNEMONIC_FNCLEX || mn==ZYDIS_MNEMONIC_FNINIT) {
++                /* Exercise initially unmasked exceptions and all rounding modes.
++                 * The default 0x37f would conceal a missing FNSTENV mask update. */
++                ci->fcw=(uint16_t)(0x40 | (rnd() & 0x1f3f));
 +            }
 +            if(mn==ZYDIS_MNEMONIC_FISTTP) {
 +                // The upstream oracle casts double to int64_t without an invalid-range guard.
@@ -294,7 +329,7 @@ index b1c06de..419d5fc 100644
              ci->rip = CODE_AT;
              memcpy(mem_start, scratch, SCRATCH);
              memcpy(c0, ci, sizeof(*c0));
-@@ -313,7 +436,7 @@ int main(int argc, char **argv) {
+@@ -313,7 +441,7 @@ int main(int argc, char **argv) {
                  memcpy(scratch, mem_start, SCRATCH);
                  if (uses_rip) { memcpy(rip_jit, rip_mem, RIP_SIZE); memcpy(rip_mem, rip_start, RIP_SIZE); }
                  stage = "interpreter";
@@ -304,7 +339,7 @@ index b1c06de..419d5fc 100644
              guarded = 0;
              if (sig) {
 diff --git a/tools/recomp/bbrecomp.c b/tools/recomp/bbrecomp.c
-index caa258b..3e89cc9 100644
+index caa258b..a3e50c5 100644
 --- a/tools/recomp/bbrecomp.c
 +++ b/tools/recomp/bbrecomp.c
 @@ -32,6 +32,7 @@ typedef struct { uint32_t p_type, p_flags; uint64_t p_offset, p_vaddr, p_paddr,
@@ -401,7 +436,7 @@ index caa258b..3e89cc9 100644
          emit("\n");
          return 1;
      }
-@@ -285,10 +343,138 @@ static int translate(Range f, uint64_t off, const BbInsn *in, uint64_t *stats) {
+@@ -285,10 +343,168 @@ static int translate(Range f, uint64_t off, const BbInsn *in, uint64_t *stats) {
          return 1;
      }
      switch (m) {
@@ -444,6 +479,36 @@ index caa258b..3e89cc9 100644
 +    case M(FLDCW):
 +        if(!read_op(off,in,d,2,&a)) return 0;
 +        emit("c->fcw=(uint16_t)(%s);\n",a.s); return 1;
++    case M(FNSTENV): case M(FLDENV): {
++        int stack;
++        if(d->type!=OP_MEM || (d->size!=14 && d->size!=28) || !address(off,in,d,&a,&stack)) return 0;
++        const int sw=d->size==14 ? 2 : 4, tag=d->size==14 ? 4 : 8;
++        /* Intel SDM F(N)STENV/FLDENV: save before masking all six exceptions.
++         * Preserve the runtime's double-stack model (tags/pointers untracked),
++         * as in interp_x87.c; never invoke the interpreter for these forms. */
++        emit("{ const uint64_t ea=%s; ",a.s);
++        if(m==M(FNSTENV)) {
++            emit("memset((void*)ea,0,%d); rc_st(ea,2,c->fcw); "
++                 "rc_st(ea+%d,2,(uint16_t)((c->fsw&~0x3800)|((c->top&7)<<11))); "
++                 "rc_st(ea+%d,2,0); c->fcw|=0x3f; ",d->size,sw,tag);
++        } else {
++            emit("c->fcw=(uint16_t)rc_ld(ea,2); const uint16_t sw=(uint16_t)rc_ld(ea+%d,2); "
++                 "c->fsw=sw&~0x3800; c->top=(sw>>11)&7; ",sw);
++        }
++        emit("}\n"); return 1;
++    }
++    case M(FNCLEX):
++        emit("c->fsw&=0x7f00;\n"); return 1;
++    case M(FNINIT):
++        emit("c->fcw=0x37f; c->fsw=0; c->top=0;\n"); return 1;
++    case M(FWAIT):
++        /* Native arithmetic is synchronous. With no pending unmasked x87
++         * exception there is nothing to wait for. Keep the strict diagnostic
++         * path for #MF instead of silently discarding a requested exception. */
++        emit("if (c->fsw & (uint16_t)~c->fcw & 0x3f) { " SPILL " " FLAGS_OUT
++             " c->rip=B+0x%" PRIx64 "ull; rc->bail(c,entry_rsp); return; }\n",off); return 1;
++    case M(FNOP):
++        emit("/* synchronous x87 no-op */\n"); return 1;
 +    case M(FILD): {
 +        const BbOp *src=&in->op[in->count-1]; int stack;
 +        if(src->type!=OP_MEM || (src->size!=2 && src->size!=4 && src->size!=8) || !address(off,in,src,&a,&stack)) return 0;
@@ -540,7 +605,7 @@ index caa258b..3e89cc9 100644
      case M(MOV):
          if (d->type == OP_REG && d->kind != RK_GPR) return 0;
          if (s->type == OP_REG && s->kind != RK_GPR) return 0;
-@@ -498,6 +684,8 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+@@ -498,6 +714,8 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
      case M(MOVAPS): case M(MOVUPS): case M(MOVAPD): case M(MOVUPD): case M(MOVDQA): case M(MOVDQU):
      case M(VMOVAPS): case M(VMOVUPS): case M(VMOVAPD): case M(VMOVUPD): case M(VMOVDQA): case M(VMOVDQU):
      case M(LDDQU): case M(VLDDQU):
@@ -549,7 +614,7 @@ index caa258b..3e89cc9 100644
          if (!vread(off, in, &in->op[1], &a) || !vwrite(off, in, &in->op[0], a.s, in->op[0].size, &s)) return 0;
          emit("%s\n", s.s);
          return 1;
-@@ -539,7 +727,9 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+@@ -539,7 +757,9 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
      case M(DIVSS): case M(VDIVSS): case M(MINSS): case M(VMINSS): case M(MAXSS): case M(VMAXSS):
      case M(ADDPD): case M(VADDPD): case M(SUBPD): case M(VSUBPD): case M(MULPD): case M(VMULPD):
      case M(DIVPD): case M(VDIVPD): case M(ADDSD): case M(VADDSD): case M(SUBSD): case M(VSUBSD):
@@ -560,7 +625,7 @@ index caa258b..3e89cc9 100644
          const char *name = ZydisMnemonicGetString((ZydisMnemonic)m);
          const char *base = name[0] == 'v' ? name + 1 : name;
          const int dbl = base[strlen(base) - 1] == 'd', scalar = base[strlen(base) - 2] == 's';
-@@ -558,13 +748,74 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+@@ -558,13 +778,74 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
          return vbinary(off, in, 4, w, 0, "rr.q[i] = a.q[i] | b.q[i];");
      case M(XORPS): case M(VXORPS): case M(XORPD): case M(VXORPD): case M(PXOR): case M(VPXOR):
          return vbinary(off, in, 4, w, 0, "rr.q[i] = a.q[i] ^ b.q[i];");
@@ -635,7 +700,7 @@ index caa258b..3e89cc9 100644
      case M(HADDPS): case M(VHADDPS): case M(HSUBPS): case M(VHSUBPS): {
          const char *op = (m == M(HADDPS) || m == M(VHADDPS)) ? "+" : "-";
          const Str body = str("const float *x = a.f + i * 4, *y = b.f + i * 4; rr.f[i * 4] = x[0] %s x[1]; "
-@@ -572,6 +823,10 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+@@ -572,6 +853,10 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
                               op, op, op, op);
          return vbinary(off, in, w / 16, w, 1, body.s);
      }
@@ -646,7 +711,7 @@ index caa258b..3e89cc9 100644
      case M(CMPPS): case M(VCMPPS): case M(CMPPD): case M(VCMPPD): case M(CMPSS): case M(VCMPSS): case M(CMPSD): case M(VCMPSD): {
          const VOps o = vops3(in);
          if (!o.imm) return 0;
-@@ -590,6 +845,20 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+@@ -590,6 +875,20 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
               dbl ? "fd" : "f", dbl ? "fd" : "f");
          return 1;
      }
@@ -667,7 +732,7 @@ index caa258b..3e89cc9 100644
      case M(SHUFPS): case M(VSHUFPS): {
          const VOps o = vops3(in);
          if (!o.imm) return 0;
-@@ -599,7 +868,8 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+@@ -599,7 +898,8 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
          return vbinary(off, in, w / 16, w, 1, body.s);
      }
      case M(PSHUFD): case M(VPSHUFD): case M(VPERMILPS): {
@@ -677,7 +742,7 @@ index caa258b..3e89cc9 100644
          const VOps o = vops1(in);
          if (!o.imm || !vread(off, in, o.s2, &a) || !vwrite(off, in, o.dst, "rr", w, &s)) return 0;
          const int imm = (int)o.imm->disp;
-@@ -608,14 +878,29 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+@@ -608,14 +908,29 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
               a.s, w / 16, imm & 3, (imm >> 2) & 3, (imm >> 4) & 3, (imm >> 6) & 3, s.s);
          return 1;
      }
@@ -710,7 +775,7 @@ index caa258b..3e89cc9 100644
      case M(MOVHLPS): case M(VMOVHLPS): case M(MOVLHPS): case M(VMOVLHPS): {
          const VOps o = vops3(in);
          if (!vread(off, in, o.s1, &a) || !vread(off, in, o.s2, &b) || !vwrite(off, in, o.dst, "rr", 16, &s)) return 0;
-@@ -710,6 +995,44 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+@@ -710,6 +1025,44 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
          emit("{ BbVec rr = %s; const BbVec x = %s; %s %s }\n", a.s, b.s, calc, s.s);
          return 1;
      }
@@ -755,7 +820,7 @@ index caa258b..3e89cc9 100644
      case M(CVTSI2SS): case M(VCVTSI2SS): case M(CVTSI2SD): case M(VCVTSI2SD): {
          const VOps o = vops3(in);
          Str g;
-@@ -748,6 +1071,23 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+@@ -748,6 +1101,23 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
               a.s, w, es, es, s.s);
          return 1;
      }
@@ -779,7 +844,7 @@ index caa258b..3e89cc9 100644
      case M(UNPCKLPS): case M(VUNPCKLPS): case M(UNPCKHPS): case M(VUNPCKHPS):
          return vbinary(off, in, w / 16, w, 1, (m == M(UNPCKLPS) || m == M(VUNPCKLPS))
              ? "rr.d[i * 4] = a.d[i * 4]; rr.d[i * 4 + 1] = b.d[i * 4]; rr.d[i * 4 + 2] = a.d[i * 4 + 1]; rr.d[i * 4 + 3] = b.d[i * 4 + 1];"
-@@ -808,6 +1148,32 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
+@@ -808,6 +1178,32 @@ static int translate_vector(uint64_t off, const BbInsn *in) {
          emit("{ BbVec rr = %s; const uint64_t v = %s; %s %s }\n", a.s, g.s, set.s, s.s);
          return 1;
      }
@@ -812,7 +877,7 @@ index caa258b..3e89cc9 100644
      case M(PALIGNR): case M(VPALIGNR): {
          const VOps o = vops3(in);
          if (!o.imm) return 0;
-@@ -827,10 +1193,18 @@ static int translate_atomic(uint64_t off, const BbInsn *in) {
+@@ -827,10 +1223,18 @@ static int translate_atomic(uint64_t off, const BbInsn *in) {
      const BbOp *d = &in->op[0], *src = &in->op[1];
      if (d->type != OP_MEM) return 0;
      const int size = d->size;
@@ -832,7 +897,7 @@ index caa258b..3e89cc9 100644
      const uint64_t mk = mask(size);
      switch (m) {
      case M(ADD): case M(SUB): case M(AND): case M(OR): case M(XOR): {
-@@ -850,6 +1224,12 @@ static int translate_atomic(uint64_t off, const BbInsn *in) {
+@@ -850,6 +1254,12 @@ static int translate_atomic(uint64_t off, const BbInsn *in) {
               m == M(INC) ? "FK_INC" : "FK_DEC", size);
          return 1;
      }
@@ -845,7 +910,7 @@ index caa258b..3e89cc9 100644
      case M(XADD): {
          if (!gpr(src) || !read_op(off, in, src, size, &b) || !write_op(off, in, src, "a", &w)) return 0;
          emit("{ const uint64_t ea = %s; const uint64_t b = %s; uint64_t a, seen; do a = rc_ld(ea, %d); "
-@@ -881,6 +1261,88 @@ static int translate_extra(uint64_t off, const BbInsn *in) {
+@@ -881,6 +1291,88 @@ static int translate_extra(uint64_t off, const BbInsn *in) {
      Str a, b, w, ad;
      int stack = 0;
      switch (m) {
@@ -934,7 +999,7 @@ index caa258b..3e89cc9 100644
      case M(CBW): emit("r[RAX] = (r[RAX] & ~0xffffull) | ((uint64_t)(int16_t)(int8_t)r[RAX] & 0xffff);\n"); return 1;
      case M(CWDE): emit("r[RAX] = (uint32_t)(int32_t)(int16_t)r[RAX];\n"); return 1;
      case M(CDQE): emit("r[RAX] = (uint64_t)(int64_t)(int32_t)r[RAX];\n"); return 1;
-@@ -979,6 +1441,32 @@ static int translate_shift_mul(uint64_t off, const BbInsn *in) {
+@@ -979,6 +1471,32 @@ static int translate_shift_mul(uint64_t off, const BbInsn *in) {
      if (size != 4 && size != 8 && size != 2 && size != 1) return 0;
      static const char *const sext[9] = {0, "int8_t", "int16_t", 0, "int32_t", 0, 0, 0, "int64_t"};
      Str a, w;
@@ -967,7 +1032,7 @@ index caa258b..3e89cc9 100644
      if (m == M(SHL) || m == M(SHR) || m == M(SAR)) {
          unsigned count = 1;
          if (in->count > 1) {
-@@ -1039,6 +1527,31 @@ static int translate_shift_mul(uint64_t off, const BbInsn *in) {
+@@ -1039,6 +1557,31 @@ static int translate_shift_mul(uint64_t off, const BbInsn *in) {
   * jumps and branches inside the function (data between them, such as jump tables, is never decoded;
   * a place only an indirect jump reaches goes back to the translator). Sorted by offset. */
  typedef struct { uint64_t off; BbInsn in; } Insn;
@@ -999,7 +1064,7 @@ index caa258b..3e89cc9 100644
  static int insn_order(const void *a, const void *b) {
      const uint64_t x = ((const Insn *)a)->off, y = ((const Insn *)b)->off;
      return x < y ? -1 : x > y;
-@@ -1046,32 +1559,280 @@ static int insn_order(const void *a, const void *b) {
+@@ -1046,32 +1589,280 @@ static int insn_order(const void *a, const void *b) {
  /* Targets of the jump tables decode found (labels too), for the function being generated. */
  static uint64_t *table_targets;
  static size_t table_target_count, table_target_capacity;
@@ -1295,7 +1360,7 @@ index caa258b..3e89cc9 100644
      for (uint64_t e = 0; e < entries; ++e) {
          int32_t rel;
          memcpy(&rel, (const void *)(uintptr_t)(base + table + 4 * e), 4);
-@@ -1081,6 +1842,7 @@ static int jump_table(Function fn, const Insn *list, size_t n, uint64_t *work, s
+@@ -1081,6 +1872,7 @@ static int jump_table(Function fn, const Insn *list, size_t n, uint64_t *work, s
              table_target_capacity = table_target_capacity ? table_target_capacity * 2 : 256;
              table_targets = realloc(table_targets, table_target_capacity * sizeof(*table_targets));
          }
@@ -1303,7 +1368,7 @@ index caa258b..3e89cc9 100644
          table_targets[table_target_count++] = target;
          if (!seen[target - fn.offset]) work[(*pending)++] = target;
      }
-@@ -1095,7 +1857,12 @@ static Insn *decode(Function fn, size_t *count) {
+@@ -1095,7 +1887,12 @@ static Insn *decode(Function fn, size_t *count) {
      uint64_t *work = malloc(work_capacity * sizeof(*work));
      size_t pending = 0;
      table_target_count = 0;
@@ -1316,7 +1381,7 @@ index caa258b..3e89cc9 100644
      while (pending) {
          uint64_t off = work[--pending];
          while (off >= fn.offset && off < fn.offset + fn.size && !seen[off - fn.offset]) {
-@@ -1118,7 +1885,7 @@ static Insn *decode(Function fn, size_t *count) {
+@@ -1118,7 +1915,7 @@ static Insn *decode(Function fn, size_t *count) {
                      if (t >= fn.offset && t < fn.offset + fn.size && !seen[t - fn.offset]) work[pending++] = t;
                  }
                  if (m == M(JMP) && in->op[0].type == OP_REG && pending + 4096 < work_capacity)
@@ -1325,7 +1390,7 @@ index caa258b..3e89cc9 100644
                  /* No fall-through after these. */
                  if (m == M(JMP) || m == M(RET) || m == M(INVALID) || m == M(UD2) || m == M(HLT)) ended = 2;
                  off += in->length;
-@@ -1126,6 +1893,13 @@ static Insn *decode(Function fn, size_t *count) {
+@@ -1126,6 +1923,13 @@ static Insn *decode(Function fn, size_t *count) {
              if (ended == 2) break;
          }
      }
@@ -1339,7 +1404,7 @@ index caa258b..3e89cc9 100644
      free(work);
      free(seen);
      qsort(list, n, sizeof(*list), insn_order);
-@@ -1150,12 +1924,17 @@ static void generate(Function fn, uint64_t *stats) {
+@@ -1150,12 +1954,17 @@ static void generate(Function fn, uint64_t *stats) {
      const Range f = {fn.offset, fn.offset + fn.size};
      /* Labels only where a direct jump goes (and the entry): every other address an indirect jump
       * or an interpreted branch reaches goes back to the translator (L_dispatch). */
@@ -1358,7 +1423,7 @@ index caa258b..3e89cc9 100644
          const int cc = cc_of(in->mnemonic);
          if (((cc >= 0 && cc < 16) || in->mnemonic == M(JMP)) && in->op[0].type == OP_IMM) {
              const uint64_t t = list[i].off + (uint64_t)in->op[0].disp;
-@@ -1170,22 +1949,41 @@ static void generate(Function fn, uint64_t *stats) {
+@@ -1170,22 +1979,41 @@ static void generate(Function fn, uint64_t *stats) {
      emit("    uint64_t r[16];\n    " RELOAD "\n");
      emit("    int fk = FK_CPU, fz = 8, fcf = 0;\n    uint64_t fa = 0, fb = 0, fr = 0, dn = 0;\n");
      emit("    const uint64_t entry_rsp = r[RSP];\n");
@@ -1402,7 +1467,7 @@ index caa258b..3e89cc9 100644
      }
      if (snippet_mode) emit("    " SPILL " " FLAGS_OUT " c->rip = B + 0x%" PRIx64 "ull; return;\n", f.end);
      emit("    dn = B + 0x%" PRIx64 "ull; /* past the end */\n", f.end);
-@@ -1207,6 +2005,7 @@ static int snippets(const char *encodings, const char *path) {
+@@ -1207,6 +2035,7 @@ static int snippets(const char *encodings, const char *path) {
      uint8_t *code = mmap((void *)SNIPPET_AT, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0);
      if (code == MAP_FAILED) { perror("mmap"); return 1; }
      base = SNIPPET_AT;
@@ -1410,7 +1475,7 @@ index caa258b..3e89cc9 100644
      bbcpu_add_guest_code(SNIPPET_AT, 0x4000);
      static BbCpu warm;
      bbcpu_run(&warm, 0);
-@@ -1329,7 +2128,7 @@ int main(int argc, char **argv) {
+@@ -1329,7 +2158,7 @@ int main(int argc, char **argv) {
           * setjmp saved that one. They gain nothing in C. */
          size_t stubs = 0;
          for (size_t i = 0; i < function_count;) {

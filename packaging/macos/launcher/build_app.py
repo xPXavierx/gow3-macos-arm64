@@ -33,6 +33,9 @@ contents = app/'Contents'
 macos,resources,frameworks = (contents/x for x in ('MacOS','Resources','Frameworks'))
 for folder in (macos,resources,frameworks):folder.mkdir(parents=True,exist_ok=True)
 shutil.copy2(a.launcher,macos/'GOW3Launcher')
+subprocess.run(['/usr/bin/xcrun', 'swiftc', '-O', '-target', 'arm64-apple-macos14.0',
+    '-framework', 'CoreGraphics', str(Path(__file__).with_name('DisplayMode.swift')),
+    '-o', str(resources/'DisplayMode')], check=True)
 plist = {'CFBundleExecutable':'GOW3Launcher','CFBundleIdentifier':'org.gow3pc.launcher',
     'CFBundleName':'God of War III','CFBundleDisplayName':'God of War III · Apple Silicon',
     'CFBundlePackageType':'APPL','CFBundleVersion':'3','CFBundleShortVersionString':'0.3.1',
@@ -89,7 +92,7 @@ queue = []
 for src in (a.renderer,a.moltenvk):
     dest=frameworks/src.name
     shutil.copy2(src,dest); originals[dest]=src.resolve();queue.append(dest)
-for binary in (macos/'GOW3Launcher',host,rt/'bin/gow3-probe-arm64',py/'bin/python3.14'):
+for binary in (macos/'GOW3Launcher',resources/'DisplayMode',host,rt/'bin/gow3-probe-arm64',py/'bin/python3.14'):
     queue.append(binary);originals[binary]=binary
 for binary in (py/'lib/python3.14/lib-dynload').glob('*.so'):
     queue.append(binary)

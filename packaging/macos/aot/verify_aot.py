@@ -11,6 +11,7 @@ import sys
 
 # Integer arithmetic/flags, bit operations, memory, atomics and SSE/AVX.
 ENCODINGS = (
+    "d933", "d975d8", "66d933", "d923", "66d923", "dbe2", "dbe3", "9b", "d9d0",
     "f6f3", "f6fb", "f6f7", "f6ff", "f633", "f63b", "41f67336", "41f67b36",
     "d9fd", "d9fa",
     "660f3801c1", "c4e27901c0", "c4e27d01c0", "c4e2690103", "c4e26d0103", "660f3802c1", "c4e27902c0", "c4e27d02c0", "c4e2690203", "c4e26d0203",
@@ -158,6 +159,12 @@ def main():
     expected = f"{len(ENCODINGS)} instructions tested, 0 failed, 0 crashed, 0 skipped"
     if expected not in result.stdout:
         raise RuntimeError("The differential oracle did not test every fixture: " + expected)
+    environment_test = out / "x87-environment"
+    subprocess.run([compiler, "-arch", "arm64", "-O2", "-UNDEBUG", "-std=gnu11",
+                    "-I" + str(Path(source) / "src"), "-I" + decoder_include,
+                    str(Path(__file__).with_name("test_x87_environment.c")),
+                    "-o", str(environment_test)], check=True)
+    subprocess.run([str(environment_test), str(library)], check=True)
 
 if __name__ == "__main__":
     main()

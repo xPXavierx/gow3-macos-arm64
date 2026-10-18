@@ -82,6 +82,7 @@ flags = ['-arch','arm64','-O2','-std=gnu11','-fPIC','-ffp-contract=off','-fno-st
          '-I'+str(a.recomp_source.resolve()/'src'), '-I'+str(a.decoder_include.resolve())]
 headers = b''.join(x.read_bytes() for x in sorted((a.recomp_source/'src').rglob('*.h')))
 compiler = subprocess.check_output(['/usr/bin/clang','--version'])
+generator_sha256 = hashlib.sha256(a.recompiler.read_bytes() + headers + Path(__file__).read_bytes()).hexdigest()
 
 def compile_one(path):
     digest = hashlib.sha256(compiler+headers+json.dumps(flags).encode()+path.read_bytes()).hexdigest()
@@ -95,6 +96,9 @@ def reuse_checkpoint(out):
     metadata = json.loads(stamp.read_text())
     expected = hashlib.sha256((out/'boot-linked.bin').read_bytes()).digest()
     for candidate in a.reuse:
+        candidate_manifest = candidate/'profile.json'
+        if not candidate_manifest.exists() or json.loads(candidate_manifest.read_text()).get('generator_sha256') != generator_sha256:
+            continue
         if hashlib.sha256((candidate/'boot-linked.bin').read_bytes()).digest() != expected:
             continue
         from native_launch import require_arm64
@@ -109,7 +113,7 @@ def reuse_checkpoint(out):
 for key, selection in sorted(selections.items()):
     out = a.out / key
     stamp = out / 'profile.json'
-    if stamp.exists() and json.loads(stamp.read_text()).get('generator_policy') == 'checkpoint-no-poll-hooks-v1':
+    if stamp.exists() and json.loads(stamp.read_text()).get('generator_sha256') == generator_sha256:
         reuse_checkpoint(out)
         print('Existing',key,flush=True)
         continue
@@ -157,6 +161,7 @@ for key, selection in sorted(selections.items()):
     library = generated/'libgow3-recompiled.dylib'
     subprocess.run(['/usr/bin/clang','-arch','arm64','-dynamiclib',*map(str,objects),'-o',str(library)],check=True)
     stamp.write_text(json.dumps({**selection,'resolution_patch':resolution,'patches':names,
-        'generator_policy':'checkpoint-no-poll-hooks-v1', 'library_sha256':hashlib.sha256(library.read_bytes()).hexdigest()},indent=2))
+        'generator_policy':'checkpoint-no-poll-hooks-v1', 'generator_sha256':generator_sha256,
+        'library_sha256':hashlib.sha256(library.read_bytes()).hexdigest()},indent=2))
     reuse_checkpoint(out)
     print('Built',key,flush=True)

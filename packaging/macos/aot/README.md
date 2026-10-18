@@ -7,6 +7,17 @@ The bundled patch adds instruction generation and a strict AOT runtime mode.
 The God of War loader integration is in [../native](../native/README.md).
 The generator, verifier, runtime and generated libraries execute as ARM64.
 
+The native generator includes `FNSTENV`, `FLDENV`, `FNCLEX`, `FNINIT`, `FWAIT` and `FNOP`.
+The environment transfers use the runtime's existing x87 double-stack model,
+support both 14-byte and 28-byte operands, save control/status before masking
+exceptions, and restore TOP on load. `FWAIT` completes synchronously when no
+unmasked exception is pending; a pending #MF keeps the strict diagnostic path.
+The fixtures test the save/load boundaries and this exception guard separately
+from the interpreter oracle. These instructions do not call an interpreter. Unsupported
+instructions still stop with a coverage diagnostic; skipping them can corrupt
+game state and is not a valid dump compatibility policy. The x87 model still
+does not track full 80-bit precision, tags or instruction/data pointers.
+
 ## Reproduce
 
 Run from the gow3_pc root. Dependencies are local to this checkout. Requires
