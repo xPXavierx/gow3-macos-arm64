@@ -30,17 +30,19 @@ struct Preferences: Codable {
     var language = "en"
     var resolution = "2160"
     var upscaling = "native"
+    var textures = "original"
     var cap = "60"
     var hud = true
     var gamePath: String? = nil
     var bookmark: Data? = nil
     init() {}
-    enum CodingKeys: String, CodingKey { case language, resolution, upscaling, cap, hud, gamePath, bookmark }
+    enum CodingKeys: String, CodingKey { case language, resolution, upscaling, textures, cap, hud, gamePath, bookmark }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy:CodingKeys.self)
         language = try values.decodeIfPresent(String.self,forKey:.language) ?? "en"
         resolution = try values.decodeIfPresent(String.self,forKey:.resolution) ?? "2160"
         upscaling = try values.decodeIfPresent(String.self,forKey:.upscaling) ?? "native"
+        textures = try values.decodeIfPresent(String.self,forKey:.textures) ?? "original"
         cap = try values.decodeIfPresent(String.self,forKey:.cap) ?? "60"
         hud = try values.decodeIfPresent(Bool.self,forKey:.hud) ?? true
         gamePath = try values.decodeIfPresent(String.self,forKey:.gamePath)
@@ -50,6 +52,7 @@ struct Preferences: Codable {
 
 let translations: [String: [String: String]] = [
 "pt-BR": [
+ "textures":"Texturas", "originalTextures":"Originais", "hdTextures":"2× · Personagem (teste)",
  "quitMenu":"Sair de God of War III", "subtitle":"REMASTERED · APPLE SILICON", "settings":"Prepare sua próxima partida",
  "resolution":"Resolução de saída", "upscaling":"Upscaling", "framerate":"Limite de quadros",
  "native":"Nativo", "quality":"MetalFX · Qualidade", "balanced":"MetalFX · Equilibrado", "performance":"MetalFX · Desempenho",
@@ -83,6 +86,7 @@ let translations: [String: [String: String]] = [
  "quitPreparingMessage":"O trabalho já concluído será guardado. Na próxima abertura, clique em Jogar para continuar."
 ],
 "en": [
+ "textures":"Textures", "originalTextures":"Original", "hdTextures":"2× · Character (test)",
  "quitMenu":"Quit God of War III", "subtitle":"REMASTERED · APPLE SILICON", "settings":"Ready for your next session",
  "resolution":"Output resolution", "upscaling":"Upscaling", "framerate":"Frame rate cap",
  "native":"Native", "quality":"MetalFX · Quality", "balanced":"MetalFX · Balanced", "performance":"MetalFX · Performance",
@@ -116,6 +120,7 @@ let translations: [String: [String: String]] = [
  "quitPreparingMessage":"Completed work will be kept. Click Play next time to continue."
 ],
 "es": [
+ "textures":"Texturas", "originalTextures":"Originales", "hdTextures":"2× · Personaje (prueba)",
  "quitMenu":"Salir de God of War III", "subtitle":"REMASTERED · APPLE SILICON", "settings":"Prepara tu próxima partida",
  "resolution":"Resolución de salida", "upscaling":"Reescalado", "framerate":"Límite de fotogramas",
  "native":"Nativo", "quality":"MetalFX · Calidad", "balanced":"MetalFX · Equilibrado", "performance":"MetalFX · Rendimiento",
@@ -208,6 +213,7 @@ final class LauncherModel: ObservableObject {
     }
     var valid: Bool { gameURL.map(isDump) ?? false }
     func t(_ key: String) -> String { translations[prefs.language]?[key] ?? translations["en"]?[key] ?? key }
+    var hasTexturePack: Bool { FileManager.default.fileExists(atPath:resources.appendingPathComponent("TexturePack").path) }
     init(support: URL, resources: URL) {
         self.support = support; self.resources = resources
         let file = support.appendingPathComponent("preferences.json")
@@ -215,6 +221,7 @@ final class LauncherModel: ObservableObject {
         if !["pt-BR","en","es"].contains(prefs.language) { prefs.language = "en" }
         if !["720","1080","1440","2160"].contains(prefs.resolution) { prefs.resolution = "2160" }
         if !["native","quality","balanced","performance"].contains(prefs.upscaling) { prefs.upscaling = "native" }
+        if !["original","2x"].contains(prefs.textures) || !hasTexturePack { prefs.textures = "original" }
         if !["60","0"].contains(prefs.cap) { prefs.cap = "60" }
         if let bookmark = prefs.bookmark {
             var stale = false
@@ -279,6 +286,7 @@ final class LauncherModel: ObservableObject {
             task.arguments = ["-I","-S","-B",resources.appendingPathComponent("session.py").path,
                 "--resources",resources.path,"--support",support.path,"--game",game.path,
                 "--resolution",prefs.resolution,"--upscaling",prefs.upscaling,"--cap",prefs.cap,"--hud",prefs.hud ? "1" : "0", "--language",prefs.language]
+            task.arguments! += ["--textures",prefs.textures]
             task.standardOutput = logHandle; task.standardError = logHandle; task.standardInput = FileHandle.nullDevice
             task.currentDirectoryURL = support
             task.environment = ["PATH":"/usr/bin:/bin:/usr/sbin:/sbin","HOME":FileManager.default.homeDirectoryForCurrentUser.path,
@@ -440,6 +448,10 @@ struct LauncherView: View {
                             options:["native","quality","balanced","performance"].map { ($0,tr($0)) })
                     MenuRow(label:tr("framerate"),selection:$model.prefs.cap,
                             options:[("60","60 FPS"),("0",tr("unlimited"))])
+                    if model.hasTexturePack {
+                        MenuRow(label:tr("textures"),selection:$model.prefs.textures,
+                                options:[("original",tr("originalTextures")),("2x",tr("hdTextures"))])
+                    }
                     MenuRow(label:tr("language"),selection:$model.prefs.language,
                             options:[("pt-BR","Português brasileiro"),("en","English"),("es","Español")])
                     Text("\(tr("input")): \(inputSize(model.prefs))  →  \(model.prefs.resolution == "2160" ? "4K" : model.prefs.resolution + "p") \(tr("output"))")
@@ -496,6 +508,7 @@ struct LauncherView: View {
          .onChange(of:model.prefs.language) { model.save() }
          .onChange(of:model.prefs.resolution) { model.save() }
          .onChange(of:model.prefs.upscaling) { model.save() }
+         .onChange(of:model.prefs.textures) { model.save() }
          .onChange(of:model.prefs.cap) { model.save() }
          .onChange(of:model.prefs.hud) { model.save() }
     }
@@ -583,6 +596,9 @@ if let index = args.firstIndex(of:"--self-test"), index+1 < args.count {
     let legacy = try! JSONDecoder().decode(Preferences.self,from:Data("{\"gamePath\":\"/example\"}".utf8))
     precondition(p.language == "en" && legacy.language == "en")
     precondition(legacy.gamePath == "/example" && legacy.cap == "60")
+    precondition(legacy.textures == "original")
+    var hd = Preferences(); hd.textures = "2x"
+    precondition((try! JSONDecoder().decode(Preferences.self,from:JSONEncoder().encode(hd))).textures == "2x")
     precondition((try! JSONDecoder().decode(Preferences.self,from:JSONEncoder().encode(p))).resolution == "2160")
     precondition(inputSize(p) == "3840 × 2160")
     var q = p; q.upscaling = "quality"; precondition(inputSize(q) == "2560 × 1440")
@@ -598,11 +614,13 @@ if let index = args.firstIndex(of:"--self-test"), index+1 < args.count {
     let first = LauncherModel(support:state,resources:Bundle.main.resourceURL!)
     precondition(first.prefs.language == "en")
     first.prefs.language = "es"; first.prefs.resolution = "1080"; first.prefs.upscaling = "balanced"; first.prefs.cap = "0"
+    first.prefs.textures = first.hasTexturePack ? "2x" : "original"
     first.prefs.gamePath = dump.path
     first.prefs.bookmark = try! dump.bookmarkData(options:[],includingResourceValuesForKeys:nil,relativeTo:nil)
     first.save()
     let second = LauncherModel(support:state,resources:Bundle.main.resourceURL!)
     precondition(second.valid && second.prefs.language == "es" && second.prefs.resolution == "1080" && second.prefs.upscaling == "balanced" && second.prefs.cap == "0")
+    precondition(second.prefs.textures == first.prefs.textures)
     try! FileManager.default.removeItem(at:dump)
     precondition(!second.valid)
     try! FileManager.default.removeItem(at:fixture)

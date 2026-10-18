@@ -103,6 +103,7 @@ def main():
     parser.add_argument("--cap", choices=("60", "0"), required=True)
     parser.add_argument("--hud", choices=("0", "1"), default="1")
     parser.add_argument("--language", choices=("en", "pt-BR", "es"), default="en")
+    parser.add_argument("--textures", choices=("original", "2x"), default="original")
     parser.add_argument("--prepare-only", action="store_true", help="Validate first-run preparation without starting the game")
     a = parser.parse_args()
     resources, support, game = a.resources.resolve(), a.support.resolve(), a.game.resolve()
@@ -146,6 +147,31 @@ def main():
         if a.prepare_only:
             return 0
         out, env = environment(resources, support, game, selection, a.upscaling, a.cap, a.hud == "1", a.language, prepared)
+        if a.textures == "2x":
+            texture_pack = resources / "TexturePack"
+            if not texture_pack.is_dir() or not any(texture_pack.glob("*.g3tx")):
+                raise ValueError("The local experimental texture pack is missing")
+            import hashlib
+            manifest = json.loads((texture_pack / "manifest.json").read_text())
+            files = manifest["files"]
+            if manifest.get("version") != 1 or not files or len(files) > 64:
+                raise ValueError("Invalid texture pack manifest")
+            if set(files) != {p.name for p in texture_pack.glob("*.g3tx")}:
+                raise ValueError("Texture pack file list changed")
+            total = 0
+            for name, expected in files.items():
+                if Path(name).name != name or not name.endswith(".g3tx"):
+                    raise ValueError("Invalid texture pack filename")
+                path = texture_pack / name
+                total += path.stat().st_size
+                if path.stat().st_size > 96 * 1024**2 or total > 256 * 1024**2:
+                    raise ValueError("Texture pack exceeds the experimental memory limit")
+                with path.open("rb") as stream:
+                    actual = hashlib.file_digest(stream, "sha256").hexdigest()
+                if actual != expected:
+                    raise ValueError("Texture pack checksum mismatch: " + name)
+            env["GOW3_TEXTURE_PACK"] = str(texture_pack)
+        print("Texture sampling: " + a.textures, flush=True)
         (support / "last-session.json").write_text(json.dumps({**selection, "profile_directory": str(out)}, indent=2))
         # Let the UI stop only the process belonging to this session.
         (support / "active-profile.txt").write_text(str(out))

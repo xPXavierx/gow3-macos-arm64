@@ -16,6 +16,7 @@ def audit(app):
     assert manifest['distribution'] == 'community-first-run'
     assert manifest['profiles'] == 0 and not manifest['local_private_aot']
     assert not (resources / 'Profiles').exists()
+    assert not (resources / 'TexturePack').exists(), 'Local texture packs are private test data'
     forbidden = {'boot-linked.bin', 'eboot.bin', 'eboot.elf', 'linked.elf', 'functions.tsv', 'offsets.txt',
         'libgow3-recompiled.dylib', 'analysis.json', 'link.json', 'preferences.json', 'aot-patches.json'}
     rows = []
@@ -27,7 +28,7 @@ def audit(app):
             continue
         files += 1
         assert file.name not in forbidden, file
-        assert file.suffix.lower() not in ('.wad', '.prx', '.pkg', '.self', '.pyc'), file
+        assert file.suffix.lower() not in ('.wad', '.prx', '.pkg', '.self', '.pyc', '.g3tx'), file
         assert '__pycache__' not in file.parts and '.git' not in file.parts, file
         with file.open('rb') as stream:
             magic = stream.read(8)

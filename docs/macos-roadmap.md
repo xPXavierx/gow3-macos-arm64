@@ -59,9 +59,32 @@ Start by measuring the resources rather than upscaling every file:
    format, before considering transient generation/upload buffers. Scale beyond
    the proof only after a visible, measured benefit.
 
-No high-resolution replacement pack is currently implemented or validated. Keep
-derived texture packs private to the local dump preparation workflow. No texture
-enhancement is enabled by default just because an offline preview looks sharper.
+The 2026-10-18 experiment implemented an opt-in, content-keyed sampling cache and
+tested four locally restored 2x character/weapon color maps. All four original BC
+base levels were matched against actual GPU bytes. A separate RGBA8 mip chain
+retains guest image/readback behavior, with dirty/backing/alias/lifetime guards.
+See [the mechanism and developer workflow](macos-texture-replacements.md).
+
+In a frozen close Photo Mode view at native 4K, the original and 2x modes both
+showed about 60 confirmed presentations/s; presentation p95/p99 remained about
+20.83 ms. A second frozen scene rendered 59.64 vs 59.72 FPS, but its Metal
+presented-time callbacks were zero and cannot certify display cadence. The four
+uncompressed replacement images added 90.67 MiB of GPU allocations. They remain
+resident when switching the comparison control back to original sampling.
+
+Visual differences were modest, chiefly cleaner color edges on the blades.
+Unchanged normal maps, geometry and lighting still limit the overall result.
+An 80-second active gameplay regression also showed drops in both modes. Draw
+counts changed from roughly 2100 to 1200 as the fight progressed, so comparing
+those alternating windows cannot establish a small texture-only performance cost
+or prove sustained 60 FPS combat. The earlier bounded performance checkpoint
+does not cover every combat state.
+
+The local test launcher remembers Original / 2x Character (test). Without a local
+pack it hides that option; texture enhancement remains off by default. Keep
+derived packs private and outside community downloads. Whole-game restoration,
+compressed replacement formats, normal/packed-channel treatment, precise GPU-time
+cost and full-campaign validation remain open work.
 
 ## GPU work and smoothness
 

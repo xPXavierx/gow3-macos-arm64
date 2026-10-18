@@ -1544,6 +1544,7 @@ void Rasterizer::OnSubmit() {
     texture_cache.ProcessDownloadImages();
     texture_cache.RunGarbageCollector();
     runtime.TickFrame();
+    texture_cache.TickTexturePack();
 }
 
 const PreparedStage* Rasterizer::FindPreparedStage(const Shader::Info& stage) const {
@@ -1574,6 +1575,8 @@ bool Rasterizer::BindHelperWanted() {
 }
 
 bool Rasterizer::HelperEligible(const Pipeline* pipeline) const {
+    // Experimental texture uploads and their sampling views belong to the GPU thread.
+    if (texture_cache.TexturePackEnabled()) return false;
     if (pipeline->IsCompute() || !bind_helper.Available() || FrameCapture::Active() ||
         Gow3Toggle::Disabled(Gow3Toggle::TextureBindHelper) ||
         Gow3Toggle::Disabled(Gow3Toggle::TextureBindingMemo) ||
@@ -2731,6 +2734,16 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
 
             vk::ImageView view = *image_view.image_view;
             vk::ImageLayout layout = image.backing->state.layout;
+            if (!is_storage && !on_helper) {
+                if (auto replacement = texture_cache.SampleReplacement(image, desc)) {
+                    view = *replacement;
+                    layout = vk::ImageLayout::eShaderReadOnlyOptimal;
+                    // The original backing remains responsible for tracking/readback. A
+                    // replacement must be revalidated after every CPU/GPU write, so it
+                    // cannot use the existing native-image descriptor-set memo.
+                    set_ok = false;
+                }
+            }
             if (upscaler->Enabled()) {
                 // gow3: the display pass reads the upscaled frame (scaled presets).
                 upscaler->RedirectSampled(image_id, image_view.info, view, layout);

@@ -16,6 +16,9 @@ endif()
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+add_executable(texture-replacement-data-test EXCLUDE_FROM_ALL ../tests/test_texture_replacement_data.cpp)
+target_compile_options(texture-replacement-data-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_include_directories(texture-replacement-data-test PRIVATE shadps4)
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
@@ -421,6 +424,12 @@ target_compile_options(ui-composition-test PRIVATE -UNDEBUG -Wall -Wextra -Werro
 target_include_directories(ui-composition-test PRIVATE ..)
 
 add_executable(scene-resolution-test EXCLUDE_FROM_ALL ../tests/test_scene_resolution.cpp ../tests/test_gpu_runtime_stubs.cpp)
+add_executable(texture-replacements-test EXCLUDE_FROM_ALL ../tests/test_texture_replacements.cpp ../tests/test_gpu_runtime_stubs.cpp)
+target_include_directories(texture-replacements-test PRIVATE shim shadps4 third_party/gcn/include)
+target_compile_options(texture-replacements-test PRIVATE -UNDEBUG -fPIC)
+set_source_files_properties(../tests/test_texture_replacements.cpp PROPERTIES
+    COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
+target_link_libraries(texture-replacements-test PRIVATE gow3gpu)
 target_include_directories(scene-resolution-test PRIVATE shim shadps4 third_party/gcn/include)
 # The test's Vulkan-Hpp inline methods have a different set of platform extensions
 # from vk_platform.cpp. Keep them local and use an explicit dispatcher in the test.

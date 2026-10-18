@@ -23,3 +23,6 @@ perf.data
 mods.json
 patches.json
 !launcher/gow3.png
+# Locally restored game texture data; never publish in source or community assets.
+*.g3tx
+TexturePack/

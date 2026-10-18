@@ -32,6 +32,7 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/sampler.h"
 #include "video_core/texture_cache/tile_manager.h"
+#include "video_core/texture_cache/texture_replacements.h"
 
 namespace AmdGpu {
 struct Liverpool;
@@ -106,6 +107,14 @@ public:
                  Vulkan::Runtime& runtime, AmdGpu::Liverpool* liverpool, BufferCache& buffer_cache,
                  PageManager& tracker);
     ~TextureCache();
+
+    bool TexturePackEnabled() const { return replacements.Enabled(); }
+    void TickTexturePack() {
+        if (replacements.PollControl()) registry_generation.fetch_add(1,std::memory_order_release);
+    }
+    std::optional<vk::ImageView> SampleReplacement(const Image& image, const ImageDesc& desc) {
+        return replacements.Sample(image, desc.view_info, desc.needs_native);
+    }
 
     /// gow3: changes whenever an image is registered or unregistered.
     [[nodiscard]] u64 RegistryGeneration() const noexcept {
@@ -452,6 +461,7 @@ private:
     PageManager& tracker;
     BlitHelper blit_helper;
     TileManager tile_manager;
+    TextureReplacements replacements;
     Common::SlotVector<Image> slot_images;
     Common::SlotVector<ImageView> slot_image_views;
     tsl::robin_map<u64, Sampler> samplers;

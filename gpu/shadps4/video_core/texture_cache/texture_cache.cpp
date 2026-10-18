@@ -37,6 +37,7 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
     : instance{instance_}, scheduler{scheduler_}, runtime{runtime_}, liverpool{liverpool_},
       buffer_cache{buffer_cache_}, tracker{tracker_}, blit_helper{instance, scheduler},
       tile_manager{instance, scheduler, runtime, buffer_cache.GetStreamBuffer()},
+      replacements{instance, runtime},
       readback_linear_images{EmulatorSettings.IsReadbackLinearImagesEnabled()} {
 
     std::printf("GPU: deferred image readback %s (64 copies, 64 MiB pending limit)%s\n",
@@ -72,6 +73,7 @@ TextureCache::TextureCache(const Vulkan::Instance& instance_, Vulkan::Scheduler&
 }
 
 TextureCache::~TextureCache() {
+    if (replacements.Enabled()) scheduler.Finish();
     if (deferred_readbacks) {
         scheduler.Finish();
         std::scoped_lock lock{readback_mutex};
@@ -1531,6 +1533,7 @@ void TextureCache::RefreshImage(Image& image) {
     }
 
     runtime.UploadImage(&image, buffer, image_copies);
+    replacements.ObserveUpload(image);
 }
 
 vk::Sampler TextureCache::GetSampler(const AmdGpu::Sampler& sampler,
@@ -1887,6 +1890,7 @@ void TextureCache::TouchImage(const Image& image) {
 
 void TextureCache::DeleteImage(ImageId image_id) {
     Image& image = slot_images[image_id];
+    replacements.Forget(image.image_uid);
     CancelReadbacks(image.info.guest_address, image.info.guest_size);
     ASSERT_MSG(!image.IsTracked(), "Image was not untracked");
     ASSERT_MSG(False(image.flags & ImageFlagBits::Registered), "Image was not unregistered");
