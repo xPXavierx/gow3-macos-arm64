@@ -27,6 +27,15 @@ materials reference 512×512 color/detail maps. Increasing the output to 4K cann
 restore information absent from those maps. The earlier subset audit is not an
 inventory or integrity certificate for the entire game.
 
+The 2026-10-18 read-only local inventory scanned 816 WAD archives (23.08 GB)
+and recognized 24,983 BC1/BC3 DDS occurrences with 8,540 distinct resource names.
+The new tool agreed with all 1,464 previously independently audited resources.
+It excluded 147 resources in another format and flagged one 64×40 UI resource
+whose declared mip chain exceeds its embedded payload. That isolated header/data
+mismatch needs classification; it is not a certificate that the user's dump is
+corrupted. No whole-game texture replacement or new gameplay-quality benchmark
+was performed in this inventory step.
+
 Start by measuring the resources rather than upscaling every file:
 
 1. Inventory DDS resources across the local WADs, recording dimensions, mips,
