@@ -107,7 +107,8 @@ python3 packaging/macos/launcher/build_community.py \
 The builder excludes private Profiles, checks ARM64 tools/system dependencies,
 adds pinned toolchain/recompiler sources/licenses, generates all resolution patch
 presets, seals a preparation recipe and rejects known game-derived/private file
-names. Preserve the exact source archive and dependency revisions beside a release.
+names. Keep the exact tagged source and dependency patches in the repository; see
+[developer sources and patches](DEVELOPMENT.md).
 The stock builder emits ad-hoc signatures, not notarization.
 
 ## Preparation integrity and execution model
