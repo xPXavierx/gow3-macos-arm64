@@ -1,0 +1,6 @@
+Standard launcher artwork supplied by the maintainer for the local launcher and
+its community edition. God of War and its imagery belong to their respective
+owners. This unofficial fan port is not affiliated with Sony Interactive
+Entertainment or Santa Monica Studio. The source code license does not grant
+ownership of the game's trademarks/artwork. The title font remains the existing
+launcher/gowfont.ttf; no font atlas or texture is extracted from the game dump.

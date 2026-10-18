@@ -8,11 +8,18 @@ through shadPS4, Vulkan and a locally patched MoltenVK driver. Game execution us
 neither Rosetta nor a CPU JIT/interpreter fallback. Unsupported AOT paths stop with
 a diagnostic.
 
-**This is a source release for developers. You must supply and prepare your own
-extracted game dump.** The local playable app contains game-derived AOT libraries
-and linked images and is not included here. There is no community-ready downloadable
-Mac app in this repository yet. No game dump, extracted textures, saves, shader
-captures, generated game C or compiled game libraries are committed.
+**A community preview now prepares the game automatically on the player's Mac.**
+Download the ARM64 app from [Releases](https://github.com/xPXavierx/gow3-macos-arm64/releases),
+select your compatible extracted dump and click Play. The same launcher compiles
+native ARM64 code on first use and reuses it thereafter. No Xcode, Homebrew,
+Terminal, Rosetta or preparation-time internet is required.
+
+**Apple Silicon + macOS 26 or later; tested executable CUSA01623 v1.02.** Other
+regions/updates/modded executables are rejected by content hash. The initial
+preview is ad-hoc signed, **not Developer ID-signed or notarized**; macOS may require
+manual approval. See [installation, compatibility, signing and first-run details](packaging/macos/launcher/COMMUNITY.md).
+No game dump, prepared guest image, extracted textures, saves, shader captures,
+generated game C or compiled game libraries are distributed in the app or source.
 
 ## Current macOS checkpoint
 
@@ -50,12 +57,11 @@ Follow these guides in order:
 3. [Build the patched MoltenVK driver and configure pacing](packaging/macos/native/FRAME_PACING.md).
 4. [Prepare static profiles and bundle the desktop launcher](packaging/macos/launcher/README.md).
 
-The first game preparation/build is a developer workflow and can take substantial
-time and disk space. The current launcher chooses among 24 prepared static
-profiles; it does not yet generate these on a new player's Mac. Optional custom
-launcher artwork is supplied locally via `--branding-directory` and is not in this
-fork. Game files stay outside the source tree and bundle; generated AOT artifacts
-must stay in ignored/private build directories.
+The source guides above are for maintainers. Players use the downloadable app,
+which includes a native scanner, recompiler, Python and offline Zig/Clang toolchain.
+It prepares only the selected profile locally. The older private launcher uses 24
+prebuilt profiles and stays separate from the community package. See
+[community packaging](packaging/macos/launcher/COMMUNITY.md#packaging-from-source-maintainers-only).
 
 ## Contributing and next steps
 

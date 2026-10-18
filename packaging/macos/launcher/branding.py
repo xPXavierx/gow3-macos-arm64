@@ -19,6 +19,10 @@ def install_branding(resources: Path, directory: Path | None = None) -> dict:
     destination.mkdir(parents=True, exist_ok=True)
     icon = repo / 'launcher/gow3.png'
     font = repo / 'launcher/gowfont.ttf'
+    standard = Path(__file__).with_name('assets')
+    if directory is None and (standard / 'GOW-3-Art.jpg').is_file():
+        icon = standard / 'GOW-3-Icon.jpg'
+        shutil.copy2(standard / 'GOW-3-Art.jpg', destination / 'GOW-3-Art.jpg')
     if directory is not None:
         # Fail on a partial/mistyped branding input instead of silently mixing it
         # with the stock assets. All three files came from the user in this build.
@@ -46,6 +50,7 @@ def install_branding(resources: Path, directory: Path | None = None) -> dict:
     payload = b''.join(chunks)
     (resources / 'AppIcon.icns').write_bytes(b'icns'+struct.pack('>I',len(payload)+8)+payload)
     return {'user_artwork':directory is not None,'title_font':'GodOfWar',
+            'standard_artwork':directory is None and (standard / 'GOW-3-Art.jpg').is_file(),
             'menu_font':'Copperplate-Bold (macOS)','icon_max_pixels':1024,
             'icon_shape':'rounded-square','icon_transparent_corners':True}
 

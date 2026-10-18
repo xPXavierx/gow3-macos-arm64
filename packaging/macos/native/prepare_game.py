@@ -11,7 +11,9 @@ parser.add_argument('game',type=Path)
 parser.add_argument('--out',type=Path,required=True)
 parser.add_argument('--tools',type=Path,required=True,help='Directory containing gow3-aot-scan and gow3-aot-recomp')
 parser.add_argument('--patch','--code-patch',dest='patches',action='append',default=[],help='Exact upstream file-backed patch name to bake before recompilation; repeatable')
+parser.add_argument('--scan-only',action='store_true',help='Prepare local loader/function inventory; defer C generation to the selected desktop profile')
 a=parser.parse_args()
+scan_only=a.scan_only
 repo=Path(__file__).resolve().parents[3]
 game=a.game.resolve();out=a.out.resolve();tool=a.tools.resolve()
 subprocess.run([sys.executable,repo/'scripts/prepare.py',game,'--out',out],check=True)
@@ -67,6 +69,8 @@ eh=struct.pack('<16sHHIQQQIHHHHHH',b'\x7fELF\x02\x01\x01'.ljust(16,b'\0'),3,62,1
 ph=b''.join(struct.pack('<II6Q',1,flags,16384+a,a,0,z,z,16384) for a,z,flags in segments)
 (combined/'linked.elf').write_bytes((eh+ph).ljust(16384,b'\0')+image)
 print('Combined function candidates:',len(allfunc),flush=True)
+if scan_only:
+ sys.exit(0)
 # Remove only this tool's generated sources; obsolete windows must not be linked.
 for stale in combined.glob('recomp*.c'):stale.unlink()
 env=dict(os.environ,BB_JIT='0',GOW3_AOT_INCLUDE_STUBS='1',GOW3_AOT_GUARDED_TABLES='1')

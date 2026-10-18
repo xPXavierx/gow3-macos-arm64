@@ -1,40 +1,86 @@
-GOD OF WAR III — APLICATIVO MAC ARM64
+GOD OF WAR III — COMMUNITY ARM64 EDITION 0.4.0
 
-1. Abra “God of War III.app”. Você pode mover o aplicativo para Aplicativos.
-2. Na primeira abertura, escolha a pasta do dump extraído. O launcher aceita
-   também a pasta que contém “GOW ISO/CUSA01623”. Não selecione um .PKG ou .ISO.
-3. Escolha resolução, MetalFX e limite de quadros, e clique em Jogar.
+ENGLISH
+1. Move God of War III.app to Applications and open it.
+2. Select your extracted game dump containing eboot.bin, sce_module and sce_sys.
+   PKG/ISO extraction and decryption are not performed by this app.
+3. Choose resolution, MetalFX and frame cap, then click Play. Wait for the first
+   preparation to finish. It compiles native ARM64 code on your Mac and starts
+   the game automatically. No Terminal, Xcode, Homebrew, Python installation,
+   Rosetta or network connection is needed for preparation.
+4. The folder, language and settings are remembered. The prepared result is
+   reused. A new render resolution/frame-rate profile may need another short
+   preparation; unchanged compiled objects are reused.
+Cancel stops preparation safely. Click Play to retry; completed work is retained.
 
-A pasta e as configurações ficam lembradas. Se o SSD estiver desconectado,
-reconecte-o ou use Alterar. Seu AUTOSAVE e o cache do checkpoint foram preservados.
-Não é necessário abrir o Terminal nem instalar Python, Homebrew ou Rosetta.
-Esta cópia local usa macOS 26 e Apple Silicon, com o executável do dump já validado.
+Requirements: Apple Silicon and macOS 26 or later. Tested on M3 Max.
+Tested executable: God of War III Remastered CUSA01623 v1.02. Compatibility is
+checked using executable and module SHA-256 hashes, not just the SFO version.
+Other regions, updates and modified executables are rejected with an explanation.
+The tested dump's SFO reports APP_VER 01.00, despite its tested v1.02 executable.
+Allow at least 3 GB of free Mac disk space for initial preparation. Game data stays
+in the selected folder; no game dump, saves or generated game code is included.
 
-CONFIGURAÇÕES
-• Resolução: 720p, 1080p, 1440p ou 4K. Nativo mantém essa resolução interna.
-• MetalFX: Qualidade, Equilibrado ou Desempenho. A linha “Renderização” mostra
-  os pixels internos; a resolução escolhida continua sendo a resolução de saída.
-• 60 FPS: configuração recomendada para manter o frame pacing do checkpoint.
-• Ilimitado: remove o limite de 60. V-Sync e o teto de segurança do motor de
-  240 FPS continuam valendo; a tela e a carga gráfica limitam o resultado.
-  Este modo teve teste curto e pode apresentar cadência menos uniforme que 60 FPS.
-• Idioma: inglês, português brasileiro ou espanhol para a interface do launcher.
-• O HUD de desempenho do Metal pode ser ligado ou desligado. As linhas de
-  resolução interna e estado/preset do MetalFX permanecem visíveis no HUD do jogo.
+This preview is ad-hoc signed, not signed with Developer ID or notarized by Apple.
+macOS may require approval in System Settings > Privacy & Security > Open Anyway.
+Only approve a download whose origin you trust. Do not disable Gatekeeper.
+https://support.apple.com/en-us/102445
 
-Retina, V-Sync e início em tela cheia permanecem ligados. O macOS ativa Game Mode
-em tela cheia; se você o desativou manualmente para o jogo, reative-o no painel
-Game Overlay (Command + Esc). Referência: https://support.apple.com/en-us/105118
-A resolução do drawable indicada pelo HUD pode diferir da renderização interna:
-a apresentação se adapta aos pixels físicos disponíveis na tela.
-Geração de quadros não é usada nem aparece como opção.
+PORTUGUÊS BRASILEIRO
+1. Mova God of War III.app para Aplicativos e abra.
+2. Escolha seu dump extraído com eboot.bin, sce_module e sce_sys.
+   O aplicativo não extrai nem descriptografa PKG/ISO.
+3. Escolha as opções e clique em Jogar. Aguarde a preparação inicial: o código
+   ARM64 é compilado neste Mac e o jogo inicia automaticamente ao terminar.
+   Não precisa de Terminal, Xcode, Homebrew, Python instalado, Rosetta ou internet.
+4. A pasta, o idioma e as configurações ficam lembrados. O resultado é reutilizado.
+   Trocar a resolução interna ou o limite pode preparar outro perfil, reutilizando
+   os objetos que não mudaram. Cancelar interrompe com segurança; Jogar retoma.
 
-DADOS E DIAGNÓSTICO
-Saves, cache, opções e logs ficam em:
+Requisitos: Apple Silicon, macOS 26 ou superior e pelo menos 3 GB livres para a
+preparação. Testado no M3 Max, com CUSA01623 v1.02. O executável e os módulos são
+conferidos por SHA-256; o número do SFO sozinho não garante compatibilidade.
+Outras regiões, updates e executáveis modificados são recusados com uma explicação.
+O pacote não inclui dump, saves nem código gerado do jogo. Os dados ficam externos.
+Esta prévia tem assinatura local, sem Developer ID/notarização. O macOS pode pedir
+aprovação em Ajustes do Sistema > Privacidade e Segurança > Abrir Mesmo Assim.
+
+ESPAÑOL
+1. Mueve God of War III.app a Aplicaciones y ábrelo.
+2. Selecciona tu dump extraído con eboot.bin, sce_module y sce_sys.
+   La aplicación no extrae ni descifra PKG/ISO.
+3. Elige las opciones y pulsa Jugar. Espera la primera preparación: se compila
+   código ARM64 en tu Mac y el juego se inicia automáticamente al finalizar.
+   No necesita Terminal, Xcode, Homebrew, Python instalado, Rosetta ni internet.
+4. Se recuerdan carpeta, idioma y ajustes. Se reutiliza el resultado; cambiar
+   resolución interna/límite puede preparar otro perfil. Cancelar detiene el
+   proceso de forma segura; Jugar reintenta conservando el trabajo completado.
+
+Requisitos: Apple Silicon, macOS 26 o posterior, al menos 3 GB libres para preparar.
+Probado en M3 Max con CUSA01623 v1.02. Se verifican hashes SHA-256 del ejecutable y
+los módulos; el número del SFO no basta. Otras regiones/updates/mods son rechazados.
+No se incluyen dump, partidas ni código generado del juego. Esta vista previa
+no tiene Developer ID/notarización; macOS puede pedir aprobación para abrirla.
+
+KEYBOARD / TECLADO
+Space = Cross/X (confirm and jump); Enter = Options. Use Space to confirm the
+first brightness screen. A controller uses its normal south face button.
+Espaço confirma o X na tela de brilho inicial. Enter corresponde a Options.
+Espacio confirma la X en la pantalla de brillo inicial. Enter es Options.
+
+SETTINGS / CONFIGURAÇÕES / AJUSTES
+720p, 1080p, 1440p, 4K; native or spatial MetalFX Quality/Balanced/Performance.
+60 FPS is recommended. Unlimited uses the upstream 240 FPS timing profile while
+retaining V-Sync; it is not a campaign-wide simulation-speed guarantee.
+Retina, V-Sync and fullscreen/Game Mode metadata remain enabled. The OS controls
+actual Game Mode and remembers a manual opt-out. Frame generation is disabled.
+The game HUD always shows actual render dimensions and MetalFX mode/preset,
+including when the optional Apple Metal performance HUD is off.
+
+DATA / DADOS / DATOS
 ~/Library/Application Support/God of War III ARM64
-O botão “Abrir logs” abre os diagnósticos da execução. O launcher permite encerrar
-o jogo, mas prefira sair pelo menu do jogo para não interromper uma gravação.
-
-O dump completo permanece externo. O aplicativo contém código ARM64 gerado a
-partir do seu executável e é uma cópia local privada; não é um pacote público
-redistribuível. O arquivo de código-fonte do port é entregue separadamente.
+Preferences, locally prepared code, saves, caches and logs live here, outside the
+app. An update preserves them. Logs are available from the launcher's Open logs
+button; preparation-stage logs are under Prepared/<recipe>/<dump>/Base or Profiles.
+Exit through the game menu to save progress before using Stop game.
+Source and issues: https://github.com/xPXavierx/gow3-macos-arm64

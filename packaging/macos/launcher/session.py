@@ -47,8 +47,8 @@ def stage(resources, support, selection):
     return destination, source, manifest
 
 
-def environment(resources, support, game, selection, upscaling, cap, hud, language="pt-BR"):
-    out, source, manifest = stage(resources, support, selection)
+def environment(resources, support, game, selection, upscaling, cap, hud, language="en", prepared=None):
+    out, source, manifest = prepared or stage(resources, support, selection)
     # Finder starts with a small environment; command-line launches must not
     # inherit old experiments, injected profilers or another game's settings.
     env = {k: v for k, v in os.environ.items() if not k.startswith(
@@ -102,18 +102,16 @@ def main():
     parser.add_argument("--upscaling", choices=SCALES, required=True)
     parser.add_argument("--cap", choices=("60", "0"), required=True)
     parser.add_argument("--hud", choices=("0", "1"), default="1")
-    parser.add_argument("--language", choices=("en", "pt-BR", "es"), default="pt-BR")
+    parser.add_argument("--language", choices=("en", "pt-BR", "es"), default="en")
+    parser.add_argument("--prepare-only", action="store_true", help="Validate first-run preparation without starting the game")
     a = parser.parse_args()
     resources, support, game = a.resources.resolve(), a.support.resolve(), a.game.resolve()
+    sys.path.insert(0, str(resources))
     support.mkdir(parents=True, exist_ok=True)
     selection = plan(a.resolution, a.upscaling, a.cap)
     print("Desktop launch: " + json.dumps(selection), flush=True)
     sys.path.insert(0, str(resources / "Runtime/scripts"))
     from native_launch import sha256
-    source = resources / "Profiles" / selection["profile"]
-    analysis = json.loads((source / "analysis.json").read_text())
-    if sha256(game / "eboot.bin") != analysis["source_sha256"]:
-        raise ValueError("DUMP_VERSION: This local build requires the same executable used for its ARM64 preparation (CUSA01623 v1.02).")
     # One lock covers all resolutions and app copies, before modifying shared saves.
     import fcntl
     with (support / "session.lock").open("a+") as lock:
@@ -121,16 +119,39 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError("ALREADY_RUNNING") from None
-        out, env = environment(resources, support, game, selection, a.upscaling, a.cap, a.hud == "1", a.language)
+        def interrupted(_number, _frame):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGINT, interrupted)
+        signal.signal(signal.SIGTERM, interrupted)
+        prepared = None
+        community = (resources / "supported-game.json").exists()
+        try:
+            if community:
+                from community import ensure_profile, status, PreparationError
+                prepared = ensure_profile(resources, support, game, selection)
+            else:
+                source = resources / "Profiles" / selection["profile"]
+                analysis = json.loads((source / "analysis.json").read_text())
+                if sha256(game / "eboot.bin") != analysis["source_sha256"]:
+                    raise ValueError("DUMP_VERSION: This local build requires the same executable used for its ARM64 preparation (CUSA01623 v1.02).")
+        except KeyboardInterrupt:
+            if community:
+                status(support, "cancelled")
+            return 130
+        except Exception as error:
+            if community:
+                code = error.code if isinstance(error, PreparationError) else "prepare_failed"
+                status(support, "failed", error_code=code, detail=str(error))
+            raise
+        if a.prepare_only:
+            return 0
+        out, env = environment(resources, support, game, selection, a.upscaling, a.cap, a.hud == "1", a.language, prepared)
         (support / "last-session.json").write_text(json.dumps({**selection, "profile_directory": str(out)}, indent=2))
         # Let the UI stop only the process belonging to this session.
         (support / "active-profile.txt").write_text(str(out))
         try:
             child = subprocess.Popen([sys.executable, "-B", str(resources / "Runtime/run.py")],
                                      env=env, start_new_session=True)
-            def interrupted(_number, _frame):
-                raise KeyboardInterrupt
-            signal.signal(signal.SIGTERM, interrupted)
             try:
                 return child.wait()
             except KeyboardInterrupt:
@@ -146,6 +167,6 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(f"LAUNCH_ERROR: {error}", file=sys.stderr, flush=True)
         sys.exit(1)

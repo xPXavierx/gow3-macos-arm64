@@ -1,5 +1,9 @@
 # Native macOS desktop launcher
 
+For the community first-run app, see [COMMUNITY.md](COMMUNITY.md). It uses this same
+launcher and prepares game code locally instead of bundling private AOT profiles.
+The private prebuilt-profile recipe below remains available for development.
+
 The AppKit/SwiftUI launcher uses the existing `run.py` startup policy. It does not
 reimplement texture readback, patch selection, save backup or strict ARM64 checks.
 The new `session.py` adapter supplies paths and settings, then starts `run.py` with

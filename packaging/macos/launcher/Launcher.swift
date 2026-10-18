@@ -55,7 +55,7 @@ let translations: [String: [String: String]] = [
  "native":"Nativo", "quality":"MetalFX · Qualidade", "balanced":"MetalFX · Equilibrado", "performance":"MetalFX · Desempenho",
  "unlimited":"Ilimitado", "language":"Idioma do launcher", "hud":"Mostrar HUD de desempenho do Metal",
  "folder":"Pasta do jogo", "choose":"Escolher pasta…", "change":"Alterar…", "missing":"Selecione seu dump para começar.",
- "found":"Pasta encontrada · pronta para jogar", "lost":"A pasta não está disponível. Conecte o disco ou selecione-a novamente.",
+ "found":"Pasta selecionada · versão conferida ao jogar", "lost":"A pasta não está disponível. Conecte o disco ou selecione-a novamente.",
  "play":"Jogar", "stop":"Encerrar jogo", "starting":"Preparando o jogo…", "running":"Jogo em execução", "finished":"Tudo pronto para a próxima partida.",
  "fixed":"V-Sync ligado · Retina · Game Mode em tela cheia", "limitNote":"Ilimitado remove o limite de 60. V-Sync e o teto de segurança do motor (240 FPS) continuam valendo.",
  "upscaleNote":"MetalFX espacial: sem geração de quadros e sem histórico temporal.",
@@ -63,8 +63,24 @@ let translations: [String: [String: String]] = [
  "select":"Usar esta pasta", "invalidTitle":"Pasta do jogo não encontrada", "invalid":"Escolha o dump extraído. Um arquivo .PKG ou .ISO ainda precisa ser extraído.",
  "failed":"O jogo não iniciou. Consulte os logs.", "errorTitle":"Não foi possível iniciar o jogo", "error":"Confira se o disco está conectado e se o dump corresponde à versão preparada. O diagnóstico foi salvo nos logs.",
  "logs":"Abrir logs", "ok":"OK", "quitTitle":"Encerrar o jogo também?", "quitMessage":"O jogo ainda está aberto. Saia pelo menu do jogo para salvar seu progresso antes de fechar o launcher.",
- "keep":"Voltar", "quit":"Encerrar", "local":"Versão local · ARM64 nativo", "input":"Renderização", "output":"saída",
- "version":"Este aplicativo local usa o executável CUSA01623 v1.02 validado neste port. O dump permanece na pasta escolhida."
+ "keep":"Voltar", "quit":"Encerrar", "local":"Comunidade · ARM64 nativo", "input":"Renderização", "output":"saída",
+ "version":"Testado: CUSA01623 v1.02 · O executável e os módulos são verificados antes da preparação.",
+ "checking":"Conferindo a versão do dump…",
+ "scanning":"Preparando os arquivos do seu dump…",
+ "generating":"Recompilando para Apple Silicon…",
+ "compiling":"Compilando o jogo · primeira preparação",
+ "linking":"Finalizando e verificando o jogo…",
+ "ready":"Preparação concluída. Iniciando…",
+ "cancelled":"Preparação interrompida. Clique em Jogar para continuar.",
+ "cancel":"Cancelar",
+ "firstRun":"A primeira preparação pode levar vários minutos. O resultado será salvo neste Mac.",
+ "dump_version":"Dump incompatível. Esta versão foi testada com CUSA01623 v1.02 e confere o conteúdo do executável e dos módulos. Outros updates, regiões e executáveis modificados não são aceitos.",
+ "dump_missing":"O dump está incompleto. Selecione a pasta extraída com os executáveis e os arquivos de dados do jogo.",
+ "disk_space":"Libere pelo menos 3 GB no disco do Mac para preparar o jogo.",
+ "prepare_failed":"Não foi possível concluir a preparação. Abra os logs para ver o diagnóstico e clique em Jogar para tentar novamente.",
+ "architecture":"É necessário um Mac com Apple Silicon e macOS 26 ou superior. Rosetta não é usado.",
+ "quitPreparingTitle":"Cancelar a preparação?",
+ "quitPreparingMessage":"O trabalho já concluído será guardado. Na próxima abertura, clique em Jogar para continuar."
 ],
 "en": [
  "quitMenu":"Quit God of War III", "subtitle":"REMASTERED · APPLE SILICON", "settings":"Ready for your next session",
@@ -72,7 +88,7 @@ let translations: [String: [String: String]] = [
  "native":"Native", "quality":"MetalFX · Quality", "balanced":"MetalFX · Balanced", "performance":"MetalFX · Performance",
  "unlimited":"Unlimited", "language":"Launcher language", "hud":"Show Metal performance HUD",
  "folder":"Game folder", "choose":"Choose folder…", "change":"Change…", "missing":"Select your game dump to get started.",
- "found":"Folder found · ready to play", "lost":"The folder is unavailable. Connect the drive or select it again.",
+ "found":"Folder selected · version checked on Play", "lost":"The folder is unavailable. Connect the drive or select it again.",
  "play":"Play", "stop":"Stop game", "starting":"Preparing the game…", "running":"Game running", "finished":"Ready for your next session.",
  "fixed":"V-Sync on · Retina · Game Mode in fullscreen", "limitNote":"Unlimited removes the 60 FPS cap. V-Sync and the engine's safety ceiling (240 FPS) still apply.",
  "upscaleNote":"Spatial MetalFX: no frame generation or temporal history.",
@@ -80,8 +96,24 @@ let translations: [String: [String: String]] = [
  "select":"Use this folder", "invalidTitle":"Game folder not found", "invalid":"Choose an extracted dump. A .PKG or .ISO file must be extracted first.",
  "failed":"The game could not start. Check the logs.", "errorTitle":"The game could not start", "error":"Check that the drive is connected and the dump matches the prepared version. Diagnostics were saved in the logs.",
  "logs":"Open logs", "ok":"OK", "quitTitle":"Stop the game too?", "quitMessage":"The game is still open. Exit through the game's menu to save your progress before closing the launcher.",
- "keep":"Go back", "quit":"Stop", "local":"Local build · Native ARM64", "input":"Rendering", "output":"output",
- "version":"This local app uses the CUSA01623 v1.02 executable validated for this port. Your dump stays in the selected folder."
+ "keep":"Go back", "quit":"Stop", "local":"Community · Native ARM64", "input":"Rendering", "output":"output",
+ "version":"Tested: CUSA01623 v1.02 · Executable and modules are verified before preparation.",
+ "checking":"Checking your dump version…",
+ "scanning":"Preparing files from your dump…",
+ "generating":"Recompiling for Apple Silicon…",
+ "compiling":"Compiling the game · first preparation",
+ "linking":"Finalizing and verifying the game…",
+ "ready":"Preparation complete. Starting…",
+ "cancelled":"Preparation stopped. Click Play to continue.",
+ "cancel":"Cancel",
+ "firstRun":"First preparation may take several minutes. The result will be saved on this Mac.",
+ "dump_version":"Incompatible dump. This release was tested with CUSA01623 v1.02 and verifies executable and module contents. Other updates, regions and modified executables are not accepted.",
+ "dump_missing":"The dump is incomplete. Select the extracted folder containing the executables and game data files.",
+ "disk_space":"Free at least 3 GB on your Mac to prepare the game.",
+ "prepare_failed":"Preparation could not finish. Open the logs for diagnostics, then click Play to try again.",
+ "architecture":"An Apple Silicon Mac with macOS 26 or later is required. Rosetta is not used.",
+ "quitPreparingTitle":"Cancel preparation?",
+ "quitPreparingMessage":"Completed work will be kept. Click Play next time to continue."
 ],
 "es": [
  "quitMenu":"Salir de God of War III", "subtitle":"REMASTERED · APPLE SILICON", "settings":"Prepara tu próxima partida",
@@ -89,7 +121,7 @@ let translations: [String: [String: String]] = [
  "native":"Nativo", "quality":"MetalFX · Calidad", "balanced":"MetalFX · Equilibrado", "performance":"MetalFX · Rendimiento",
  "unlimited":"Sin límite", "language":"Idioma del launcher", "hud":"Mostrar HUD de rendimiento de Metal",
  "folder":"Carpeta del juego", "choose":"Elegir carpeta…", "change":"Cambiar…", "missing":"Selecciona tu dump para empezar.",
- "found":"Carpeta encontrada · lista para jugar", "lost":"La carpeta no está disponible. Conecta el disco o selecciónala de nuevo.",
+ "found":"Carpeta seleccionada · versión comprobada al jugar", "lost":"La carpeta no está disponible. Conecta el disco o selecciónala de nuevo.",
  "play":"Jugar", "stop":"Cerrar juego", "starting":"Preparando el juego…", "running":"Juego en ejecución", "finished":"Todo listo para la próxima partida.",
  "fixed":"V-Sync activado · Retina · Game Mode en pantalla completa", "limitNote":"Sin límite elimina el tope de 60 FPS. Siguen vigentes V-Sync y el límite de seguridad del motor (240 FPS).",
  "upscaleNote":"MetalFX espacial: sin generación de fotogramas ni historial temporal.",
@@ -97,8 +129,24 @@ let translations: [String: [String: String]] = [
  "select":"Usar esta carpeta", "invalidTitle":"Carpeta del juego no encontrada", "invalid":"Elige un dump extraído. Un archivo .PKG o .ISO necesita extraerse primero.",
  "failed":"El juego no se inició. Consulta los logs.", "errorTitle":"No se pudo iniciar el juego", "error":"Comprueba que el disco esté conectado y que el dump corresponda a la versión preparada. El diagnóstico se guardó en los logs.",
  "logs":"Abrir logs", "ok":"Aceptar", "quitTitle":"¿Cerrar también el juego?", "quitMessage":"El juego sigue abierto. Sal desde su menú para guardar tu progreso antes de cerrar el launcher.",
- "keep":"Volver", "quit":"Cerrar", "local":"Versión local · ARM64 nativo", "input":"Renderizado", "output":"salida",
- "version":"Esta aplicación local usa el ejecutable CUSA01623 v1.02 validado en este port. El dump permanece en la carpeta elegida."
+ "keep":"Volver", "quit":"Cerrar", "local":"Comunidad · ARM64 nativo", "input":"Renderizado", "output":"salida",
+ "version":"Probado: CUSA01623 v1.02 · Se verifican el ejecutable y los módulos antes de preparar.",
+ "checking":"Comprobando la versión del dump…",
+ "scanning":"Preparando los archivos de tu dump…",
+ "generating":"Recompilando para Apple Silicon…",
+ "compiling":"Compilando el juego · primera preparación",
+ "linking":"Finalizando y verificando el juego…",
+ "ready":"Preparación completa. Iniciando…",
+ "cancelled":"Preparación detenida. Pulsa Jugar para continuar.",
+ "cancel":"Cancelar",
+ "firstRun":"La primera preparación puede tardar varios minutos. El resultado se guardará en este Mac.",
+ "dump_version":"Dump incompatible. Esta versión fue probada con CUSA01623 v1.02 y verifica el contenido del ejecutable y los módulos. No se aceptan otras actualizaciones, regiones ni ejecutables modificados.",
+ "dump_missing":"El dump está incompleto. Selecciona la carpeta extraída con los ejecutables y los archivos de datos del juego.",
+ "disk_space":"Libera al menos 3 GB en tu Mac para preparar el juego.",
+ "prepare_failed":"No se pudo completar la preparación. Abre los logs para ver el diagnóstico y pulsa Jugar para reintentar.",
+ "architecture":"Se requiere un Mac con Apple Silicon y macOS 26 o posterior. No se usa Rosetta.",
+ "quitPreparingTitle":"¿Cancelar la preparación?",
+ "quitPreparingMessage":"Se conservará el trabajo completado. Pulsa Jugar la próxima vez para continuar."
 ]]
 
 func inputSize(_ p: Preferences) -> String {
@@ -128,11 +176,25 @@ func findDump(_ url: URL, depth: Int = 2) -> URL? {
     return nil
 }
 
+struct PreparationState: Decodable {
+    var phase: String
+    var fraction: Double?
+    var completed: Int?
+    var total: Int?
+    var error_code: String?
+}
+
 final class LauncherModel: ObservableObject {
     @Published var prefs: Preferences
     @Published var busy = false
     @Published var running = false
     @Published var statusKey = ""
+    @Published var progress: Double? = nil
+    @Published var progressDetail = ""
+    var statusState: PreparationState? {
+        guard let data = try? Data(contentsOf:support.appendingPathComponent("preparation-status.json")) else { return nil }
+        return try? JSONDecoder().decode(PreparationState.self,from:data)
+    }
     let support: URL
     let resources: URL
     var process: Process?
@@ -203,6 +265,8 @@ final class LauncherModel: ObservableObject {
         if !valid { chooseFolder() }
         guard valid, let game = gameURL else { return }
         save(); busy = true; running = false; stopping = false; statusKey = "starting"
+        progress = nil; progressDetail = ""
+        try? FileManager.default.removeItem(at:support.appendingPathComponent("preparation-status.json"))
         do {
             let logs = support.appendingPathComponent("Logs")
             try FileManager.default.createDirectory(at:logs,withIntermediateDirectories:true)
@@ -225,16 +289,26 @@ final class LauncherModel: ObservableObject {
                     guard let self = self else { return }
                     self.timer?.invalidate(); self.timer = nil
                     try? self.logHandle?.close(); self.logHandle = nil
-                    self.busy = false; self.running = false; self.process = nil; self.statusKey = "finished"
-                    if exitCode != 0 && !self.stopping { self.statusKey = "failed"; self.showError(self.t("error")) }
+                    let wasRunning = self.running
+                    self.busy = false; self.running = false; self.process = nil; self.progress = nil; self.progressDetail = ""
+                    self.statusKey = self.stopping && !wasRunning ? "cancelled" : "finished"
+                    if exitCode != 0 && !self.stopping {
+                        self.statusKey = "failed"
+                        self.showError(self.t(self.statusState?.error_code ?? "error"))
+                    }
                 }
             }
             process = task
             try task.run()
             timer = Timer.scheduledTimer(withTimeInterval:0.5,repeats:true) { [weak self] _ in
-                guard let self = self, let profile = try? String(contentsOf:self.support.appendingPathComponent("active-profile.txt"),encoding:.utf8) else { return }
+                guard let self = self else { return }
+                if !self.running, let state = self.statusState {
+                    self.statusKey = state.phase; self.progress = state.fraction
+                    self.progressDetail = state.completed.flatMap { n in state.total.map { " \(n)/\($0)" } } ?? ""
+                }
+                guard let profile = try? String(contentsOf:self.support.appendingPathComponent("active-profile.txt"),encoding:.utf8) else { return }
                 let pid = URL(fileURLWithPath:profile).appendingPathComponent(".native-test.pid")
-                if FileManager.default.fileExists(atPath:pid.path) { self.running = true; self.statusKey = "running" }
+                if FileManager.default.fileExists(atPath:pid.path) { self.running = true; self.statusKey = "running"; self.progress = nil }
             }
         } catch {
             busy = false; running = false; process = nil; try? logHandle?.close(); logHandle = nil
@@ -391,14 +465,25 @@ struct LauncherView: View {
                 HStack(spacing:16) {
                     Button(action:{model.busy ? model.stop() : model.play()}) {
                         HStack(spacing:12) {
-                            Text(tr(model.busy ? "stop" : "play")).font(GameStyle.menu(22))
+                            Text(tr(model.busy ? (model.running ? "stop" : "cancel") : "play")).font(GameStyle.menu(22))
                             Image(systemName:model.busy ? "stop.fill" : "chevron.right").font(.system(size:13,weight:.bold))
                         }.frame(minWidth:124)
                     }.buttonStyle(GameButtonStyle(prominent:true)).keyboardShortcut(.defaultAction)
                     if model.busy && !model.running { ProgressView().controlSize(.small) }
-                    Text(tr(model.statusKey.isEmpty ? (model.valid ? "found" : "missing") : model.statusKey))
-                        .font(.system(size:11)).foregroundColor(GameStyle.muted).fixedSize(horizontal:false,vertical:true)
+                    VStack(alignment:.leading,spacing:5) {
+                        Text(tr(model.statusKey.isEmpty ? (model.valid ? "found" : "missing") : model.statusKey) + model.progressDetail)
+                            .font(.system(size:11)).foregroundColor(GameStyle.ivory).fixedSize(horizontal:false,vertical:true)
+                        if model.busy && !model.running, let value = model.progress {
+                            ProgressView(value:value).tint(GameStyle.gold).frame(width:268)
+                        }
+                    }
                 }.frame(width:506,alignment:.leading).padding(.top,22)
+                Text(tr("version")).font(.system(size:10)).foregroundColor(GameStyle.gold)
+                    .frame(width:506,alignment:.leading).fixedSize(horizontal:false,vertical:true).padding(.top,10)
+                if model.busy && !model.running {
+                    Text(tr("firstRun")).font(.system(size:10)).foregroundColor(GameStyle.muted)
+                        .frame(width:506,alignment:.leading).fixedSize(horizontal:false,vertical:true).padding(.top,4)
+                }
                 Spacer(minLength:0)
                 HStack(alignment:.bottom) {
                     Text(tr("fixed")).font(.system(size:10)).foregroundColor(GameStyle.muted)
@@ -473,7 +558,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender:NSApplication) -> Bool { true }
     func applicationShouldTerminate(_ sender:NSApplication) -> NSApplication.TerminateReply {
         guard model?.busy == true else { return .terminateNow }
-        let alert = NSAlert(); alert.messageText = model.t("quitTitle"); alert.informativeText = model.t("quitMessage")
+        let alert = NSAlert(); alert.messageText = model.t(model.running ? "quitTitle" : "quitPreparingTitle"); alert.informativeText = model.t(model.running ? "quitMessage" : "quitPreparingMessage")
         alert.addButton(withTitle:model.t("keep")); alert.addButton(withTitle:model.t("quit"))
         if alert.runModal() == .alertSecondButtonReturn { model.stop(); return .terminateNow }
         return .terminateCancel

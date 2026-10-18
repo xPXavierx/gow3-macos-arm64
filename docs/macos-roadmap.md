@@ -10,11 +10,12 @@ The public fork contains sources, tests, dependency patches and local build
 recipes. The existing local `.app` contains game-derived AOT libraries and linked
 images; do not publish it as a downloadable game or GitHub release asset.
 
-The next packaging milestone is a redistributable runtime/launcher that accepts
-the user's own dump and prepares its AOT profiles locally. That still requires
-bundling the tools, showing progress, resumable builds, validating game hashes,
-disk/RAM requirements and safe recovery from an interrupted first run. The current
-launcher selects already prepared profiles; this milestone is not implemented.
+The community first-run preview now bundles the ARM64 tools and an offline
+Zig/Clang compiler with this same launcher. It validates the tested dump, shows
+progress, handles cancellation and verifies/reuses locally generated profiles.
+See [installation and packaging](../packaging/macos/launcher/COMMUNITY.md).
+Developer ID signing/notarization, other-Mac testing and broader dump-version
+coverage remain pending. Keep the older private prebuilt-profile app separate.
 
 Retain upstream history, license notices and attribution. Keep the tested base
 pinned while reviewing newer upstream changes separately. A source build and

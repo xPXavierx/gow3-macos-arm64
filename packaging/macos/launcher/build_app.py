@@ -16,11 +16,15 @@ import subprocess
 from branding import install_branding
 
 p = argparse.ArgumentParser()
-for name in ('launcher','host-app','renderer','moltenvk','python-prefix','profiles','out'):
+for name in ('launcher','host-app','renderer','moltenvk','python-prefix','out'):
     p.add_argument('--'+name,required=True,type=Path)
+p.add_argument('--profiles',type=Path)
+p.add_argument('--runtime-only',action='store_true',help='Create a runtime staging app for build_community.py; no game preparation is included')
 p.add_argument('--branding-directory',type=Path,
     help='Local GOW-3-Icon.jpg, GOW-3-Art.jpg and GODOFWAR.TTF supplied by the user')
 a = p.parse_args()
+if (a.profiles is None) != a.runtime_only:
+    p.error('Supply --profiles for a private app, or --runtime-only for community runtime staging')
 repo = Path(__file__).resolve().parents[3]
 app = a.out.resolve()
 if app.exists():
@@ -47,13 +51,14 @@ shutil.copy2(repo/'run.py',rt/'run.py')
 shutil.copytree(repo/'scripts',rt/'scripts',ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
 shutil.copytree(repo/'patches',rt/'patches')
 # patches.py locates profiles relative to its script; append only exact sizes.
-shutil.copy2(a.profiles/'God_of_War_III_Remastered.xml',rt/'patches/God_of_War_III_Remastered.xml')
+if a.profiles:
+    shutil.copy2(a.profiles/'God_of_War_III_Remastered.xml',rt/'patches/God_of_War_III_Remastered.xml')
 shutil.copy2(Path(__file__).with_name('session.py'),resources/'session.py')
 shutil.copy2(Path(__file__).with_name('Help-pt-BR.txt'),resources/'Help.txt')
 prof = resources/'Profiles'
 prof.mkdir()
 profile_count = 0
-for source in sorted(a.profiles.iterdir()):
+for source in sorted(a.profiles.iterdir()) if a.profiles else []:
     if not (source/'profile.json').exists():continue
     target = prof/source.name
     (target/'aot').mkdir(parents=True)
@@ -61,7 +66,7 @@ for source in sorted(a.profiles.iterdir()):
         shutil.copy2(source/name,target/name)
     shutil.copy2(source/'aot/libgow3-recompiled.dylib',target/'aot/libgow3-recompiled.dylib')
     profile_count += 1
-if profile_count != 24:
+if not a.runtime_only and profile_count != 24:
     raise ValueError(f'Expected 24 complete static profiles, got {profile_count}')
 # Relocatable Python, stdlib only. No Homebrew/Python installation required at runtime.
 py = resources/'Python'
@@ -176,7 +181,8 @@ subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(app)],check=True)
 subprocess.run(['/usr/bin/codesign','--verify','--deep','--strict',str(app)],check=True)
 (resources/'build-manifest.json').write_text(json.dumps({'architecture':'arm64','minimum_macos':'26.0','profiles':profile_count,
     'bundled_libraries':len(list(frameworks.iterdir())),'full_game_dump_bundled':False,
-    'local_private_aot':True,'display_info_hud':True,'default_language':'en','branding':branding},indent=2))
+    'local_private_aot':not a.runtime_only,'runtime_staging_only':a.runtime_only,
+    'display_info_hud':True,'default_language':'en','branding':branding},indent=2))
 # The manifest is a sealed resource too.
 subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(app)],check=True)
 print('Built',app,flush=True)
