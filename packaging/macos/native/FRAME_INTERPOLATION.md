@@ -177,3 +177,89 @@ The reference predates the final helper-format correction; the generated-frame
 runs use the final FIFO pacing. The 60-real-FPS condition was met in the tested
 1080p reference without frame
 generation; enabling interpolation has a measurable rendering cost.
+
+
+## Reduced-cost path — 2026-10-18
+
+Frame generation remains an opt-in developer experiment. The standard Swift
+launcher keeps it off. The 0.4.1 desktop adapter does not expose a frame-generation argument or launcher
+option and explicitly keeps generation disabled. The native renderer source retains
+the experiment for future developer work. If generation is used through the native
+research path, the display policy never requests 60 Hz. Unlimited rendering also
+leaves refresh unchanged.
+
+The research path can select half-width/half-height interpolation color/output and temporal
+inputs. `GOW3_FRAMEGEN_COLOR_DIVISOR=2` affects generated frames only: native real
+4K remains 3840x2160, while interpolation runs at 1920x1080. Without spatial
+MetalFX the generated image uses the existing linear presentation scaler; it can
+look softer than the real frame. This is not full-resolution 4K interpolation.
+The HUD names real-render dimensions, spatial MetalFX, rendered/generated FPS and
+interpolation dimensions separately. Its FPS rows are submission counters; actual
+presentation measurements use distinct nonzero Metal drawable timestamps.
+
+`GOW3_FRAMEGEN_COMPACT_MOTION=1` (default when generation is requested) stores RG16F
+motion instead of RGBA16F. Invalid interpolated history is rejected before the
+write, preserving the previous half-float validity threshold. The independent
+production compute-shader test checks 16 combinations of compact/legacy motion,
+full/half colors, full/half depth-motion and UI-only packing. Colors, nearest-depth
+selection, corresponding vectors and output-buffer guards pass on M3 Max with
+Metal and Vulkan validation and no errors. The shader cache version is 28.
+
+Real and generated frames keep separate persistent spatial MetalFX scaler objects.
+A single scaler was being reconfigured twice per game frame when the processing
+sizes differed. Reusing two objects eliminates that initialization churn. Pixels
+remain GPU-resident; the original texture coherence/readback rules stay enabled.
+
+Diagnostic timing reduced the native interpolation encode from approximately
+6.2-6.6 ms at 4K to 1.9-2.2 ms at 1080p. These are different processing resolutions,
+not a free equal-quality speedup. Isolating the encode changes command submission;
+do not use those profiling runs as clean game-FPS benchmarks.
+
+Clean scene measurements and their limitations are recorded below. The 60 real /
+120 presented target remains unmet. Increasing queued frames did not establish a
+benefit and is not enabled in the adapter. Input latency, all scene transitions
+and campaign-wide interpolation quality remain unqualified.
+
+
+### Clean game windows on M3 Max
+
+All rows use the same isolated Gaia autosave (Titan difficulty), V-Sync, Retina,
+frame cap 60, AA off and ProMotion retained as the common display control. The
+sequence alternates attack, block and dodge inputs; the scene/enemy counts vary.
+These are bounded gameplay observations, not identical frame replays or a claim
+of uninterrupted heavy combat. Captures and GPU profiling run outside FPS windows.
+All listed FPS windows logged zero shader/pipeline compiles.
+
+| Configuration | Real rendering | Interpolation | Window | Real FPS | Actual presents/s |
+|---|---|---|---|---:|---:|
+| Full-color legacy motion reference | 3840x2160 | 3840x2160 | 30 s | 47.12 | 93.99 |
+| Compact motion / reduced interpolation | 3840x2160 | 1920x1080 | 30 s | 51.42 | 102.59 |
+| MetalFX Balanced, full-color interpolation | 2272x1278 to 4K | 2272x1278 | 60 s | 51.44 | 102.97 |
+| MetalFX Performance, reduced interpolation | 1920x1080 to 4K | 960x540 to 4K | 120 s | 52.40 | 104.73 |
+| Native 4K, two queued frames (not retained) | 3840x2160 | 1920x1080 | 60 s | 51.82 | 105.89 |
+
+The native-4K real-frame comparison improves by approximately 9.1%, with a lower
+resolution generated image. The native framegen pair has median presentation
+intervals near 8.33 ms but p95/p99 near 16.67 ms: it does not sustain a regular
+120 Hz cadence. Neither Balanced nor Performance reached 60 real FPS. Do not
+label the upscaled rows native 4K rendering. The first earlier reduced-input
+60-second run overlapped a fixture build/GPU check and is excluded from this table.
+The isolated-profile FPS values are likewise excluded. The ordinary renderer's
+60 FPS reference does not make interpolation a zero-cost feature.
+
+The original full-resolution input-preparation-only experiment (no interpolation
+or generated presents) averaged about 54.8 real FPS over 60 seconds, compared with
+60 in the ordinary renderer. This bounds a separate integration cost in producing
+history/motion/depth. Reducing only MetalFX's encode cannot remove that cost.
+Further work needs to measure and reduce that path and its queue/event waits;
+merely reducing the scene resolution did not meet the real-frame requirement.
+
+
+The final 0.4.1 community app also completed a cold automatic native-4K preparation
+in 121.402 seconds using its bundled ARM64 tools. It then averaged 60.00 real /
+60.00 actual presentations/s for 60 seconds with frame generation off and zero
+shader compiles. This validates the packaged ordinary path after cleanup, not
+60 real FPS with interpolation enabled. The final six renderer/motion fixtures
+reported no Vulkan/Metal errors, and four production SPIR-V modules passed
+spirv-val. Six native runtime/loader checks and 195 Python tests passed (59
+Python cases skipped for unavailable compiled/platform prerequisites).

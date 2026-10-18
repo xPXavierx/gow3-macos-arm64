@@ -3,14 +3,27 @@
 #extension GL_EXT_samplerless_texture_functions : require
 layout(local_size_x=8,local_size_y=8)in;
 layout(binding=0)uniform texture2D color_src;
+#ifndef UI_ONLY
 layout(binding=1)uniform texture2D depth_src;
 layout(binding=2)uniform texture2D vertex_motion;
+#endif
 layout(binding=3,rgba8)uniform writeonly image2D color_dst;
+#ifndef UI_ONLY
 layout(binding=4,r32f)uniform writeonly image2D depth_dst;
 layout(binding=5,rg16f)uniform writeonly image2D motion_dst;
+#endif
 void main(){
- ivec2 p=ivec2(gl_GlobalInvocationID.xy);if(any(greaterThanEqual(p,imageSize(color_dst))))return;
- imageStore(color_dst,p,vec4(texelFetch(color_src,p,0).rgb,1));
+ ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+ if(all(lessThan(p,imageSize(color_dst)))){
+ ivec2 colorStep=(textureSize(color_src,0)+imageSize(color_dst)-1)/imageSize(color_dst);
+ vec3 color=vec3(0);int samples=0;
+ for(int y=0;y<colorStep.y;++y)for(int x=0;x<colorStep.x;++x){
+  ivec2 at=min(p*colorStep+ivec2(x,y),textureSize(color_src,0)-1);
+  color+=texelFetch(color_src,at,0).rgb;++samples;
+ }
+ imageStore(color_dst,p,vec4(color/float(samples),1));
+ }
+#ifndef UI_ONLY
  if(any(greaterThanEqual(p,imageSize(depth_dst))))return;
  ivec2 step=(textureSize(depth_src,0)+imageSize(depth_dst)-1)/imageSize(depth_dst);
  ivec2 base=p*step,nearest=min(base,textureSize(depth_src,0)-1);
@@ -21,6 +34,12 @@ void main(){
   float d=texelFetch(depth_src,at,0).r;if(d<z){z=d;nearest=at;}
  }
  vec4 mv=texelFetch(vertex_motion,nearest,0);
- vec2 flow=mv.b>.99 && !any(isnan(mv.rg)) && !any(isinf(mv.rg))?mv.rg:vec2(0);
+#ifdef COMPACT_MOTION
+ bool history=true; // invalid history was zeroed in the producing fragment shader
+#else
+ bool history=mv.b>.99;
+#endif
+ vec2 flow=history && !any(isnan(mv.rg)) && !any(isinf(mv.rg))?mv.rg:vec2(0);
  imageStore(depth_dst,p,vec4(z));imageStore(motion_dst,p,vec4(flow,0,0));
+#endif
 }

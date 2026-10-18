@@ -2,6 +2,8 @@
 #include "video_core/renderer_vulkan/vk_framegen_inputs.h"
 #include <algorithm>
 #include "video_core/host_shaders/framegen_inputs_comp.h"
+#include "video_core/host_shaders/framegen_inputs_compact_comp.h"
+#include "video_core/host_shaders/framegen_ui_comp.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_object_motion.h"
 #include "video_core/renderer_vulkan/vk_runtime.h"
@@ -48,11 +50,17 @@ FrameGenInputs::FrameGenInputs(const Instance& i, Scheduler& s, Runtime& r,
          .pBindings = bindings.data()}));
     layout = Check(
         device.createPipelineLayoutUnique({.setLayoutCount = 1, .pSetLayouts = &*descriptors}));
-    auto module = CompileSPV(FRAMEGEN_INPUTS_COMP, device);
+    auto module = FrameGen::CompactMotion() ? CompileSPV(FRAMEGEN_INPUTS_COMPACT_COMP, device)
+                                         : CompileSPV(FRAMEGEN_INPUTS_COMP, device);
     pipeline = Check(device.createComputePipelineUnique(
         {},
         {.stage = {.stage = vk::ShaderStageFlagBits::eCompute, .module = module, .pName = "main"},
          .layout = *layout}));
+    device.destroyShaderModule(module);
+    module = CompileSPV(FRAMEGEN_UI_COMP, device);
+    ui_pipeline = Check(device.createComputePipelineUnique(
+        {}, {.stage = {.stage = vk::ShaderStageFlagBits::eCompute, .module = module, .pName = "main"},
+             .layout = *layout}));
     device.destroyShaderModule(module);
     objects.OnFrameStart();
 }
@@ -93,7 +101,7 @@ void FrameGenInputs::BeforeDepthClear(u64 address) {
         Snapshot();
 }
 void FrameGenInputs::Allocate(vk::Extent2D size) {
-    if (size == extent)
+    if (size == source_extent)
         return;
     scheduler.Finish();
     auto cmd = scheduler.CommandBuffer();
@@ -105,6 +113,15 @@ void FrameGenInputs::Allocate(vk::Extent2D size) {
     temporal_extent = {(size.width + divisor - 1) / divisor, (size.height + divisor - 1) / divisor};
     parameters.motion_scale_x = float(temporal_extent.width) / size.width;
     parameters.motion_scale_y = float(temporal_extent.height) / size.height;
+    source_extent = size;
+    // Experimental: keep real rendering unchanged, reduce only interpolation
+    // color/output. Depth and motion retain their original calibrated size.
+    static const unsigned color_divisor = [] {
+        const char* value = std::getenv("GOW3_FRAMEGEN_COLOR_DIVISOR");
+        return value && value[0] == '2' ? 2u : 1u;
+    }();
+    size = {(size.width + color_divisor - 1) / color_divisor,
+            (size.height + color_divisor - 1) / color_divisor};
     auto make = [&](VideoCore::UniqueImage& image, vk::UniqueImageView& view, vk::Format format,
                     vk::Extent2D target) {
         view.reset();
@@ -136,8 +153,12 @@ void FrameGenInputs::Allocate(vk::Extent2D size) {
     make(color[1], color_view[1], vk::Format::eR8G8B8A8Unorm, size);
     make(depth, depth_view, vk::Format::eR32Sfloat, temporal_extent);
     make(motion, motion_view, vk::Format::eR16G16Sfloat, temporal_extent);
+    make(ui, ui_view, vk::Format::eR8G8B8A8Unorm, size);
     extent = size;
     previous_valid = false;
+    std::printf("Framegen resources: real=%ux%u interpolation=%ux%u depth/motion=%ux%u compact_motion=%d\n",
+                source_extent.width, source_extent.height, extent.width, extent.height,
+                temporal_extent.width, temporal_extent.height, FrameGen::CompactMotion());
 }
 void FrameGenInputs::Snapshot() {
     auto& c = cache.GetImage(display_id);
@@ -185,7 +206,8 @@ void FrameGenInputs::Snapshot() {
                      .pImageInfo = &images[n]};
     cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
     cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute, *layout, 0, writes);
-    cmd.dispatch((size.width + 7) / 8, (size.height + 7) / 8, 1);
+    cmd.dispatch((std::max(extent.width,temporal_extent.width) + 7) / 8,
+                 (std::max(extent.height,temporal_extent.height) + 7) / 8, 1);
     for (auto image : {vk::Image(color[slot]), vk::Image(depth), vk::Image(motion)})
         Barrier(cmd, image, vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderRead);
     const auto now=std::chrono::steady_clock::now();
@@ -208,6 +230,21 @@ bool FrameGenInputs::Ready(u64 address) const { return captured && captured_addr
 FrameInterpolator::Inputs FrameGenInputs::Inputs(vk::ImageView ui) const {
     return {*color_view[slot], previous_valid ? *color_view[slot ^ 1] : *color_view[slot],
             *depth_view, *motion_view, ui};
+}
+vk::ImageView FrameGenInputs::PrepareUI(vk::ImageView source, vk::CommandBuffer cmd) {
+    if (source_extent == extent)
+        return source;
+    Barrier(cmd, vk::Image(ui), vk::ImageLayout::eGeneral, vk::AccessFlagBits2::eShaderWrite);
+    const std::array<vk::DescriptorImageInfo,2> images{{
+        {{}, source, vk::ImageLayout::eGeneral}, {{}, *ui_view, vk::ImageLayout::eGeneral}}};
+    const std::array<vk::WriteDescriptorSet,2> writes{{
+        {.dstBinding=0,.descriptorCount=1,.descriptorType=vk::DescriptorType::eSampledImage,.pImageInfo=&images[0]},
+        {.dstBinding=3,.descriptorCount=1,.descriptorType=vk::DescriptorType::eStorageImage,.pImageInfo=&images[1]}}};
+    cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *ui_pipeline);
+    cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute,*layout,0,writes);
+    cmd.dispatch((extent.width+7)/8,(extent.height+7)/8,1);
+    Barrier(cmd,vk::Image(ui),vk::ImageLayout::eGeneral,vk::AccessFlagBits2::eShaderRead);
+    return *ui_view;
 }
 FrameInterpolator::Parameters FrameGenInputs::Parameters() const {
     auto p = parameters;

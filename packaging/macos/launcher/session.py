@@ -18,7 +18,7 @@ SCALES = {"native": 1, "quality": 1.5, "balanced": 1.7, "performance": 2}
 
 
 @contextmanager
-def display_refresh(resources, cap):
+def display_refresh(resources, cap, frame_generation=False):
     """The helper's stdin is a lease, closed even when the supervisor dies.
 
     CoreGraphics app-scoped changes also revert if the helper is killed. This
@@ -27,7 +27,7 @@ def display_refresh(resources, cap):
     helper = resources / "DisplayMode"
     process = None
     try:
-        if cap == "60" and helper.is_file():
+        if cap == "60" and not frame_generation and helper.is_file():
             process = subprocess.Popen([str(helper)], stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
             if select.select([process.stdout], [], [], 10)[0]:
@@ -58,12 +58,12 @@ def dimensions(resolution, upscaling):
     return (w, h) if upscaling == "native" else (units * 32, units * 18)
 
 
-def plan(resolution, upscaling, cap):
+def plan(resolution, upscaling, cap, frame_generation=False):
     w, h = dimensions(resolution, upscaling)
     engine = 60 if cap == "60" else 240
     return {"profile": f"{w}x{h}-{engine}", "input": [w, h],
             "output": list(RESOLUTIONS[resolution]), "engine": engine,
-            "vsync": True, "frame_generation": False, "retina": True}
+            "vsync": True, "frame_generation": frame_generation, "retina": True}
 
 
 def stage(resources, support, selection):
@@ -99,6 +99,7 @@ def environment(resources, support, game, selection, upscaling, cap, hud, langua
     user = support / "User"
     user.mkdir(exist_ok=True)
     config = out / "display.ini"
+    frame_generation = selection.get("frame_generation", False)
     config.write_text("\n".join(f"{k}={v}" for k, v in {
         "engine_fps": selection["engine"], "fps_limit": cap if cap == "60" else 0,
         "vsync": 1, "upscaler": "off", "preset": 0,
@@ -116,14 +117,16 @@ def environment(resources, support, game, selection, upscaling, cap, hud, langua
         "GOW3_RECOMP_LIB": str(source / "aot/libgow3-recompiled.dylib"),
         "GOW3_USER_DIR": str(user), "GOW3_GPU_USER_DIR": str(user),
         "GOW3_CONFIG": str(config), "GOW3_TIMEOUT": "0", "GOW3_MODS_ENABLED": "0",
-        "GOW3_FULLSCREEN": "1", "GOW3_RETINA": "1", "GOW3_FRAMEGEN": "0",
-        "GOW3_SWAPCHAIN_IMAGES": "2", "GOW3_METAL_PRESENT_INTERVAL":
-        "0.016666666666666667" if cap == "60" else "0",
+        "GOW3_FULLSCREEN": "1", "GOW3_RETINA": "1", "GOW3_FRAMEGEN": "1" if frame_generation else "0",
+        "GOW3_SWAPCHAIN_IMAGES": "3" if frame_generation else "2", "GOW3_METAL_PRESENT_INTERVAL":
+        "0.016666666666666667" if cap == "60" and not frame_generation else "0",
         "VK_DRIVER_FILES": str(runtime / "MoltenVK_icd.json"),
         "DYLD_LIBRARY_PATH": str(frameworks), "MTL_HUD_ENABLED": "1" if hud else "0",
         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"})
     env.update(GOW3_HUD_DISPLAY_INFO="1", GOW3_METALFX_PRESET=upscaling,
                GOW3_LAUNCHER_LANGUAGE=language)
+    if frame_generation:
+        env.update(GOW3_FRAMEGEN_INPUT_DIVISOR="2", GOW3_FRAMEGEN_COLOR_DIVISOR="2")
     if upscaling != "native":
         env.update(GOW3_METALFX_MODE="spatial", GOW3_METALFX_OUTPUT="x".join(map(str, selection["output"])))
     return out, env
@@ -212,7 +215,7 @@ def main():
         # Let the UI stop only the process belonging to this session.
         (support / "active-profile.txt").write_text(str(out))
         try:
-            with display_refresh(resources, a.cap):
+            with display_refresh(resources, a.cap, selection["frame_generation"]):
                 child = subprocess.Popen([sys.executable, "-B", str(resources / "Runtime/run.py")],
                                          env=env, start_new_session=True)
                 try:

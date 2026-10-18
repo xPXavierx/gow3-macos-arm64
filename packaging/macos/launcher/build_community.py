@@ -133,13 +133,13 @@ def main():
         h.update(str(file.relative_to(resources)).encode() + b'\0' + file.read_bytes())
     recipe = h.hexdigest()[:24]
     manifest = json.loads((resources / 'build-manifest.json').read_text())
-    manifest.update(distribution='community-first-run', version='0.4.0', profiles=0,
+    manifest.update(distribution='community-first-run', version='0.4.1', profiles=0,
         local_private_aot=False, automatic_preparation=True, preparation_recipe=recipe,
         compiler='Zig 0.15.2 / Clang 20.1.2', requires_xcode=False, requires_homebrew=False,
         initial_preparation_offline=True, tested_title_id='CUSA01623', tested_version='1.02')
     (resources / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     plist = plistlib.loads((contents / 'Info.plist').read_bytes())
-    plist.update(CFBundleVersion='4', CFBundleShortVersionString='0.4.0')
+    plist.update(CFBundleVersion='5', CFBundleShortVersionString='0.4.1')
     (contents / 'Info.plist').write_bytes(plistlib.dumps(plist))
     forbidden = {'boot-linked.bin', 'eboot.bin', 'eboot.elf', 'linked.elf', 'functions.tsv', 'offsets.txt',
                  'libgow3-recompiled.dylib', 'analysis.json', 'link.json', 'aot-patches.json', 'preferences.json'}

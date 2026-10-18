@@ -1,4 +1,4 @@
-GOD OF WAR III — COMMUNITY ARM64 EDITION 0.4.0
+GOD OF WAR III — COMMUNITY ARM64 EDITION 0.4.1
 
 ENGLISH
 1. Move God of War III.app to Applications and open it.
@@ -21,7 +21,7 @@ The tested dump's SFO reports APP_VER 01.00, despite its tested v1.02 executable
 Allow at least 3 GB of free Mac disk space for initial preparation. Game data stays
 in the selected folder; no game dump, saves or generated game code is included.
 
-This preview is ad-hoc signed, not signed with Developer ID or notarized by Apple.
+This build is ad-hoc signed, not signed with Developer ID or notarized by Apple.
 macOS may require approval in System Settings > Privacy & Security > Open Anyway.
 Only approve a download whose origin you trust. Do not disable Gatekeeper.
 https://support.apple.com/en-us/102445
@@ -42,7 +42,7 @@ preparação. Testado no M3 Max, com CUSA01623 v1.02. O executável e os módulo
 conferidos por SHA-256; o número do SFO sozinho não garante compatibilidade.
 Outras regiões, updates e executáveis modificados são recusados com uma explicação.
 O pacote não inclui dump, saves nem código gerado do jogo. Os dados ficam externos.
-Esta prévia tem assinatura local, sem Developer ID/notarização. O macOS pode pedir
+Esta versão tem assinatura local, sem Developer ID/notarização. O macOS pode pedir
 aprovação em Ajustes do Sistema > Privacidade e Segurança > Abrir Mesmo Assim.
 
 ESPAÑOL
@@ -59,7 +59,7 @@ ESPAÑOL
 Requisitos: Apple Silicon, macOS 26 o posterior, al menos 3 GB libres para preparar.
 Probado en M3 Max con CUSA01623 v1.02. Se verifican hashes SHA-256 del ejecutable y
 los módulos; el número del SFO no basta. Otras regiones/updates/mods son rechazados.
-No se incluyen dump, partidas ni código generado del juego. Esta vista previa
+No se incluyen dump, partidas ni código generado del juego. Esta versión
 no tiene Developer ID/notarización; macOS puede pedir aprobación para abrirla.
 
 KEYBOARD / TECLADO
@@ -74,6 +74,10 @@ SETTINGS / CONFIGURAÇÕES / AJUSTES
 retaining V-Sync; it is not a campaign-wide simulation-speed guarantee.
 Retina, V-Sync and fullscreen/Game Mode metadata remain enabled. The OS controls
 actual Game Mode and remembers a manual opt-out. Frame generation is disabled.
+With the 60 FPS cap the app temporarily selects 60 Hz, then restores the previous
+display mode on exit. Unlimited leaves the refresh mode unchanged.
+O cap de 60 FPS usa 60 Hz temporariamente; Ilimitado preserva a escolha da tela.
+El límite de 60 FPS usa 60 Hz temporalmente; Ilimitado conserva el modo de pantalla.
 The game HUD always shows actual render dimensions and MetalFX mode/preset,
 including when the optional Apple Metal performance HUD is off.
 

@@ -43,7 +43,7 @@ void ShowNotice(const std::string& text, int milliseconds = 3000);
 void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent);
 
 /// Separate rendered and generated frame submissions; never label both as real FPS.
-void SetFrameGenerationRates(float rendered, float generated);
+void SetFrameGenerationRates(float rendered, float generated, unsigned width, unsigned height);
 /// Actual game-image input/output for this presented frame, before window fitting.
 void SetDisplayInfo(int input_width, int input_height, int output_width, int output_height,
                     bool metalfx_applied);

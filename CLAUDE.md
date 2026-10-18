@@ -1,13 +1,11 @@
-## Agent skills
+# God of War III — macOS ARM64
 
-### Issue tracker
+This repository maintains the Apple Silicon port. Report and discuss issues at
+https://github.com/xPXavierx/gow3-macos-arm64/issues. The upstream projects are
+credited in docs/CREDITS.md; their platform support does not certify this port.
 
-GitHub Issues on `FelipePrado0/gow3_pc` (`origin`); always pass `-R FelipePrado0/gow3_pc` to `gh`. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Canonical roles mapped to this repo's labels (`needs-info` → `question`, `ready-for-agent` → `ready-to-implement`, others 1:1). See `docs/agents/triage-labels.md`.
-
-### Domain docs
-
-Single-context: one `CONTEXT.md` plus `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Read README.md for player setup, packaging/macos/launcher/COMMUNITY.md for app
+packaging, and packaging/macos/native/README.md for runtime/renderer builds.
+Keep game-derived data, generated game C/libraries and user saves out of Git.
+Test native ARM64 execution, preserve textures/readback and record rendered FPS
+separately from generated/presented FPS.

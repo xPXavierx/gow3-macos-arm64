@@ -25,6 +25,13 @@ inline bool Requested() {
     return false;
 #endif
 }
+inline bool CompactMotion() {
+    static const bool compact = [] {
+        const char* value = std::getenv("GOW3_FRAMEGEN_COMPACT_MOTION");
+        return !value || value[0] != '0';
+    }();
+    return Requested() && compact;
+}
 inline std::atomic<u64> scene_depth_address{}, copy_depth_address{};
 inline std::atomic<bool> scene_open{};
 inline bool GeometryDepth(u64 address) {
@@ -46,6 +53,7 @@ class FrameGenInputs {
     void BeforeDepthClear(u64 address);
     bool Ready(u64 presented_address) const;
     FrameInterpolator::Inputs Inputs(vk::ImageView ui) const;
+    vk::ImageView PrepareUI(vk::ImageView source, vk::CommandBuffer cmd);
     FrameInterpolator::Parameters Parameters() const;
     vk::Extent2D Size() const { return extent; }
     vk::Extent2D TemporalSize() const { return temporal_extent; }
@@ -71,14 +79,14 @@ class FrameGenInputs {
     unsigned slot{}, frames{};
     FrameInterpolator::Parameters parameters{};
     std::chrono::steady_clock::time_point last_capture{};
-    vk::Extent2D extent{};
+    vk::Extent2D extent{}, source_extent{};
     vk::Extent2D temporal_extent{};
     std::array<VideoCore::UniqueImage, 2> color;
     std::array<vk::UniqueImageView, 2> color_view;
-    VideoCore::UniqueImage depth, motion;
-    vk::UniqueImageView depth_view, motion_view;
+    VideoCore::UniqueImage depth, motion, ui;
+    vk::UniqueImageView depth_view, motion_view, ui_view;
     vk::UniqueDescriptorSetLayout descriptors;
     vk::UniquePipelineLayout layout;
-    vk::UniquePipeline pipeline;
+    vk::UniquePipeline pipeline, ui_pipeline;
 };
 } // namespace Vulkan

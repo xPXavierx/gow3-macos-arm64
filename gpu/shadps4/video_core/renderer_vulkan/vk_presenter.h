@@ -131,8 +131,9 @@ private:
     std::chrono::steady_clock::time_point interpolation_stats_time{};
     u64 interpolation_real_count{},interpolation_generated_count{};
     vk::ImageView UpscaleMetalFx(vk::ImageView perceptual_view, vk::CommandBuffer& cmd,
-                                vk::Extent2D& size, bool encoded_srgb, bool dump, int index);
+                                vk::Extent2D& size, bool encoded_srgb, bool dump, int index, bool generated = false);
     std::unique_ptr<MetalFx> metalfx;
+    std::unique_ptr<MetalFx> metalfx_generated;
     VideoCore::UniqueImage metalfx_output;
     vk::UniqueImageView metalfx_view;
     u32 metalfx_width{3840}, metalfx_height{2160};

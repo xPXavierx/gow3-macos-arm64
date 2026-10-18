@@ -3,15 +3,10 @@ __pycache__/
 user/
 *.mp4
 gow3.ini
-fsr4_shaders/
 pgo/
 *.png
 last_run.log
 dist/
-packaging/runtime-paths.nix
-fsr4_411/
-vkd3d-proton.cache
-tools/fsr4cap/*.exe
 perf.data
 # Local leftovers: patch backups, generated SPIR-V, analysis outputs, test saves and routes
 *.orig
@@ -22,7 +17,19 @@ perf.data
 /docs/route_run.log
 mods.json
 patches.json
-!launcher/gow3.png
 # Locally restored game texture data; never publish in source or community assets.
 *.g3tx
 TexturePack/
+
+# Private game inputs, generated code and local application builds.
+*.app/
+*.wad
+*.pkg
+*.prx
+*.self
+boot-linked.bin
+eboot.bin
+eboot.elf
+libgow3-recompiled.dylib
+recomp_*.c
+*.o

@@ -28,7 +28,7 @@ add_compile_options(-fno-omit-frame-pointer)
 # gow3: link-time optimization (GOW3_LTO, default on) and profile-guided optimization
 # (GOW3_PGO: off, generate = instrumented build writing into GOW3_PGO_DIR, use = build with that
 # profile). Covers gow3gpu and the static libraries linked into it. No -march: the same build
-# runs on the Steam Deck.
+# is built for native ARM64.
 option(GOW3_LTO "Link-time optimization of gow3gpu" ON)
 set(GOW3_PGO "off" CACHE STRING "Profile-guided optimization: off, generate, use")
 set(GOW3_PGO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pgo" CACHE PATH "Profile directory")
@@ -117,11 +117,6 @@ find_program(GLSLANG_COMPILER NAMES glslang glslangValidator REQUIRED)
 set(SIRIT_USE_SYSTEM_SPIRV_HEADERS OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/sirit EXCLUDE_FROM_ALL)
 
-# gow3: FSR 3.1 temporal upscaling / frame generation, native Vulkan (MIT, FireBurn/FSR-Vulkan).
-set(FFX_VK_PORTABLE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(FFX_VK_PORTABLE_BUILD_PROBE OFF CACHE BOOL "" FORCE)
-add_subdirectory(third_party/fsr-vulkan EXCLUDE_FROM_ALL)
-
 # Host shaders -> headers (same scheme as shadPS4's host_shaders/CMakeLists.txt).
 set(SHADER_SRC ${CMAKE_CURRENT_SOURCE_DIR}/shadps4/video_core/host_shaders)
 set(SHADER_INCLUDE ${CMAKE_CURRENT_BINARY_DIR}/include)
@@ -145,6 +140,8 @@ function(add_host_shader FILENAME SHADER_NAME)
 endfunction()
 add_host_shader(color_to_ms_depth.frag color_to_ms_depth_frag)
 add_host_shader(framegen_inputs.comp framegen_inputs_comp)
+add_host_shader(framegen_inputs.comp framegen_inputs_compact_comp COMPACT_MOTION=1)
+add_host_shader(framegen_inputs.comp framegen_ui_comp UI_ONLY=1)
 add_host_shader(color_to_ms_depth.frag color_to_ms_depth_fallback_frag SAMPLE_FALLBACK=1)
 add_host_shader(ms_image_blit.frag ms_image_blit_frag)
 add_host_shader(ms_image_blit.frag ms_image_blit_msaa_frag SRC_MSAA=1)
@@ -218,10 +215,8 @@ target_compile_options(gow3gpu PRIVATE -Wno-deprecated-declarations -Wno-missing
 if (NOT WIN32 AND NOT APPLE)
     target_link_options(gow3gpu PRIVATE -Wl,--allow-shlib-undefined)
 endif()
-target_link_libraries(gow3gpu PRIVATE ffx-vulkan::portable ffx-vulkan::fsr4-v07-vulkan)
 target_link_libraries(gow3gpu PUBLIC Vulkan::Headers fmt::fmt Boost::headers magic_enum::magic_enum
     tsl::robin_map GPUOpen::VulkanMemoryAllocator PkgConfig::XXHASH PkgConfig::SDL3 PkgConfig::FFMPEG miniz::miniz Zydis::Zydis sirit)
-target_include_directories(gow3gpu PRIVATE third_party/xbyak)
 if (WIN32)
     # Guest code is entered with the System V ABI; NOMINMAX/WIN32_LEAN_AND_MEAN keep
     # <windows.h> out of the way of std::min/max and the Vulkan/SDL headers.
@@ -251,77 +246,6 @@ elseif(APPLE)
     target_compile_options(gow3gpu PRIVATE -include ${CMAKE_CURRENT_SOURCE_DIR}/shim/gow3_arm64_compat.h)
 else()
     target_link_libraries(gow3gpu PUBLIC PkgConfig::X11)
-endif()
-
-# gow3 (Windows): gow3gpu is a static library there, so the loader and the HLE runtime are
-# linked here, where CMake knows its dependencies (build.sh builds them with ninja).
-if (WIN32)
-    enable_language(RC)
-    file(GLOB GOW3_RUNTIME CONFIGURE_DEPENDS ../src/runtime*.c)
-    file(GLOB GOW3_ATRAC9 CONFIGURE_DEPENDS ../third_party/LibAtrac9/C/src/*.c)
-    add_library(atrac9 STATIC ${GOW3_ATRAC9})
-    target_compile_options(atrac9 PRIVATE -w)
-    set_target_properties(atrac9 PROPERTIES C_STANDARD 99 INTERPROCEDURAL_OPTIMIZATION OFF)
-    add_executable(gow3-probe ../src/probe.c ${GOW3_RUNTIME} ../src/compat_win.c ../src/cpu_check.c ../src/vulkan_smoke.c
-        ../src/isa_rewrite.c ../src/isa_emulate.c
-        ../packaging/windows/gow3-probe.rc)
-    set_target_properties(gow3-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(gow3-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror>)
-    target_include_directories(gow3-probe PRIVATE .. ../src)
-    target_link_libraries(gow3-probe PRIVATE gow3gpu atrac9 onecore bcrypt ws2_32 -pthread)
-    # The PS4 range (64 GiB - 1 TiB) must stay free: no high-entropy ASLR for heaps and stacks.
-    # The guest main thread runs on the process stack: 16 MiB, committed (no stack probes).
-    target_link_options(gow3-probe PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
-    # gow3: runtime unit tests (ninja -C out/gpu mp3-test videodec-test services-test).
-    add_executable(mp3-test EXCLUDE_FROM_ALL ../tests/test_mp3.c ../src/runtime_mp3.c ../src/compat_win.c)
-    add_executable(videodec-test EXCLUDE_FROM_ALL ../tests/test_videodec.c ../src/compat_win.c)
-    add_executable(services-test EXCLUDE_FROM_ALL ../tests/test_services.c ../src/compat_win.c)
-    foreach(test mp3-test videodec-test services-test)
-        set_target_properties(${test} PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-        target_compile_options(${test} PRIVATE -Wall -Wextra -Werror)
-        target_include_directories(${test} PRIVATE .. ../src)
-        target_link_libraries(${test} PRIVATE atrac9 PkgConfig::FFMPEG bcrypt -pthread)
-    endforeach()
-    add_executable(pad-map-test EXCLUDE_FROM_ALL ../tests/test_pad_map.c ../src/compat_win.c)
-    set_target_properties(pad-map-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(pad-map-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(pad-map-test PRIVATE .. ../src)
-    target_link_libraries(pad-map-test PRIVATE PkgConfig::SDL3 bcrypt -pthread)
-    add_executable(audio-downmix-test EXCLUDE_FROM_ALL ../tests/test_audio_downmix.c ../src/compat_win.c)
-    set_target_properties(audio-downmix-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(audio-downmix-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(audio-downmix-test PRIVATE .. ../src)
-    target_link_libraries(audio-downmix-test PRIVATE PkgConfig::SDL3 bcrypt -pthread)
-    add_executable(cpu-check-test EXCLUDE_FROM_ALL ../tests/test_cpu_check.c)
-    set_target_properties(cpu-check-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(cpu-check-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(cpu-check-test PRIVATE .. ../src)
-    # isa_emulate runs inside guest code: no XMM/YMM. The test runs the real instructions as its oracle.
-    add_executable(isa-emulate-test EXCLUDE_FROM_ALL ../tests/test_isa_emulate.c ../src/isa_emulate.c)
-    set_source_files_properties(../src/isa_emulate.c PROPERTIES COMPILE_OPTIONS "-mgeneral-regs-only")
-    set_source_files_properties(../tests/test_isa_emulate.c PROPERTIES COMPILE_OPTIONS "-mbmi;-mlzcnt;-mmovbe")
-    set_target_properties(isa-emulate-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(isa-emulate-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(isa-emulate-test PRIVATE .. ../src)
-    # Stubs and patched sites run for real in an RWX region; the fixture path is the first argument.
-    add_executable(isa-stub-test EXCLUDE_FROM_ALL ../tests/test_isa_stub.c ../src/isa_rewrite.c ../src/isa_emulate.c)
-    set_source_files_properties(../tests/test_isa_stub.c PROPERTIES COMPILE_OPTIONS "-mbmi;-mlzcnt")
-    set_target_properties(isa-stub-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(isa-stub-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(isa-stub-test PRIVATE .. ../src)
-    target_link_libraries(isa-stub-test PRIVATE bcrypt -pthread)
-    add_executable(tsc-clock-test EXCLUDE_FROM_ALL ../tests/test_tsc_clock.c ../src/compat_win.c)
-    set_target_properties(tsc-clock-test PROPERTIES C_STANDARD 11 C_EXTENSIONS OFF)
-    target_compile_options(tsc-clock-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_include_directories(tsc-clock-test PRIVATE .. ../src)
-    target_link_libraries(tsc-clock-test PRIVATE bcrypt -pthread)
-    add_executable(gow3-gpu-capabilities ../tools/gpu_capabilities.c ../packaging/windows/gow3-gpu-capabilities.rc)
-    target_include_directories(gow3-gpu-capabilities PRIVATE shadps4)
-    target_link_libraries(gow3-gpu-capabilities PRIVATE Vulkan::Vulkan)
-    # "Play God of War III.exe": the game with the launcher's saved settings, no launcher window.
-    add_executable(gow3-play WIN32 ../packaging/windows/play.c ../packaging/windows/play.rc)
-    target_compile_options(gow3-play PRIVATE -municode)
-    target_link_options(gow3-play PRIVATE -municode)
 endif()
 
 # Explicit test targets; neither launches the game nor needs a Vulkan device.
@@ -451,7 +375,6 @@ target_compile_options(camera-motion-test PRIVATE -UNDEBUG -fPIC)
 target_link_libraries(camera-motion-test PRIVATE gow3gpu)
 add_dependencies(camera-motion-test host_shaders)
 
-# gow3: FSR 4 benchmark outside the game (tools/fsr4_bench.cpp): ninja -C out/gpu fsr4-bench.
 add_executable(upscaler-support-test EXCLUDE_FROM_ALL ../tests/test_upscaler_support.cpp
     shim/gow3_settings.cpp)
 target_include_directories(upscaler-support-test PRIVATE shim)
@@ -492,11 +415,6 @@ add_executable(page-state-test EXCLUDE_FROM_ALL ../tests/test_page_state.cpp)
 target_include_directories(page-state-test PRIVATE ../tests/stubs shim shadps4)
 target_link_libraries(page-state-test PRIVATE Boost::headers)
 target_compile_options(page-state-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-
-add_executable(fsr4-bench EXCLUDE_FROM_ALL tools/fsr4_bench.cpp
-    shadps4/video_core/renderer_vulkan/fsr411/fsr411.cpp)
-target_include_directories(fsr4-bench PRIVATE shadps4/video_core/renderer_vulkan/fsr411)
-target_link_libraries(fsr4-bench PRIVATE ffx-vulkan::fsr4-v07-vulkan ffx-vulkan::fsr4-v07-assets Vulkan::Vulkan)
 
 add_executable(cheat-hook-test EXCLUDE_FROM_ALL ../tests/test_cheat_hook.cpp)
 target_compile_options(cheat-hook-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
@@ -598,6 +516,13 @@ if(APPLE)
 endif()
 
 if(APPLE)
+    add_executable(framegen-inputs-test EXCLUDE_FROM_ALL ../tests/test_framegen_inputs.cpp ../tests/test_gpu_runtime_stubs.cpp)
+    target_include_directories(framegen-inputs-test PRIVATE shim shadps4 ${SHADER_INCLUDE} third_party/gcn/include)
+    target_compile_options(framegen-inputs-test PRIVATE -UNDEBUG -fPIC)
+    set_source_files_properties(../tests/test_framegen_inputs.cpp PROPERTIES COMPILE_OPTIONS "-fvisibility=hidden;-fvisibility-inlines-hidden")
+    target_link_libraries(framegen-inputs-test PRIVATE gow3gpu)
+    target_link_options(framegen-inputs-test PRIVATE -Wl,-export_dynamic)
+    add_dependencies(framegen-inputs-test host_shaders)
     add_executable(frame-interpolator-test EXCLUDE_FROM_ALL ../tests/test_frame_interpolator.cpp ../tests/test_gpu_runtime_stubs.cpp)
     target_include_directories(frame-interpolator-test PRIVATE shim shadps4 third_party/gcn/include)
     target_compile_options(frame-interpolator-test PRIVATE -UNDEBUG -fPIC)

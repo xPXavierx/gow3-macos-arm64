@@ -214,7 +214,7 @@ void ObjectMotion::EnsureImage(u32 width, u32 height) {
     image = VideoCore::UniqueImage(device, instance.GetAllocator());
     image.Create(vk::ImageCreateInfo{
         .imageType = vk::ImageType::e2D,
-        .format = FrameGen::Requested()?vk::Format::eR16G16B16A16Sfloat:vk::Format::eR32G32B32A32Sfloat,
+        .format = FrameGen::CompactMotion() ? vk::Format::eR16G16Sfloat : FrameGen::Requested()?vk::Format::eR16G16B16A16Sfloat:vk::Format::eR32G32B32A32Sfloat,
         .extent = {width, height, 1},
         .mipLevels = 1,
         .arrayLayers = 1,
@@ -227,7 +227,7 @@ void ObjectMotion::EnsureImage(u32 width, u32 height) {
     view = Check(device.createImageViewUnique({
         .image = vk::Image(image),
         .viewType = vk::ImageViewType::e2D,
-        .format = FrameGen::Requested()?vk::Format::eR16G16B16A16Sfloat:vk::Format::eR32G32B32A32Sfloat,
+        .format = FrameGen::CompactMotion() ? vk::Format::eR16G16Sfloat : FrameGen::Requested()?vk::Format::eR16G16B16A16Sfloat:vk::Format::eR32G32B32A32Sfloat,
         .subresourceRange = {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1},
     }));
     image_width = width;

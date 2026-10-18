@@ -1,4 +1,10 @@
-# Experimental local texture replacement
+# Retired texture replacement experiment
+
+**Inactive since 2026-10-18.** Local generated packs and the texture test app were
+deleted at the user’s request. No pack ships with either application. This document
+records the implemented source format and validation for future developers; it is
+not an installation guide for an available HD texture feature.
+
 
 This opt-in developer feature is separate from the 0.4.0 application download.
 The local expanded experiment covers Kratos and the POS050 opening area, including

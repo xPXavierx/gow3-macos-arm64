@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest something that isn't a bug, e.g. new platform support, settings, QoL
+description: Suggest an improvement to the macOS Apple Silicon port
 labels: ["enhancement"]
 body:
   - type: textarea

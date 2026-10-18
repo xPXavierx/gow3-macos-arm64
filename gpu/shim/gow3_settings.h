@@ -28,7 +28,7 @@ inline constexpr int OutputCount = 4;
 inline constexpr int OutputDefault = 1; ///< 1920x1080, the game's own size
 
 struct Values {
-    std::atomic<int> upscaler{UpscalerFsr3};
+    std::atomic<int> upscaler{UpscalerOff};
     std::atomic<int> preset{NativeAA};
     std::atomic<bool> sharpen{true};
     std::atomic<float> sharpness{0.3f};
@@ -109,7 +109,7 @@ struct Values {
 
     /// Startup settings for the explicit GOW3_RENDER_RES compatibility patch only.
     int startup_preset = NativeAA;
-    int startup_upscaler = UpscalerFsr3;
+    int startup_upscaler = UpscalerOff;
     bool startup_object_motion = true;
     int startup_output_res = OutputDefault;
     int startup_live_resolution = 0;

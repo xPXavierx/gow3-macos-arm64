@@ -70,14 +70,14 @@ class GraphicsOptionsTest(unittest.TestCase):
 
     def test_resolution_labels_show_the_size_and_aspect_ratio(self):
         self.assertEqual(g.resolution_label('native'), 'Native · 1920 × 1080 · 16:9')
-        self.assertEqual(g.resolution_label('480p'), '480p · 854 × 480 · 16:9')
-        self.assertEqual(g.resolution_label('3440x1440'), '3440 × 1440 · 21:9 (beta)')
-        self.assertEqual(g.resolution_label('5120x1440'), '5120 × 1440 · 32:9 (beta)')
-        self.assertEqual(g.resolution_label('2560x1600'), '2560 × 1600 · 16:10 (beta)')
+        self.assertEqual(g.resolution_label('720p'), '720p · 1280 × 720 · 16:9')
+        self.assertEqual(g.resolution_label('3440x1440'), '3440 × 1440 · 21:9')
+        self.assertEqual(g.resolution_label('5120x1440'), '5120 × 1440 · 32:9')
+        self.assertEqual(g.resolution_label('2560x1600'), '2560 × 1600 · 16:10')
         self.assertEqual(g.resolution_label('3840x1080'), '3840 × 1080 · 32:9')  # a mod's size, not beta
         self.assertEqual(g.resolution_label('1600x1200'), '1600 × 1200 · 4:3')
         self.assertEqual(g.resolution_label('custom'), 'custom')
-        # Every ultrawide and 16:10 size is beta; the 16:9 ones are not.
+        # Built-in Mac presets are 16:9; custom labels do not claim support.
         self.assertEqual([r for r in g.RESOLUTIONS if g.resolution_label(r).endswith('(beta)')],
                          list(g.BETA_RESOLUTIONS))
 

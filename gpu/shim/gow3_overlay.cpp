@@ -104,6 +104,7 @@ float base_scale = 1.0f;
 std::chrono::steady_clock::time_point last_present{};
 float frame_ms_avg = 0.0f;
 std::atomic<bool> framegen_rates_available{false};
+std::atomic<uint64_t> framegen_size{0};
 std::atomic<float> rendered_fps{},generated_fps{};
 
 void SetOpen(bool value) {
@@ -361,10 +362,18 @@ std::string OverlayText() {
         if (!text.empty()) text += '\n';
         text += info;
     }
-    if (framegen_rates_available && (items & P::Fps)) {
-        char rates[112];
-        std::snprintf(rates, sizeof(rates), "\nRendered: %.1f FPS | Generated: %.1f FPS",
-                      rendered_fps.load(), generated_fps.load());
+    if (framegen_rates_available && ((items & P::Fps) || display_hud)) {
+        static const std::string language = [] {
+            const char* value = std::getenv("GOW3_LAUNCHER_LANGUAGE");
+            return std::string(value ? value : "en");
+        }();
+        const char* format = language == "pt-BR" ? "\nFPS reais: %.1f | Gerados: %.1f\nFG: %ux%u" :
+            language == "es" ? "\nFPS reales: %.1f | Generados: %.1f\nFG: %ux%u" :
+            "\nRendered FPS: %.1f | Generated: %.1f\nFG: %ux%u";
+        const auto size = framegen_size.load();
+        char rates[160];
+        std::snprintf(rates, sizeof(rates), format, rendered_fps.load(), generated_fps.load(),
+                      unsigned(size >> 32), unsigned(size));
         text += rates;
     }
     return text;
@@ -524,15 +533,10 @@ void PerformanceTab() {
     }
     ImGui::SeparatorText("Applied on restart");
     if (BeginRows("##restart")) {
-        // The built-in sizes, then those of the enabled mods' patch files (ultrawide, for one).
-        // The same labels as the launcher (graphics_options.resolution_label): name, exact size, aspect ratio.
+        // Built-in Mac sizes, followed by this prepared profile's exact MetalFX input size.
         static const char* const builtin_labels[] = {
-            "Native · 1920 × 1080 · 16:9", "480p · 854 × 480 · 16:9",
-            "720p · 1280 × 720 · 16:9", "1440p · 2560 × 1440 · 16:9",
-            "1800p · 3200 × 1800 · 16:9", "4K · 3840 × 2160 · 16:9",
-            "2560 × 1080 · 21:9 (beta)", "3440 × 1440 · 21:9 (beta)",
-            "3840 × 1600 · 21:9 (beta)", "5120 × 1440 · 32:9 (beta)",
-            "1920 × 1200 · 16:10 (beta)", "2560 × 1600 · 16:10 (beta)"};
+            "Native · 1920 × 1080 · 16:9", "720p · 1280 × 720 · 16:9",
+            "1440p · 2560 × 1440 · 16:9", "4K · 3840 × 2160 · 16:9"};
         static_assert(std::size(builtin_labels) == G::Resolutions.size());
         const std::vector<std::string> resolution_names = G::ResolutionNames();
         std::vector<const char*> resolution_labels;
@@ -946,7 +950,8 @@ void Notice() {
 
 } // namespace
 
-void SetFrameGenerationRates(float rendered, float generated) {
+void SetFrameGenerationRates(float rendered, float generated, unsigned width, unsigned height) {
+    framegen_size.store((uint64_t(width) << 32) | height);
     rendered_fps = rendered;
     generated_fps = generated;
     framegen_rates_available = true;

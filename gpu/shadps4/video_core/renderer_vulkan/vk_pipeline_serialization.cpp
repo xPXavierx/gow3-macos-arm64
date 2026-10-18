@@ -34,7 +34,7 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 26u; // explicit rounded scalar math on native MoltenVK vertex/fragment stages
+static constexpr u32 ShaderBinaryVersion = 28u; // motion validity resolved before compact RG16 storage
 // // gow3: interpolated integer fix (Pascal)
 // The serialized SRT walker has a different representation on ARM64.
 #if defined(ARCH_ARM64)

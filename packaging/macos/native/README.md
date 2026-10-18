@@ -468,8 +468,7 @@ shipping sources after collecting evidence. Bounded opt-in image tracing remains
 
 ## Dependencies and builds
 
-Start from gow3_pc `7180a7bafa51afbe991523f6392f69ea1cf03e1e` with the
-consolidated port patch applied. Install ARM64 SDL3, FFmpeg, Vulkan headers/loader,
+Start from this fork's `macos-arm64` branch (the port changes are already applied). Install ARM64 SDL3, FFmpeg, Vulkan headers/loader,
 CMake >=3.24 and Ninja; Apple Clang, Python 3 and Git are required.
 A Homebrew installation under `/opt/homebrew` can provide the host dependencies:
 

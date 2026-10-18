@@ -201,6 +201,12 @@ void Load() {
             Set(v, key, value);
         }
     }
+#ifdef __APPLE__
+    if (v.upscaler != UpscalerOff) {
+        std::puts("macOS: legacy temporal upscalers are not included; select spatial MetalFX in the launcher");
+        v.upscaler = UpscalerOff;
+    }
+#endif
     v.startup_preset = v.preset;
     v.startup_upscaler = v.upscaler;
     v.startup_object_motion = v.object_motion;

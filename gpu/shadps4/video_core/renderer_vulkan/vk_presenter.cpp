@@ -586,7 +586,15 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
 
 #ifdef __APPLE__
 vk::ImageView Presenter::UpscaleMetalFx(vk::ImageView perceptual_view, vk::CommandBuffer& cmd,
-        vk::Extent2D& size, bool encoded_srgb, bool dump, int index) {
+        vk::Extent2D& size, bool encoded_srgb, bool dump, int index, bool generated) {
+    // Real and reduced generated frames have different input dimensions. Keep
+    // their native scaler objects alive instead of rebuilding one twice per flip.
+    auto& scaler = generated ? metalfx_generated : metalfx;
+    if (!scaler) {
+        scaler = std::make_unique<MetalFx>(instance.GetInstance(), instance.GetDevice(),
+            VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr);
+        ASSERT_MSG(scaler->Available(), "MetalFX generated-frame scaler unavailable");
+    }
     if (!metalfx_output) {
         draw_scheduler.Finish();
         cmd = draw_scheduler.CommandBuffer();
@@ -606,7 +614,7 @@ vk::ImageView Presenter::UpscaleMetalFx(vk::ImageView perceptual_view, vk::Comma
             .components={vk::ComponentSwizzle::eIdentity,vk::ComponentSwizzle::eIdentity,vk::ComponentSwizzle::eIdentity,vk::ComponentSwizzle::eOne},
             .subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}}));
     }
-    ASSERT_MSG(metalfx->Configure(size.width,size.height,metalfx_width,metalfx_height,
+    ASSERT_MSG(scaler->Configure(size.width,size.height,metalfx_width,metalfx_height,
         perceptual_view,vk::Image(metalfx_output)),"MetalFX spatial scaler configuration failed");
     vk::ImageMemoryBarrier2 barrier{
         .srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,
@@ -618,11 +626,11 @@ vk::ImageView Presenter::UpscaleMetalFx(vk::ImageView perceptual_view, vk::Comma
         .srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
         .image=vk::Image(metalfx_output),.subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}};
     cmd.pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&barrier});
-    const u64 value=metalfx->NextValue();
-    SubmitInfo ready{};ready.AddSignal(metalfx->ReadySemaphore(),value);
+    const u64 value=scaler->NextValue();
+    SubmitInfo ready{};ready.AddSignal(scaler->ReadySemaphore(),value);
     draw_scheduler.Flush(ready);
-    ASSERT_MSG(metalfx->Encode(perceptual_view,vk::Image(metalfx_output),value),"MetalFX spatial GPU encode failed");
-    draw_scheduler.WaitExternal(metalfx->DoneSemaphore(),value);
+    ASSERT_MSG(scaler->Encode(perceptual_view,vk::Image(metalfx_output),value),"MetalFX spatial GPU encode failed");
+    draw_scheduler.WaitExternal(scaler->DoneSemaphore(),value);
     cmd=draw_scheduler.CommandBuffer();
     barrier.oldLayout=vk::ImageLayout::eGeneral;
     barrier.srcAccessMask=vk::AccessFlagBits2::eMemoryWrite;
@@ -722,7 +730,7 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
     runtime.Transit(&ui, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eAllCommands,
                     vk::AccessFlagBits2::eShaderRead);
     runtime.FlushBarriers();
-    const auto resources = inputs->Inputs(ui_handle);
+    const auto resources = inputs->Inputs(inputs->PrepareUI(ui_handle,cmd));
     auto parameters = inputs->Parameters();
     const auto temporal_size = inputs->TemporalSize();
     const bool configured =
@@ -774,7 +782,9 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
     }
     draw_scheduler.WaitExternal(frame_interpolator->DoneSemaphore(), value);
     cmd = draw_scheduler.CommandBuffer();
-    if (dump) {
+    if (dump && frame_interpolator->OutputInterpolated()) {
+        std::printf("Framegen capture: interpolated=1 delta=%.6f color=%ux%u\n",
+                    parameters.delta_seconds, size.width, size.height);
         b.oldLayout = vk::ImageLayout::eGeneral;
         b.newLayout = vk::ImageLayout::eGeneral;
         b.dstAccessMask = vk::AccessFlagBits2::eTransferRead;
@@ -806,7 +816,7 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
                 interpolation_initialized = false;
             }
             output = UpscaleMetalFx(aa ? spatial_aa.PerceptualView() : *interpolation_view, cmd,
-                                    output_size, true, false, 0);
+                                    output_size, true, false, 0, true);
         } else if (aa)
             spatial_aa.PrepareForVulkan(cmd);
         const vk::ImageMemoryBarrier2 target{
@@ -1242,7 +1252,8 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
             std::chrono::duration<double>(now - interpolation_stats_time).count();
         if (seconds >= 5) {
             Gow3Overlay::SetFrameGenerationRates(float(interpolation_real_count / seconds),
-                                                 float(interpolation_generated_count / seconds));
+                                                 float(interpolation_generated_count / seconds),
+                                                 interpolation_size.width, interpolation_size.height);
             std::printf("Framegen stats: real=%.3f generated=%.3f presents=%.3f per second "
                         "(submission counters; actual presentation is in Display timing)\n",
                         interpolation_real_count / seconds, interpolation_generated_count / seconds,

@@ -182,14 +182,19 @@ static void EmitFragmentMotion(EmitContext& ctx) {
         ctx.OpFOrdGreaterThan(ctx.U1[1], ctx.OpCompositeExtract(f32_type, current, 3u), epsilon));
     const Id valid = ctx.OpSelect(f32_type, front,
                                   ctx.OpCompositeExtract(f32_type, previous, 2u), zero);
+    // Resolve interpolated history validity before storing motion. A compact RG16
+    // attachment can then represent invalid history as (0,0), exactly matching
+    // the compositor's previous validity-channel threshold without storing Z/W.
+    const Id rounded_valid = ctx.OpQuantizeToF16(f32_type, valid);
+    const Id usable = ctx.OpFOrdGreaterThan(ctx.U1[1], rounded_valid, ctx.Constant(f32_type, 0.99f));
     // Uninstrumented draws can overwrite the final scene depth after this pixel was
     // written. Preserve depth so the compose pass can reject an occluded vector.
     const Id depth = ctx.OpCompositeExtract(f32_type,
                                             ctx.OpLoad(ctx.F32[4], ctx.frag_coord), 2u);
     ctx.OpStore(ctx.motion_frag_out,
                 ctx.OpCompositeConstruct(ctx.F32[4], std::array<Id, 4>{
-                    ctx.OpSelect(f32_type, front, dx, zero),
-                    ctx.OpSelect(f32_type, front, dy, zero), valid, depth}));
+                    ctx.OpSelect(f32_type, usable, dx, zero),
+                    ctx.OpSelect(f32_type, usable, dy, zero), valid, depth}));
 }
 
 void EmitEpilogue(EmitContext& ctx) {

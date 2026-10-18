@@ -38,7 +38,7 @@ subprocess.run(['/usr/bin/xcrun', 'swiftc', '-O', '-target', 'arm64-apple-macos1
     '-o', str(resources/'DisplayMode')], check=True)
 plist = {'CFBundleExecutable':'GOW3Launcher','CFBundleIdentifier':'org.gow3pc.launcher',
     'CFBundleName':'God of War III','CFBundleDisplayName':'God of War III · Apple Silicon',
-    'CFBundlePackageType':'APPL','CFBundleVersion':'3','CFBundleShortVersionString':'0.3.1',
+    'CFBundlePackageType':'APPL','CFBundleVersion':'5','CFBundleShortVersionString':'0.4.1',
     'LSMinimumSystemVersion':'26.0','LSArchitecturePriority':['arm64'],
     'LSApplicationCategoryType':'public.app-category.games','LSSupportsGameMode':True,
     'GCSupportsGameMode':True,'NSHighResolutionCapable':True,

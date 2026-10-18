@@ -1,5 +1,9 @@
 # macOS ARM64 port: gameplay milestone and remaining limits
 
+The current supported product is described in the [main README](../README.md) and
+[status/roadmap](macos-roadmap.md). The dated entries below retain the evidence
+and limitations of earlier checkpoints; older unmet milestones are historical.
+
 ## Native 4K scalar shader optimization — 2026-10-17
 
 Native MoltenVK vertex/fragment programs now emit the exact explicit fma bodies
@@ -30,7 +34,7 @@ scalar-operation comparisons, normalized/full-range color conversion under both
 strategies, constant aliases, detiling and depth/stencil blitting. Six synthetic
 SPIR-V modules pass spirv-val. Game-owned frozen-pose captures preserve the
 character/world appearance; numerical pixel deltas and diagnostic caveats are
-reported separately. See [GPU profiling and precision checks](GPU_PROFILING.md).
+reported separately. See [GPU profiling and precision checks](../packaging/macos/native/GPU_PROFILING.md).
 
 
 ## Native MetalFX frame interpolation — experimental — 2026-10-17

@@ -1,50 +1,35 @@
-name: Game won't launch / crashes on startup
-description: Black screen, instant close, "prepare failed", param.sfo errors, etc.
+name: macOS preparation or startup failure
+description: Dump selection, first-run compilation, or an ARM64 startup diagnostic
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Most launch failures come from an incomplete or misplaced game dump (missing `param.sfo`,
-        wrong update version, wrong folder selected). Check the README's setup section before
-        filing, it covers the folder layout the launcher expects.
-
+        Tested game: CUSA01623 v1.02, identified by executable/module hashes.
+        Other versions are not validated. Do not upload the dump, saves or generated game code.
   - type: input
-    id: version
+    id: mac
     attributes:
-      label: Port version
-      placeholder: v2.1.7
+      label: Mac chip, memory, macOS and app version
     validations:
       required: true
-
   - type: input
     id: game_version
     attributes:
-      label: Game build / update version
-      description: e.g. 01.00, 01.02, region (CUSA01623, CUSA01715, CUSA01740...)
+      label: Game title ID and update version
+      description: "The tested extracted metadata reports APP_VER 01.00; hashes are authoritative."
     validations:
       required: true
-
-  - type: textarea
-    id: folder
-    attributes:
-      label: Selected game folder
-      description: Screenshot of the folder you pointed the launcher at, showing eboot.bin, sce_sys and sce_module.
-    validations:
-      required: true
-
   - type: textarea
     id: error
     attributes:
-      label: Exact error message
-      description: Copy the full text shown by the launcher or the game window, don't paraphrase it.
+      label: Exact error and steps to reproduce
     validations:
       required: true
-
   - type: textarea
     id: log
     attributes:
-      label: user/last_run.log
-      description: Attach the file from the port's folder.
+      label: Session or preparation log
+      description: "Use the launcher's Open logs button. Data is in ~/Library/Application Support/God of War III ARM64. Review local paths before sharing."
     validations:
       required: true

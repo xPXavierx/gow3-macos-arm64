@@ -1018,11 +1018,13 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
         key.mrt_mask |= 1u << mv;
         key.num_color_attachments = mv + 1;
         auto& color_buffer = key.color_buffers[mv];
-        color_buffer.data_format = FrameGen::Requested()?AmdGpu::DataFormat::Format16_16_16_16:AmdGpu::DataFormat::Format32_32_32_32;
+        color_buffer.data_format = FrameGen::CompactMotion() ? AmdGpu::DataFormat::Format16_16 : FrameGen::Requested()?AmdGpu::DataFormat::Format16_16_16_16:AmdGpu::DataFormat::Format32_32_32_32;
         color_buffer.num_format = AmdGpu::NumberFormat::Float;
         color_buffer.swizzle = AmdGpu::IdentityMapping;
         key.write_masks[mv] = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
                               vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA;
+        if (FrameGen::CompactMotion())
+            key.write_masks[mv] = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG;
         key.color_samples[mv] = 1;
     }
 

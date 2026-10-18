@@ -1,68 +1,54 @@
-name: Bug report
-description: Visual glitch, crash, audio issue, or anything that doesn't behave as expected
+name: macOS bug or performance issue
+description: ARM64 crashes, visual/audio/input problems, or uneven frame times
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Before opening: search existing issues for your GPU/error first, it may already be tracked.
-
+        This tracker is for the Apple Silicon port. Include the exact diagnostic;
+        a runtime failure does not by itself indicate a corrupt dump. Do not upload game files or saves.
   - type: input
-    id: version
+    id: app_version
     attributes:
-      label: Port version
-      description: Shown in the launcher title bar (e.g. v2.1.7)
-      placeholder: v2.1.7
+      label: App version or source commit
+      placeholder: "0.4.1 or commit hash"
     validations:
       required: true
-
   - type: input
-    id: gpu
+    id: mac
     attributes:
-      label: GPU and driver version
-      placeholder: "RX 6600, Adrenalin 26.8.1"
+      label: Mac model, chip and memory
+      placeholder: "MacBook Pro, M3 Max, 36 GB"
     validations:
       required: true
-
   - type: input
-    id: cpu
+    id: macos
     attributes:
-      label: CPU
-      placeholder: "Ryzen 7 5700X"
+      label: macOS version
     validations:
       required: true
-
+  - type: input
+    id: settings
+    attributes:
+      label: Resolution, MetalFX, FPS cap and display refresh rate
+      placeholder: "4K output, Quality, 60 FPS, automatic 60 Hz"
+    validations:
+      required: true
   - type: textarea
     id: description
     attributes:
-      label: What happened
-      description: What you expected vs what actually happened
+      label: What happened and how to reproduce it
     validations:
       required: true
-
-  - type: textarea
-    id: repro
-    attributes:
-      label: Steps to reproduce
-      placeholder: |
-        1.
-        2.
-        3.
-    validations:
-      required: true
-
   - type: textarea
     id: log
     attributes:
-      label: user/last_run.log
-      description: Attach the file from the port's folder (drag and drop it here). Required for crashes, black screens, graphics glitches and performance issues.
+      label: Session diagnostic
+      description: "Use Open logs in the launcher. Review local paths before sharing. Include the exact error and real/generated FPS when relevant."
     validations:
-      required: false
-
+      required: true
   - type: textarea
-    id: screenshots
+    id: capture
     attributes:
-      label: Screenshots or video
-      description: Especially for visual glitches, attach the raw in-game capture, not a photo of the screen when possible.
-    validations:
-      required: false
+      label: Optional game capture
+      description: "For visual issues, attach a capture from the game itself."

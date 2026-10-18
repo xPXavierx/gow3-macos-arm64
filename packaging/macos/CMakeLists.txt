@@ -1,7 +1,7 @@
-# Native host components only. This deliberately does not build gow3-probe or
-# gow3gpu: neither has an ARM64 guest execution backend.
+# Host component checks. The playable native host/renderer are built separately
+# by packaging/macos/native and gpu; this harness does not start a game.
 cmake_minimum_required(VERSION 3.24)
-# Also produce ARM64 when CMake itself is an Intel binary running via Rosetta.
+# All host test executables target Apple Silicon.
 set(CMAKE_OSX_ARCHITECTURES arm64 CACHE STRING "Host component target architecture")
 project(gow3_host_components LANGUAGES C)
 if(NOT APPLE)

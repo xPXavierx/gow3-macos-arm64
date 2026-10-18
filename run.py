@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Prepare and launch gow3-probe; run.sh wraps this on Linux.
+"""Prepare and supervise the native ARM64 game process on macOS.
 
 GOW3_NATIVE_AOT_DIR selects a prepared macOS ARM64 image. It uses the same game
 startup rules, validating rather than overwriting inputs compiled ahead of time.
@@ -168,10 +168,7 @@ def launch(native=None):
     derived = []
     sys.path.insert(0, str(PORT / 'scripts'))
     import graphics_options
-    try:
-        import discord_presence
-    except Exception:
-        discord_presence = None
+    discord_presence = None  # The macOS application has no Discord integration.
     import mods
     import patches
     # The enabled mods' patch files: their "Resolution Patch - <size>" entries are render resolutions too

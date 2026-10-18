@@ -55,7 +55,7 @@ controller uses its normal south face button. Existing saves are not bundled.
 - English on a fresh install; English, Brazilian Portuguese and Spanish thereafter.
 - 720p/1080p/1440p/4K, native or spatial MetalFX Quality/Balanced/Performance.
 - 60 FPS or Unlimited (upstream 240 FPS engine profile plus FIFO V-Sync).
-- With the 60 FPS cap, the launcher temporarily selects a matching 60 Hz mode
+- With the 60 FPS cap and frame generation off, the launcher temporarily selects a matching 60 Hz mode
   on the main display, preserving resolution and Retina scale. It restores the
   previous mode at exit. The public CoreGraphics configuration is app-scoped,
   so macOS also restores it if the helper crashes. If no matching mode exists,
