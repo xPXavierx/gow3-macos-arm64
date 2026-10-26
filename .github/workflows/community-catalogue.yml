@@ -1,0 +1,39 @@
+name: Validate community catalogue
+on:
+  issues:
+    types: [opened, edited]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: catalogue-${{ github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.issue.title, '[Shader catalogue]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Fixed trusted default branch. Never check out a contributor's code/PR.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: macos-arm64
+          persist-credentials: false
+      - name: Test catalogue validator
+        env:
+          PYTHONPATH: tests
+        run: python3 -B -m unittest test_community_catalog test_catalog_service
+      - name: Validate attachment as data only
+        if: github.event_name == 'issues'
+        run: python3 -B tools/review_community_catalog.py --event "$GITHUB_EVENT_PATH" --output "$RUNNER_TEMP/catalogue-review"
+      - name: Store validated data for maintainer review
+        if: github.event_name == 'issues'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: catalogue-review-${{ github.event.issue.number }}
+          path: |
+            ${{ runner.temp }}/catalogue-review/validated-catalogue.jsonl
+            ${{ runner.temp }}/catalogue-review/review.json
+          retention-days: 14
+          if-no-files-found: error
+      # No publishing job, write token, signing key, automatic merge or GPU compiler.

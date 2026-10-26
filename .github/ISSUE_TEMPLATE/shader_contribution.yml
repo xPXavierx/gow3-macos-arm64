@@ -1,0 +1,28 @@
+name: Shader catalogue contribution
+description: Share discoveries prepared by the macOS ARM64 launcher / Compartilhar descobertas
+title: "[Shader catalogue] "
+labels: ["shader-catalogue"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use **Community catalogue → Contribute on GitHub** in the launcher.
+        It prepares a small text file and selects it in Finder. Drag that file below, then submit.
+        No dump, saves, logs, executables or archives. New data is reviewed before publication.
+
+        No launcher, use **Catálogo comunitário → Contribuir pelo GitHub**.
+        Arraste abaixo o arquivo de texto selecionado no Finder e confirme o envio.
+        Não envie dump, saves, logs, programas ou arquivos compactados.
+  - type: textarea
+    id: catalogue
+    attributes:
+      label: Contribution file / Arquivo de contribuição
+      description: Attach only GOW3-xxxxxxxxxxxxxxxxxxxx.txt prepared by the launcher.
+      placeholder: Drag the GOW3 .txt file here / Arraste aqui o arquivo .txt do GOW3
+    validations:
+      required: true
+  - type: textarea
+    id: areas
+    attributes:
+      label: Areas played (optional) / Trechos jogados (opcional)
+      description: Level names help the reviewer. Do not attach personal data or saves.
