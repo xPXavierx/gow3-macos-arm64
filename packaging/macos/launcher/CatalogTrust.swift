@@ -114,9 +114,9 @@ func selfTest() throws {
     rejects { _ = try verify(key:privateKey.publicKey.rawRepresentation,manifest:encoded,signature:signature,catalogue:Data("tampered".utf8),abi:m.abi) }
     rejects { _ = try verify(key:privateKey.publicKey.rawRepresentation,manifest:encoded,signature:signature,catalogue:data,abi:"0000000000000000") }
     rejects { _ = try verify(key:privateKey.publicKey.rawRepresentation,manifest:encoded,signature:signature,catalogue:data,abi:m.abi,now:now+2*86400) }
-    assert(!BoundedFetch.allowed(URL(string:"https://evil.invalid/catalogue")!))
-    assert(!BoundedFetch.allowed(URL(string:"http://raw.githubusercontent.com/xPXavierx/gow3-macos-arm64/community-catalog/v1/a")!))
-    assert(!BoundedFetch.allowed(URL(string:"https://raw.githubusercontent.com/xPXavierx/gow3-macos-arm64/community-catalog/v1/a?url=evil")!))
+    precondition(!BoundedFetch.allowed(URL(string:"https://evil.invalid/catalogue")!))
+    precondition(!BoundedFetch.allowed(URL(string:"http://raw.githubusercontent.com/xPXavierx/gow3-macos-arm64/community-catalog/v1/a")!))
+    precondition(!BoundedFetch.allowed(URL(string:"https://raw.githubusercontent.com/xPXavierx/gow3-macos-arm64/community-catalog/v1/a?url=evil")!))
     print("{\"signature_tampering_expiry_abi_origin_checks\":true}")
 }
 do {
