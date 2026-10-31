@@ -24,6 +24,27 @@ Xcode, Homebrew, Terminal, Rosetta ni internet durante la preparación. La firma
 ad-hoc, sin notarización de Apple. Consulta la [guía de instalación y
 compatibilidad](packaging/macos/launcher/COMMUNITY.md).
 
+## Shaders comunitarios
+
+El launcher actualizado tiene el panel **Shaders comunitarios**, con dos opciones:
+
+- **Descargar y preparar:** pulsa Jugar para la comprobación automática diaria o
+  **Actualizar catálogo oficial** para comprobarlo ahora. No exige cuenta de GitHub.
+  Actualizar solo descarga/verifica; los shaders y pipelines compatibles se preparan
+  desde tu propio dump al iniciar el juego y se guardan en la caché de este Mac.
+- **Compartir descubrimientos:** juega, vuelve al launcher y elige **Contribuir en
+  GitHub**. Finder selecciona el archivo de texto generado; inicia sesión, arrástralo
+  al formulario oficial y confirma. Abrir el navegador no realiza el envío.
+
+Las contribuciones se validan y revisan antes de entrar en el catálogo oficial firmado.
+No se comparten dumps, partidas, registros ni la caché compilada de GPU de otro jugador.
+La cobertura crece por toda la campaña; todavía no garantiza ausencia de stutter.
+
+**Disponibilidad:** el panel actualizado está en la build local 0.4.20; esta actualización
+de la app todavía no se ha publicado en GitHub. El servicio del catálogo ya está disponible.
+La [guía para jugadores](docs/community-shaders.es.md) explica todos los pasos y
+la diferencia entre actualizar, compilar y borrar la caché.
+
 ## Funciones implementadas
 
 - CPU compilada previamente a ARM64; sin Rosetta, JIT ni intérprete durante el

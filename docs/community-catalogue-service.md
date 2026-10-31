@@ -1,5 +1,9 @@
 # Community catalogue: submission, review and signed distribution
 
+For player instructions, start with [Community shaders](community-shaders.md)
+([Português brasileiro](community-shaders.pt-BR.md), [Español](community-shaders.es.md)).
+That guide explains downloads, local compilation and the browser attachment step.
+
 The launcher prepares new discoveries and opens the official GitHub contribution
 form. The player signs in, attaches the selected `GOW3-<digest>.txt`, and submits.
 This browser confirmation is intentional: the app stores no GitHub password or
@@ -51,7 +55,7 @@ Revision numbers strictly increase. Manifests expire after 90 days in the
 maintainer packaging tool. Refresh before expiry, even if only renewing unchanged
 descriptions; retain the same signing key or distribute a new app trust anchor.
 
-Players can use **Update official catalogue**. Before the first Play in a launcher
+Players can use **Community shaders → Update official catalogue**. Before the first Play in a launcher
 session, an optional daily check runs; a network failure falls back to local data.
 After a session, the launcher indicates newly discovered combinations and offers
 **Contribute on GitHub**. No automatic uploads or user authentication are needed

@@ -50,6 +50,20 @@ The game may ask to confirm brightness on a fresh save folder. With a keyboard,
 **Space** is Cross/Confirm (the on-screen X); Enter is Options. A connected
 controller uses its normal south face button. Existing saves are not bundled.
 
+## Community shaders
+
+The updated **Community shaders** panel explains receiving the official catalogue
+and sharing discoveries. Downloading needs no GitHub account; contributing needs
+a GitHub login and a manual attachment/confirmation in the browser. **Update official
+catalogue** downloads/verifies only; preparation runs when you click **Play**.
+Compiled results are local to your Mac and reused. Submissions require review before
+signed distribution and do not include dumps, saves, logs or compiled GPU programs.
+
+See the [player guide](../../../docs/community-shaders.md)
+([Português brasileiro](../../../docs/community-shaders.pt-BR.md),
+[Español](../../../docs/community-shaders.es.md)). It includes availability: the
+updated panel is currently validated locally as 0.4.20, not yet a GitHub app release.
+
 ## Settings and data
 
 - English on a fresh install; English, Brazilian Portuguese and Spanish thereafter.

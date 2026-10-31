@@ -6,18 +6,29 @@ body:
   - type: markdown
     attributes:
       value: |
-        Use **Community catalogue → Contribute on GitHub** in the launcher.
-        It prepares a small text file and selects it in Finder. Drag that file below, then submit.
-        No dump, saves, logs, executables or archives. New data is reviewed before publication.
+        **English:** play, exit the game, then choose **Community shaders → Contribute on GitHub**.
+        Confirm **Continue on GitHub**. Finder selects `GOW3-<digest>.txt`.
+        Drag that selected file into the field below, then click **Create** to submit.
+        Opening this page alone does not send a contribution.
+        [Full player guide](https://github.com/xPXavierx/gow3-macos-arm64/blob/macos-arm64/docs/community-shaders.md)
 
-        No launcher, use **Catálogo comunitário → Contribuir pelo GitHub**.
-        Arraste abaixo o arquivo de texto selecionado no Finder e confirme o envio.
-        Não envie dump, saves, logs, programas ou arquivos compactados.
+        **Português:** jogue, saia do jogo e use **Shaders comunitários → Contribuir pelo GitHub**.
+        Confirme **Continuar no GitHub**. Arraste abaixo o `GOW3-<digest>.txt` selecionado
+        no Finder e clique em **Create** para enviar. Apenas abrir esta página não faz o envio.
+        [Guia completo](https://github.com/xPXavierx/gow3-macos-arm64/blob/macos-arm64/docs/community-shaders.pt-BR.md)
+
+        **Español:** juega, sal del juego y usa **Shaders comunitarios → Contribuir en GitHub**.
+        Confirma **Continuar en GitHub**. Arrastra aquí el `GOW3-<digest>.txt` seleccionado
+        en Finder y pulsa **Create** para enviarlo. Abrir esta página no realiza el envío.
+        [Guía completa](https://github.com/xPXavierx/gow3-macos-arm64/blob/macos-arm64/docs/community-shaders.es.md)
+
+        No dumps, saves, logs, executables, compiled GPU caches or archives.
+        Passing validation means ready for maintainer review, not automatically published.
   - type: textarea
     id: catalogue
     attributes:
       label: Contribution file / Arquivo de contribuição
-      description: Attach only GOW3-xxxxxxxxxxxxxxxxxxxx.txt prepared by the launcher.
+      description: Attach only the GOW3 .txt selected in Finder / Anexe apenas o .txt selecionado / Adjunta solo el .txt seleccionado.
       placeholder: Drag the GOW3 .txt file here / Arraste aqui o arquivo .txt do GOW3
     validations:
       required: true
