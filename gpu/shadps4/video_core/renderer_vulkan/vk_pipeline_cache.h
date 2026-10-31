@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <unordered_map>
+#include <unordered_set>
 #include <shared_mutex>
 #include <variant>
 #include <boost/container/static_vector.hpp>
@@ -137,6 +138,15 @@ public:
     void StartOnDemand();
     void Sync();
     void ReportCompilerStats();
+    /// Diagnostic comparison only: the default completes every required draw.
+    static bool AllowsIncompleteDraws();
+    u64 PreparationGeneration() const noexcept {
+        return lookahead ? preparation_generation.load(std::memory_order_acquire) : 1;
+    }
+    void SetPreparationWake(std::function<void()> wake) {
+        std::scoped_lock lock{preparation_wake_mutex};
+        preparation_wake = std::move(wake);
+    }
 
     bool LoadComputePipeline(Serialization::Archive& ar);
     bool LoadGraphicsPipeline(Serialization::Archive& ar);
@@ -163,7 +173,7 @@ public:
     using Result = std::tuple<const Shader::Info*, vk::ShaderModule,
                               std::optional<Shader::Gcn::FetchShaderData>, u64>;
     Result GetProgram(PipelineSelection& sel, Shader::HwStage stage, Shader::SwStage l_stage,
-                      const Shader::ShaderParams& params, Shader::Backend::Bindings& binding);
+                      const Shader::ShaderParams& params, Shader::Backend::Bindings& binding, bool allow_alias = true);
 
     std::optional<vk::ShaderModule> ReplaceShader(vk::ShaderModule module,
                                                   std::span<const u32> spv_code);
@@ -184,6 +194,36 @@ private:
     void PublishGraphics(bool wait = false);
     void FinishCompilations();
     void SeedWorkerCaches();
+    void PrepareProgramAliases();
+    struct ProgramAlias {
+        u64 canonical{};
+        Shader::HwStage stage{};
+        std::shared_ptr<const std::vector<u32>> code;
+    };
+    std::unordered_map<u64, ProgramAlias> program_aliases;
+    std::unordered_map<u64, std::unordered_set<size_t>> alias_safe_modules;
+    std::unordered_map<u64, std::unordered_set<size_t>> material_modules;
+    std::atomic<bool> program_aliases_ready{false};
+    std::atomic<u64> program_alias_hits{}, program_alias_rejected{};
+    struct GraphicsLookahead;
+    std::unique_ptr<GraphicsLookahead> lookahead;
+    void PrepareAheadPipeline(const PipelineSelection& selection);
+    const GraphicsPipeline* TakeAheadPipeline(const PipelineSelection& selection);
+    void MarkPipelineKnown(const GraphicsPipelineKey& key);
+    void PrepareAheadShader(const Program& program, const Shader::Info& info,
+                            const Shader::ShaderParams& params,
+                            const Shader::StageSpecialization& spec);
+    bool TakeAheadShader(Program& program, const Shader::StageSpecialization& spec);
+    void PublishAhead();
+    void PublishAheadShader(Program& program, const std::shared_ptr<AsyncShaderCompilation>& build);
+    u32 ahead_pump_draws{};
+    void NotifyPreparation() {
+        preparation_generation.fetch_add(1, std::memory_order_release);
+        std::scoped_lock lock{preparation_wake_mutex};
+        if (preparation_wake) preparation_wake();
+    }
+    std::mutex preparation_wake_mutex;
+    std::function<void()> preparation_wake;
     bool CheckCacheProfile();
     struct BackgroundWarmup;
     struct WarmStage;
@@ -200,6 +240,14 @@ private:
                     std::string_view ext);
     std::optional<std::vector<u32>> GetShaderPatch(u64 hash, Shader::HwStage stage, size_t perm_idx,
                                                    std::string_view ext);
+    void ExportPipelineRecipe(const GraphicsPipelineKey& key,
+                              const GraphicsPipeline::SerializationSupport& data);
+    void ImportShaderCatalog(const std::function<void(u32, u32)>& progress);
+    void ExportShaderRecipe(const Shader::Info& info, const Shader::StageSpecialization& spec,
+                            size_t permutation, std::span<const u32> expected);
+    std::vector<u32> RecompileCatalogShader(const Shader::Info& recorded,
+                                          const Shader::StageSpecialization& specialization,
+                                          Shader::Info* rebuilt = nullptr);
     vk::ShaderModule CompileModule(Shader::Info& info, Shader::RuntimeInfo& runtime_info,
                                    const std::span<const u32>& code, size_t perm_idx,
                                    Shader::Backend::Bindings& binding);
@@ -221,6 +269,13 @@ private:
     Shader::Pools pools;
     CompilerPool<Shader::Pools> compiler_pools{8};
     std::unique_ptr<AsyncCompiler> compiler, capture_compiler;
+    std::unique_ptr<AsyncCompiler> community_recorder;
+    std::mutex community_record_mutex;
+    std::unordered_set<std::string> community_recorded;
+    void WriteShaderRecipe(const Shader::Info&, const Shader::StageSpecialization&, size_t,
+                           std::span<const u32>, const char* directory, bool community);
+    void WritePipelineRecipe(const GraphicsPipelineKey&, const GraphicsPipeline::SerializationSupport&,
+                             const char* directory, bool community);
     std::vector<vk::UniquePipelineCache> worker_pipeline_caches;
     bool worker_caches_seeded = false;
     /// gow3: GOW3_PARALLEL_WARMUP: WarmUp builds the cached pipelines on these threads.
@@ -236,6 +291,7 @@ private:
     std::vector<Program*> pending_programs;
     /// gow3: exclusive for program/permutation insertions, shared for worker lookups.
     std::shared_mutex programs_mutex;
+    std::atomic<u64> preparation_generation{1};
     u64 prepared_hits = 0, prepared_misses = 0;
     const PreparedDraw* used_prepared = nullptr;
     tsl::robin_map<ComputePipelineKey, std::unique_ptr<ComputePipeline>> compute_pipelines;

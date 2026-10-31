@@ -175,6 +175,24 @@ Id EmitImageGatherDref(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords,
     return texture.is_integer ? ctx.OpBitcast(ctx.F32[4], texels) : texels;
 }
 
+// A scaled sampled view carries the dimensions expected by guest shaders. Native
+// images use zero metadata. Integer fetches still query the real image directly.
+static Id LogicalSize(EmitContext& ctx, const EmitContext::TextureDefinition& texture, Id physical, Id lod) {
+    if (texture.view_type != AmdGpu::ImageType::Color2D || texture.is_storage ||
+        texture.size_binding >= PushData::ImageSizeCount) return physical;
+    const Id packed = ctx.OpLoad(ctx.U32[1], ctx.OpAccessChain(
+        ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U32[1]), ctx.push_data_block,
+        ctx.ConstU32(PushData::ImageSizesIndex), ctx.ConstU32(texture.size_binding)));
+    Id width = ctx.OpBitwiseAnd(ctx.U32[1], packed, ctx.ConstU32(65535u));
+    Id height = ctx.OpShiftRightLogical(ctx.U32[1], packed, ctx.ConstU32(16u));
+    if (Sirit::ValidId(lod)) {
+        width = ctx.OpUMax(ctx.U32[1], ctx.OpShiftRightLogical(ctx.U32[1], width, lod), ctx.ConstU32(1u));
+        height = ctx.OpUMax(ctx.U32[1], ctx.OpShiftRightLogical(ctx.U32[1], height, lod), ctx.ConstU32(1u));
+    }
+    const Id logical = ctx.OpCompositeConstruct(ctx.U32[2], width, height);
+    return ctx.OpSelect(ctx.U32[2], ctx.OpINotEqual(ctx.U1[1], packed, ctx.u32_zero_value), logical, physical);
+}
+
 Id EmitImageQueryDimensions(EmitContext& ctx, IR::Inst* inst, u32 handle, Id lod, bool has_mips) {
     const auto& texture = ctx.images[handle & 0xFFFF];
     const Id image = ctx.OpLoad(texture.image_type, texture.id);
@@ -192,7 +210,7 @@ Id EmitImageQueryDimensions(EmitContext& ctx, IR::Inst* inst, u32 handle, Id lod
     case AmdGpu::ImageType::Color1DArray:
     case AmdGpu::ImageType::Color2D:
     case AmdGpu::ImageType::Color2DMsaa:
-        return ctx.OpCompositeConstruct(ctx.U32[4], query(ctx.U32[2]), zero, mips());
+        return ctx.OpCompositeConstruct(ctx.U32[4], LogicalSize(ctx, texture, query(ctx.U32[2]), lod), zero, mips());
     case AmdGpu::ImageType::Color2DArray:
     case AmdGpu::ImageType::Color3D:
         return ctx.OpCompositeConstruct(ctx.U32[4], query(ctx.U32[3]), mips());
@@ -246,6 +264,28 @@ Id EmitImageRead(EmitContext& ctx, IR::Inst* inst, u32 handle, Id coords, Id lod
             }
             operands.Add(spv::ImageOperandsMask::Lod, lod);
             operands.Add(spv::ImageOperandsMask::Sample, ms);
+        }
+        if (texture.view_type == AmdGpu::ImageType::Color2D && texture.size_binding < PushData::ImageSizeCount) {
+            const Id packed = ctx.OpLoad(ctx.U32[1], ctx.OpAccessChain(
+                ctx.TypePointer(spv::StorageClass::PushConstant, ctx.U32[1]), ctx.push_data_block,
+                ctx.ConstU32(PushData::ImageSizesIndex), ctx.ConstU32(texture.size_binding)));
+            const Id previous = ctx.last_label, body = ctx.OpLabel(), merge = ctx.OpLabel();
+            const Id scaled_view = ctx.OpINotEqual(ctx.U1[1], packed, ctx.u32_zero_value);
+            ctx.OpSelectionMerge(merge, spv::SelectionControlMask::MaskNone);
+            ctx.OpBranchConditional(scaled_view, body, merge);
+            ctx.AddLabel(body);
+            const Id level = Sirit::ValidId(lod) ? lod : ctx.u32_zero_value;
+            const Id physical = ctx.OpImageQuerySizeLod(ctx.U32[2], image, level);
+            const Id logical = LogicalSize(ctx, texture, physical, level);
+            const Id ratio = ctx.OpFDiv(ctx.F32[2], ctx.OpConvertUToF(ctx.F32[2], physical),
+                                       ctx.OpConvertUToF(ctx.F32[2], logical));
+            const Id center = ctx.ConstantComposite(ctx.F32[2], ctx.ConstF32(.5f), ctx.ConstF32(.5f));
+            const Id pixel = ctx.OpFAdd(ctx.F32[2], ctx.OpConvertSToF(ctx.F32[2], ctx.OpBitcast(ctx.S32[2], coords)), center);
+            const Id scaled = ctx.OpBitcast(ctx.U32[2], ctx.OpConvertFToS(ctx.S32[2], ctx.OpFloor(ctx.F32[2], ctx.OpFMul(ctx.F32[2], pixel, ratio))));
+            const Id final_label = ctx.last_label;
+            ctx.OpBranch(merge);
+            ctx.AddLabel(merge);
+            coords = ctx.OpPhi(ctx.U32[2], coords, previous, scaled, final_label);
         }
         texel = ctx.OpImageFetch(color_type, image, coords, operands.mask, operands.operands);
     } else {

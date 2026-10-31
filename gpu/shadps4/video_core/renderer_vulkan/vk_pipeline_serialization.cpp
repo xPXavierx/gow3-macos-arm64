@@ -17,6 +17,7 @@
 #include <windows.h>
 #endif
 #include "common/serdes.h"
+#include "common/hash.h"
 #include "common/scope_exit.h"
 #include "video_core/renderer_vulkan/vk_pipeline_serialization.h"
 #include "common/thread.h"
@@ -34,13 +35,13 @@
 
 namespace Serialization {
 /* You should increment versions below once corresponding serialization scheme is changed. */
-static constexpr u32 ShaderBinaryVersion = 28u; // motion validity resolved before compact RG16 storage
+static constexpr u32 ShaderBinaryVersion = 33u; // preserve guest DEPTH_BEFORE_SHADER execution mode
 // // gow3: interpolated integer fix (Pascal)
 // The serialized SRT walker has a different representation on ARM64.
 #if defined(ARCH_ARM64)
-static constexpr u32 ShaderMetaVersion = 0x4152000eu; // RuntimeInfo scalar math strategy
+static constexpr u32 ShaderMetaVersion = 0x41520011u; // fragment specialization includes DEPTH_BEFORE_SHADER
 #else
-static constexpr u32 ShaderMetaVersion = 10u; // RuntimeInfo layout includes the optional scalar math strategy
+static constexpr u32 ShaderMetaVersion = 11u; // fragment specialization includes DEPTH_BEFORE_SHADER
 #endif // gow3: ImageResource::needs_native
 #if defined(ARCH_ARM64)
 static constexpr u32 PipelineKeyVersion = 0x4152000cu; // independent unused depth attachment
@@ -61,6 +62,13 @@ u32 CurrentShaderBinaryVersion() {
                                        AmdPathsOff::Current().shaderext));
 }
 } // namespace
+
+u64 ShaderCatalogABI() {
+    u64 result = HashCombine(u64(CurrentShaderBinaryVersion()), u64(Serialization::ShaderMetaVersion));
+    result = HashCombine(result, u64(Serialization::PipelineKeyVersion));
+    result = HashCombine(result, u64(sizeof(Shader::RuntimeInfo)));
+    return HashCombine(result, u64(sizeof(GraphicsPipelineKey)));
+}
 
 namespace PipelineBinaryCache {
 bool ValidKey(const Key& key) {
@@ -524,7 +532,7 @@ struct PipelineCache::WarmupPool {
     }
     static u32 Threads() {
         const char* env = std::getenv("GOW3_PARALLEL_WARMUP");
-        if (!env || !*env || *env == '0') {
+        if (env ? (!*env || *env == '0') : PipelineCache::AllowsIncompleteDraws()) {
             return 0;
         }
         const u32 cores = std::max(1u, std::thread::hardware_concurrency());
@@ -772,6 +780,9 @@ bool GraphicsPipeline::SerializationSupport::Deserialize(Serialization::Archive&
 }
 
 bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
+    sel.infos.fill(nullptr);
+    sel.modules.fill(nullptr);
+    sel.fetch_shader.reset();
     sel.graphics_key.Deserialize(ar);
 
     GraphicsPipeline::SerializationSupport sdata{};
@@ -796,6 +807,8 @@ bool PipelineCache::LoadGraphicsPipeline(Serialization::Archive& ar) {
             return false;
         }
     }
+
+    ExportPipelineRecipe(sel.graphics_key, sdata);
 
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
     ASSERT(is_new);
@@ -837,9 +850,9 @@ bool PipelineCache::LoadPipelineStage(Serialization::Archive& ar, size_t stage) 
     Storage::DataBase::Instance().Load(Storage::BlobType::ShaderBinary,
                                        fmt::format("{:#018x}_{}", program->info.pgm_hash, perm_idx),
                                        spv);
-    if (spv.empty()) {
-        return false;
-    }
+    if (spv.empty()) return false;
+
+    ExportShaderRecipe(program->info, spec, perm_idx, spv);
 
     // Permutation hash depends on shader variation index. To prevent collisions, we need insert it
     // at the exact position rather than append
@@ -922,9 +935,9 @@ bool PipelineCache::CheckCacheProfile() {
 }
 
 void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
-    if (!CheckCacheProfile()) {
-        return;
-    }
+    const bool existing = CheckCacheProfile();
+    ImportShaderCatalog(progress);
+    if (!existing && !std::getenv("GOW3_SHADER_CATALOG")) return;
 
     u32 num_pipelines{};
     u32 num_total_pipelines{};
@@ -999,6 +1012,7 @@ void PipelineCache::WarmUp(const std::function<void(u32, u32)>& progress) {
                 num_total_pipelines,
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(),
                 warmup_threads);
+    PrepareProgramAliases();
     LOG_INFO(Render, "Preloaded {} pipelines", num_pipelines);
     ReportPipelineBinaryCache();
     if (num_total_pipelines > num_pipelines) {

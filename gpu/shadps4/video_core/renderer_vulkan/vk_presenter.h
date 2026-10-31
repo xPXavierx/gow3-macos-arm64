@@ -46,6 +46,7 @@ struct Frame {
     vk::Format format{}; ///< gow3: of `image` (screenshots)
     std::unique_ptr<Frame> generated;
     bool has_generated{};
+    bool generated_async{};
 };
 
 enum SchedulerType {
@@ -128,13 +129,28 @@ private:
     vk::UniqueImageView interpolation_view,interpolation_linear;
     vk::Extent2D interpolation_size{};
     bool interpolation_initialized{};
+    struct InterpolationTarget {
+        VideoCore::UniqueImage output;
+        vk::UniqueImageView view, linear;
+        vk::Extent2D size{};
+        bool initialized{};
+    };
+    std::vector<InterpolationTarget> interpolation_targets;
+    std::unique_ptr<Scheduler> interpolation_scheduler;
+    vk::Extent2D interpolation_report_size{};
     std::chrono::steady_clock::time_point interpolation_stats_time{};
     u64 interpolation_real_count{},interpolation_generated_count{};
     vk::ImageView UpscaleMetalFx(vk::ImageView perceptual_view, vk::CommandBuffer& cmd,
-                                vk::Extent2D& size, bool encoded_srgb, bool dump, int index, bool generated = false);
+                                vk::Extent2D& size, bool encoded_srgb, bool dump, int index, bool generated = false, vk::Image source = {}, vk::Format source_format = vk::Format::eB8G8R8A8Unorm, vk::Format sampled_format = {});
     std::unique_ptr<MetalFx> metalfx;
     std::unique_ptr<MetalFx> metalfx_generated;
     VideoCore::UniqueImage metalfx_output;
+    VideoCore::UniqueImage runtime_input;
+    vk::UniqueImageView runtime_input_view;
+    vk::Extent2D runtime_input_size{};
+    vk::Format runtime_input_format{};
+    vk::Format runtime_input_sample_format{};
+    bool runtime_input_initialized{};
     vk::UniqueImageView metalfx_view;
     u32 metalfx_width{3840}, metalfx_height{2160};
     bool metalfx_initialized{};

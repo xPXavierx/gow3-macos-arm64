@@ -149,6 +149,12 @@ def main():
     code = generated.read_text()
     if "rc->step(" in code:
         raise RuntimeError("Unexpected interpreted instruction in native fixture")
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'launcher'))
+    from aot_vector_cache import transform
+    cached, count = transform(code)
+    if not count:
+        raise RuntimeError("No vector register cache fixtures were exercised")
+    generated.write_text(cached)
     subprocess.run([compiler, "-arch", "arm64", "-O2", "-std=gnu11", "-dynamiclib",
                     "-ffp-contract=off", "-fno-strict-aliasing", "-I" + str(Path(source) / "src"),
                     "-I" + decoder_include,

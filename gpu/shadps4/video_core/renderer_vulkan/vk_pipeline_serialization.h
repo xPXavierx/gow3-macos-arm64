@@ -37,6 +37,11 @@ vk::ResultValue<vk::UniquePipeline> CreateCachedGraphicsPipeline(
     const std::filesystem::path& directory);
 void ReportPipelineBinaryCache();
 
+u64 ShaderCatalogABI();
+bool LoadShaderMeta(Serialization::Archive& ar, Shader::Info& info,
+                    std::optional<Shader::Gcn::FetchShaderData>& fetch,
+                    Shader::StageSpecialization& spec, size_t& permutation);
+
 void RegisterPipelineData(const ComputePipelineKey& key,
                           ComputePipeline::SerializationSupport& sdata);
 void RegisterPipelineData(const GraphicsPipelineKey& key, u64 hash,

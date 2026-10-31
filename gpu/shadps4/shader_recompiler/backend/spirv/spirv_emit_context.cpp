@@ -804,9 +804,11 @@ void EmitContext::DefineOutputs() {
 }
 
 void EmitContext::DefinePushDataBlock() {
-    // Create push constants block for instance steps rates
+    const Id image_sizes_type = TypeArray(U32[1], ConstU32(PushData::ImageSizeCount));
+    Decorate(image_sizes_type, spv::Decoration::ArrayStride, 4u);
+    // Existing 128-byte header followed by logical dimensions of scaled views.
     const Id struct_type{Name(TypeStruct(F32[1], F32[1], F32[1], F32[1], U32[4], U32[4], U32[4],
-                                         U32[4], U32[4], U32[4], U32[2], U32[1], U32[1]),
+                                         U32[4], U32[4], U32[4], U32[2], U32[1], U32[1], U32[1], image_sizes_type),
                               "AuxData")};
     Decorate(struct_type, spv::Decoration::Block);
     MemberName(struct_type, PushData::XOffsetIndex, "xoffset");
@@ -835,6 +837,10 @@ void EmitContext::DefinePushDataBlock() {
     MemberDecorate(struct_type, PushData::MotionParamIndex, spv::Decoration::Offset, 120U);
     MemberName(struct_type, PushData::SceneSizeIndex, "scene_size");
     MemberDecorate(struct_type, PushData::SceneSizeIndex, spv::Decoration::Offset, 124U);
+    MemberName(struct_type, PushData::SceneBaseIndex, "logical_scene_size");
+    MemberDecorate(struct_type, PushData::SceneBaseIndex, spv::Decoration::Offset, 128U);
+    MemberName(struct_type, PushData::ImageSizesIndex, "logical_image_sizes");
+    MemberDecorate(struct_type, PushData::ImageSizesIndex, spv::Decoration::Offset, 132U);
     push_data_block = DefineVar(struct_type, spv::StorageClass::PushConstant);
     Name(push_data_block, "push_data");
     interfaces.push_back(push_data_block);
@@ -1077,6 +1083,7 @@ void EmitContext::DefineImagesAndSamplers() {
         const Id pointer_type{TypePointer(spv::StorageClass::UniformConstant, pointee_type)};
         const Id id{AddGlobalVariable(pointer_type, spv::StorageClass::UniformConstant)};
         Decorate(id, spv::Decoration::Binding, binding.unified);
+        const u32 size_binding = binding.unified;
         binding.unified += num_bindings;
         Decorate(id, spv::Decoration::DescriptorSet, 0U);
         Name(id, fmt::format("{}_{}{}", hw_stage, "img", images.size()));
@@ -1086,6 +1093,7 @@ void EmitContext::DefineImagesAndSamplers() {
             .sampled_type = is_storage ? sampled_type : TypeSampledImage(image_type),
             .image_type = image_type,
             .view_type = sharp.GetViewType(image_desc.is_array),
+            .size_binding = size_binding,
             .is_integer = is_integer,
             .is_storage = is_storage,
             .is_null = profile.manual_null_images && !sharp,

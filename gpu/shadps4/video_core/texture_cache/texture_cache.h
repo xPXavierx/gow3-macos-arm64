@@ -84,13 +84,13 @@ public:
         // An absent or rejected T# still has the descriptor type required by its shader.
         explicit ImageDesc(const Shader::ImageResource& desc)
             : type{desc.is_written ? BindingType::Storage : BindingType::Texture},
-              needs_native{desc.needs_native} {
+              needs_native{desc.needs_native || desc.needs_exact_size} {
             view_info.is_storage = desc.is_written;
         }
         ImageDesc(const AmdGpu::Image& image, const Shader::ImageResource& desc)
             : info{image, desc}, view_info{image, desc},
               type{desc.is_written ? BindingType::Storage : BindingType::Texture},
-              needs_native{desc.needs_native} {}
+              needs_native{desc.needs_native || desc.needs_exact_size} {}
         ImageDesc(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
             : info{buffer, hint}, view_info{buffer}, type{BindingType::RenderTarget} {}
         ImageDesc(const AmdGpu::DepthBuffer& buffer, AmdGpu::DepthView view,

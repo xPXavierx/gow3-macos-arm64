@@ -432,6 +432,11 @@ void DefineEntryPoint(const Info& info, EmitContext& ctx, Id main) {
         if (info.stores.GetAny(IR::Attribute::Depth)) {
             ctx.AddExecutionMode(main, spv::ExecutionMode::DepthReplacing);
         }
+        if (ctx.runtime_info.hw.fs.depth_before_shader) {
+            ASSERT_MSG(!info.stores.GetAny(IR::Attribute::Depth),
+                       "DEPTH_BEFORE_SHADER enabled with depth exporting shader");
+            ctx.AddExecutionMode(main, spv::ExecutionMode::EarlyFragmentTests);
+        }
         break;
     case SwStage::Geometry:
         execution_model = spv::ExecutionModel::Geometry;

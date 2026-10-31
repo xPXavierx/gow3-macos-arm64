@@ -687,7 +687,7 @@ private:
 class Scheduler {
 public:
     /// `threaded_recording`: Vulkan commands passed to Record() are recorded by a worker thread.
-    explicit Scheduler(const Instance& instance, bool threaded_recording = false);
+    explicit Scheduler(const Instance& instance, bool threaded_recording = false, bool presentation=false);
     ~Scheduler();
 
     /// Sends the current execution context to the GPU
@@ -921,6 +921,7 @@ private:
 
 private:
     const Instance& instance;
+    const bool presentation_queue;
     Semaphore work_semaphore;
     CommandPool command_pool;
     DynamicState dynamic_state;

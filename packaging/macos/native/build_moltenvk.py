@@ -21,7 +21,7 @@ p.add_argument('--cmake', default='cmake')
 p.add_argument('--sdk', type=Path)
 p.add_argument('--jobs', type=int, default=6)
 p.add_argument('--frame-pacing', action='store_true',
-               help='Include the opt-in Metal minimum-presentation-duration extension')
+               help='Include native presentation pacing and the interpolation display-link adapter')
 a = p.parse_args()
 if sys.platform != 'darwin' or platform.machine() != 'arm64':
     p.error('Run with an ARM64 Python on macOS, without Rosetta')

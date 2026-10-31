@@ -76,7 +76,7 @@ struct Buffer {
         return RemapDataFormat(DataFormat(data_format));
     }
 
-    NumberConversion GetNumberConversion() const noexcept {
+    NumberConversion GetNumberConversion() const {
         return MapNumberConversion(NumberFormat(num_format), DataFormat(data_format));
     }
 
@@ -281,7 +281,7 @@ struct Image {
         return RemapNumberFormat(NumberFormat(num_format), DataFormat(data_format));
     }
 
-    NumberConversion GetNumberConversion() const noexcept {
+    NumberConversion GetNumberConversion() const {
         return MapNumberConversion(NumberFormat(num_format), DataFormat(data_format));
     }
 

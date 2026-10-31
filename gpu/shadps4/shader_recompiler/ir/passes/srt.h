@@ -31,6 +31,13 @@ using PFN_SrtWalker = SrtWalker;
 inline const void* SrtWalkerCode(PFN_SrtWalker walker) { return walker.code; }
 void RunSrtProgram(const u32* program, const u32* user_data, u32* flat_dst);
 #endif
+// Declarative recipe identity only. Instructions are always regenerated from the local dump.
+inline u64 SrtLayoutFingerprint(PFN_SrtWalker walker, size_t size) {
+    const auto* bytes=static_cast<const u8*>(SrtWalkerCode(walker));
+    u64 hash=14695981039346656037ull;
+    for(size_t i=0;i<size;++i) hash=(hash^bytes[i])*1099511628211ull;
+    return hash;
+}
 bool UsePortableSrtWalker();
 PFN_SrtWalker RegisterWalkerCode(const u8* ptr, size_t size);
 

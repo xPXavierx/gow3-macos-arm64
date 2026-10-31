@@ -10,6 +10,9 @@
 #include "common/logging/log.h"
 
 void assert_fail_impl() {
+    if (Common::ScopedSpeculativeCompilation::Active()) {
+        throw std::runtime_error("Speculative compiler input was not ready; required draw must validate again");
+    }
     std::fflush(stdout);
     std::fputs("STOP: GPU library assertion failed (see GPU log above)\n", stderr);
 #if defined(__APPLE__)

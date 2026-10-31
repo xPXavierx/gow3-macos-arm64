@@ -31,8 +31,8 @@ std::atomic<bool> full_barriers{false};
 }
 
 
-Scheduler::Scheduler(const Instance& instance, bool threaded_recording)
-    : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
+Scheduler::Scheduler(const Instance& instance, bool threaded_recording, bool presentation)
+    : instance{instance}, presentation_queue{presentation},work_semaphore{instance}, command_pool{instance, &work_semaphore,presentation} {
     // Match upstream: full barriers are an opt-in diagnostic, not a driver default.
     const char* barrier_env = std::getenv("GOW3_FULL_BARRIERS");
     const bool conservative = barrier_env && barrier_env[0] == '1';
@@ -496,10 +496,11 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     const vk::Semaphore timeline = work_semaphore.Handle();
     info.AddSignal(timeline, signal_value);
 
-    // Preserve presentation's normal wait scope. An external encoder result can
-    // be consumed before color processing, so its own slot waits at all stages.
+    // Present reads frame images through transfer/blit before its color pass.
+    // A separate producer queue therefore needs a wait covering those reads,
+    // not only COLOR_ATTACHMENT_OUTPUT (which worked by queue order before).
     std::array<vk::PipelineStageFlags, 4> wait_stage_masks = {
-        vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eColorAttachmentOutput,
+        vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands,
         vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eAllCommands,
     };
     if (external_wait_index < wait_stage_masks.size())
@@ -524,7 +525,7 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     };
 
     ImGui::Core::TextureManager::Submit();
-    auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
+    auto submit_result = (presentation_queue?instance.GetPresentQueue():instance.GetGraphicsQueue()).submit(submit_info, info.fence);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
 
     work_semaphore.Refresh();

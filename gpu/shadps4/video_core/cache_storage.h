@@ -32,6 +32,9 @@ public:
         return opened;
     }
     void FinishPreload();
+    /// Startup only: a barrier after importing descriptions, before reading
+    /// their freshly generated metadata/binaries. Never called by a live draw.
+    void WaitForWrites();
     /// gow3: removes every cached blob (an incompatible cache is rebuilt, not ignored).
     void Clear();
 

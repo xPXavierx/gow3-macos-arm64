@@ -51,7 +51,7 @@ protected:
 
 class CommandPool final : public ResourcePool {
 public:
-    explicit CommandPool(const Instance& instance, Semaphore* work_semaphore);
+    explicit CommandPool(const Instance& instance, Semaphore* work_semaphore, bool presentation=false);
     ~CommandPool() override;
 
     void Allocate(std::size_t begin, std::size_t end) override;

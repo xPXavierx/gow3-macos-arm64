@@ -1,5 +1,9 @@
 # Native MetalFX spatial upscaling
 
+Current live-launcher pipeline, presentation optimization and FSR assessment:
+[UPSCALING_PERFORMANCE.md](UPSCALING_PERFORMANCE.md). The dated measurements
+below describe historical builds, not current FPS or current launcher setup.
+
 MetalFX spatial is an opt-in macOS renderer path. It exports the game's completed
 Vulkan presentation view to Metal, runs Apple's MTLFXSpatialScaler at a fixed output
 size, and returns the result to Vulkan for presentation. The game HUD is included

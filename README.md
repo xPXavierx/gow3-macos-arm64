@@ -40,8 +40,8 @@ Contributions are validated and reviewed before entering the signed official
 catalogue. No dumps, saves, logs or another player's compiled GPU cache are shared.
 Coverage grows across campaign areas; it does not yet guarantee zero stutter.
 
-**Availability:** the updated panel is currently in local build 0.4.20; that app
-update has not been released on GitHub yet. The catalogue service is online.
+**Available in release 0.4.20.** Download the updated application from Releases.
+The official catalogue service is online.
 See the [player guide](docs/community-shaders.md) for every step and the difference
 between updating, compiling and clearing the cache.
 
@@ -52,19 +52,27 @@ between updating, compiling and clearing the cache.
 - Native launcher in English, Brazilian Portuguese and Spanish. English on first
   use; the selected dump, language and display preferences persist.
 - 720p, 1080p, 1440p and 4K output; native rendering or spatial MetalFX Quality,
-  Balanced and Performance. The HUD always shows render dimensions and MetalFX.
+  Balanced and Performance. When enabled, the HUD shows render dimensions and MetalFX. The launcher HUD
+  switch hides both diagnostic overlays when off.
+- Known graphics pipelines are prepared before play. First use waits for missing
+  shaders instead of omitting draws; unseen variants can still cause a pause.
+- Clear shader cache from the launcher while preserving saves, settings and ARM64
+  preparation. The action is blocked during game sessions.
 - 60 FPS or Unlimited, V-Sync, Retina fullscreen and automatic Game Mode eligibility.
-  With the 60 FPS cap and no frame generation, the launcher temporarily selects
+  With the 60 FPS cap, the launcher temporarily selects
   60 Hz without changing resolution or Retina scale, then restores the previous
-  display configuration. Unlimited and frame generation do not request 60 Hz.
+  display configuration. Unlimited does not request 60 Hz.
 - SDL3 input, FFmpeg/ATRAC9 audio and video, save backup and original texture
   readback policies. Graphics use the shadPS4-derived Vulkan backend and MoltenVK.
 
+CPU AOT and graphics preparation are separate. The graphics backend converts
+PS4 shaders to SPIR-V and MoltenVK/Metal at runtime. Known pipelines are warmed
+before play; this is not a complete offline Metal shader catalog, and first-use
+GPU compilation can still cause stutter.
+
 The M3 Max has reached approximately 60 FPS in bounded native 4K combat tests.
-This is not a campaign-wide guarantee. MetalFX frame generation is a developer
-experiment, disabled in the public launcher; rendered and presented FPS must be
-measured separately. See [frame interpolation](packaging/macos/native/FRAME_INTERPOLATION.md)
-and [presentation pacing](packaging/macos/native/FRAME_PACING.md).
+This is not a campaign-wide guarantee. Frame generation is excluded from the current build and launcher. Spatial MetalFX
+upscaling remains available. See [presentation pacing](packaging/macos/native/FRAME_PACING.md).
 
 The higher-resolution texture experiment was discontinued. No replacement pack
 is distributed. Windows/Linux launchers, packaging and unsupported ultrawide

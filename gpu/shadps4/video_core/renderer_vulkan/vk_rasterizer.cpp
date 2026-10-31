@@ -75,7 +75,7 @@ Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_, Runtime
     scene_targets = std::make_unique<SceneTargets>(instance, scheduler, runtime, texture_cache);
     // Object motion first: it enables the explicit history bindings before pipeline selection.
     object_motion = std::make_unique<ObjectMotion>(instance, scheduler);
-    if(FrameGen::Requested())framegen_inputs=std::make_unique<FrameGenInputs>(instance,scheduler,runtime,texture_cache,*object_motion);
+    if(FrameGen::Requested())framegen_inputs=std::make_unique<FrameGenInputs>(instance,scheduler,runtime,texture_cache,*object_motion,scene_targets.get());
     camera_motion = std::make_unique<CameraMotion>(instance, scheduler, texture_cache, runtime);
     camera_motion->SetObjectMotion(object_motion.get());
     upscaler = std::make_unique<TemporalUpscaler>(instance, scheduler, texture_cache, runtime,
@@ -582,20 +582,9 @@ void Rasterizer::PostDraw(const Pipeline* pipeline, const PreparedDraw* used_pre
     }
     std::array<u16, AmdGpu::RegDirty::NumBlocks> blocks;
     u32 num_blocks = 0;
-#ifdef __GLIBCXX__
-    for (size_t block = dirty.blocks._Find_first(); block < dirty.blocks.size();
-         block = dirty.blocks._Find_next(block)) {
+    dirty.ForEachBlock([&](u32 block) {
         blocks[num_blocks++] = static_cast<u16>(block);
-    }
-#else
-    if (dirty.blocks.any()) {
-        for (size_t block = 0; block < dirty.blocks.size(); ++block) {
-            if (dirty.blocks.test(block)) {
-                blocks[num_blocks++] = static_cast<u16>(block);
-            }
-        }
-    }
-#endif
+    });
     const auto stages =
         pipeline ? pipeline->GetStages() : std::span<const Shader::Info* const>{};
     // Constants: copied here into the ring, the recording thread only binds them.
@@ -1040,10 +1029,10 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
     motion_geometry = 0;
     push_data.motion_param = 0;
 
-    if(framegen_inputs && regs.depth_render_control.depth_clear_enable)
+    if(FrameGen::Requested() && framegen_inputs && regs.depth_render_control.depth_clear_enable)
         framegen_inputs->BeforeDepthClear(regs.depth_buffer.DepthAddress());
     PrepareRenderState(pipeline);
-    if(framegen_inputs && cb_descs[0].first && regs.color_buffers[0] &&
+    if(FrameGen::Requested() && framegen_inputs && cb_descs[0].first && regs.color_buffers[0] &&
        FrameCapture::IsDisplayBuffer(regs.color_buffers[0].Address()))
         framegen_inputs->Display(cb_descs[0].first);
     if (upscaler->Enabled() && std::popcount(pipeline->GetGraphicsKey().mrt_mask) == 1) {
@@ -1064,15 +1053,26 @@ void Rasterizer::DrawRecord(const GraphicsPipeline* pipeline, const PreparedDraw
         return;
     }
     const auto* framegen_fragment=pipeline->GetStages()[u32(Shader::SwStage::Fragment)];
-    if(framegen_inputs && db_desc.first && framegen_fragment && u32(framegen_fragment->pgm_hash)==0xc1c01219u) {
+    if((framegen_inputs || Gow3Runtime::Enabled()) && db_desc.first && framegen_fragment && u32(framegen_fragment->pgm_hash)==0xc1c01219u) {
         // Accept this game's perspective parameters only at its depth-copy stage.
         const auto& stage=*framegen_fragment;
+        if(Gow3Runtime::Enabled() && !stage.images.empty())
+            Gow3Runtime::scene_depth_address=stage.images[0].GetSharp(stage).Address();
+        if(std::getenv("GOW3_FRAMEGEN_DIAGNOSTICS")) {static unsigned count=0;if(count++<8)std::printf("FG diagnostic: depth-copy stage buffers=%zu images=%zu\n",stage.buffers.size(),stage.images.size());}
         if(!stage.images.empty())for(const auto& resource:stage.buffers) {
             if(resource.IsSpecial())continue;
             const auto b=resource.GetSharp(stage);const VAddr address=b.base_address;
-            if(b.GetSize()==16 && memory->IsValidGpuMapping(address,0) && memory->ClampRangeSize(address,16)==16)
+            if(framegen_inputs && b.GetSize()==16 && memory->IsValidGpuMapping(address,0) && memory->ClampRangeSize(address,16)==16)
                 framegen_inputs->Projection(db_desc.first,stage.images[0].GetSharp(stage).Address(),regs.depth_buffer.DepthAddress(),reinterpret_cast<const float*>(address));
         }
+    }
+    if(FrameGen::Requested() && framegen_inputs && framegen_inputs->NeedsColor() && cb_descs[0].first && regs.color_buffers[0]) {
+        // HUD starts with indexed geometry (opaque 3D icons included), using
+        // the game's orthographic depth buffer. Capture its current full-size
+        // color attachment, not the earlier VideoOut image. Restore attachment
+        // transitions after the compute snapshot before recording the UI draw.
+        if(is_indexed && framegen_fragment && !regs.depth_render_control.depth_clear_enable)
+            if(framegen_inputs->BeforeUiDraw(cb_descs[0].first))PrepareRenderState(pipeline);
     }
     const auto state = BeginRendering(pipeline);
 
@@ -1711,6 +1711,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(Regs());
+    push_data.scene_base = SceneResolution::Pack(scene_targets->Base());
     if (!HelperEligible(pipeline)) {
         ++helper_serial;
         for (const auto* stage : pipeline->GetStages()) {
@@ -2407,7 +2408,7 @@ Rasterizer::ImageDescCacheEntry& Rasterizer::CachedImageDescEntry(const AmdGpu::
     std::memcpy(key.data(), &sharp, sizeof(key));
     // gow3: needs_native too, since FindImage resolves partial height views only for it.
     const u32 flags = u32(res.is_written) | u32(res.is_depth) << 1 | u32(res.is_array) << 2 |
-                      u32(res.needs_native) << 3;
+                      u32(res.needs_native) << 3 | u32(res.needs_exact_size) << 4;
     // Two-way set associative: a frame binds a few thousand distinct T#s.
     auto* set = &image_desc_cache[(hash % (image_desc_cache.size() / 2)) * 2];
     const auto matches = [&](const ImageDescCacheEntry& e) {
@@ -2446,8 +2447,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
                               Shader::Backend::Bindings& binding, u32& write_index,
                               bool& barrier, bool on_helper) {
     const u32 first_image_idx = image_infos.size();
+    const u32 first_binding = binding.unified;
     TextureSet* set_slot = nullptr;
-    if (!on_helper && BindTexturesFromSet(stage, prepared, first_image_idx, barrier, set_slot)) {
+    if (!on_helper && BindTexturesFromSet(stage, prepared, binding.unified, barrier, set_slot)) {
         // Descriptor writes: one per image (no mip arrays in a memoized set).
         for (u32 i = 0; i < stage.images.size(); ++i) {
             auto& set_write = set_writes[write_index++];
@@ -2535,7 +2537,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex
                 ? static_cast<u32>(tsharp.last_level - tsharp.base_level + 1)
                 : 1u;
-        const bool proxy_candidate = sample_proxies && num_bindings == 1 &&
+        const bool proxy_candidate = sample_proxies && binding.unified + image_index < Shader::PushData::ImageSizeCount && num_bindings == 1 &&
                                      !image_desc.needs_native && !image_desc.is_written &&
                                      mip_fallback_mode == Shader::MipStorageFallbackMode::None;
 
@@ -2685,10 +2687,21 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             // gow3: a proxied scene image sampled with normalized coordinates reads the proxy:
             // no resample to the native size (the native image is not touched).
             if (binding_proxy_ok[binding_index] && !is_storage && !binding.force_general &&
-                !binding.is_target &&
                 !(upscaler->Enabled() && upscaler->RedirectsSampled(image_id))) {
-                if (const auto proxy = scene_targets->SampleProxy(image, desc.view_info)) {
+                const auto sampled = binding.is_target
+                    ? scene_targets->SnapshotProxy(image, desc.view_info)
+                    : scene_targets->SampleProxy(image, desc.view_info);
+                if (const auto proxy = sampled) {
+                    if (binding.is_target) {
+                        image.binding.is_bound = 0; // the read references a separate snapshot
+                        set_ok = false;
+                    }
                     image.usage.texture = 1u;
+                    const auto sharp = prepared ? prepared->image_sharps[binding_index]
+                                                : stage.images[binding_index].GetSharp(stage);
+                    push_data.image_sizes[first_binding + binding_index] =
+                        std::max(1u, u32(sharp.width+1) >> sharp.base_level) |
+                        (std::max(1u, u32(sharp.height+1) >> sharp.base_level) << 16);
                     image_infos.emplace_back(VK_NULL_HANDLE, proxy->view, proxy->layout);
                     if (set_ok && binding_index < resolved.size()) {
                         resolved[binding_index] = {image_id, proxy->view, image.backing,
@@ -2845,7 +2858,7 @@ Rasterizer::BeginSignature Rasterizer::MakeBeginSignature(const GraphicsPipeline
 }
 
 bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
-                                     u32 first_image_idx, bool& barrier, TextureSet*& slot) {
+                                     u32 first_binding, bool& barrier, TextureSet*& slot) {
     const u32 count = static_cast<u32>(stage.images.size());
     if (!prepared || count == 0 || count > TextureSet::MaxImages ||
         Gow3Toggle::Disabled(Gow3Toggle::TextureSetMemo) || FrameCapture::Active()) {
@@ -2915,6 +2928,12 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
         bound_images.emplace_back(entry.id);
         image.usage.texture = 1u;
         if (entry.proxy) {
+            const u32 size_binding = first_binding + i;
+            ASSERT(size_binding < Shader::PushData::ImageSizeCount);
+            const auto sharp = prepared->image_sharps[i];
+            push_data.image_sizes[size_binding] =
+                std::max(1u, u32(sharp.width+1) >> sharp.base_level) |
+                (std::max(1u, u32(sharp.height+1) >> sharp.base_level) << 16);
             image_infos.emplace_back(VK_NULL_HANDLE, entry.view,
                                      scene_targets->PrepareSample(image, entry.range.base.level));
             ++proxy_samples;
@@ -2927,7 +2946,7 @@ bool Rasterizer::BindTexturesFromSet(const Shader::Info& stage, const PreparedSt
                                    vk::AccessFlagBits2::eShaderRead, entry.range);
         image_infos.emplace_back(VK_NULL_HANDLE, entry.view, image.backing->state.layout);
     }
-    (void)first_image_idx;
+    (void)first_binding;
     return true;
 }
 
@@ -3004,11 +3023,13 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
     std::pair<vk::ImageView, vk::ImageLayout> original_color{};
     const auto& regs = Regs();
     const auto& key = pipeline->GetGraphicsKey();
-    if (std::popcount(key.mrt_mask & 0x7f) >= 5 && db_desc.first &&
+    if(Gow3Runtime::Enabled() && db_desc.first && !regs.IsClipDisabled() &&
+       scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started=true;
+    if (std::popcount(key.mrt_mask & 0x7f) >= (Gow3Runtime::Enabled()?2:5) && db_desc.first &&
         scene_targets->EligibleScene(texture_cache.GetImage(db_desc.first))) scene_started = true;
     // A proxy attachment cannot represent MSAA or a feedback loop that reads the
     // same image through the guest's native descriptor during this draw.
-    bool reduced = scene_started && upscaler->RasterScaling() && key.num_samples == 1;
+    bool reduced = (key.mrt_mask || db_desc.first) && (upscaler->RasterScaling() || (Gow3Runtime::Enabled() && scene_targets->Reduced())) && key.num_samples == 1;
     // GOW3_SCENE_DEBUG=<file>: once the file exists, why the passes of one frame keep the
     // native size (see NoteFrameStart).
     const bool debug_pass = scene_debug_frame && scene_started;
@@ -3063,7 +3084,7 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         }
         std::printf("Scene pass: reduced %d %s\n", reduced, why.c_str());
     }
-    push_data.scene_size = reduced ? SceneResolution::Pack(scene_targets->Size()) : 0;
+    push_data.scene_size = reduced ? SceneResolution::Pack(scene_targets->ShaderSize()) : 0;
     if (Gow3Stats::enabled) {
         Gow3Stats::reduced_draws.fetch_add(reduced, std::memory_order_relaxed);
         Gow3Stats::scene_draws.fetch_add(scene_started, std::memory_order_relaxed);
@@ -3316,7 +3337,8 @@ RenderState Rasterizer::BeginRenderingFull(const GraphicsPipeline* pipeline) {
         const auto proxy = pass_size.value_or(size);
         state.width = proxy.width;
         state.height = proxy.height;
-        target_scale = {float(size.width) / 1920.0f, float(size.height) / 1080.0f};
+        const auto base=scene_targets->Base();
+        target_scale = {float(size.width) / base.width, float(size.height) / base.height};
     }
     static const bool trace_resolution=EmulatorSettingsImpl::Flag("GOW3_TRACE_RESOLUTION",false);
     static std::array<u32,4> traced_geometry{};
@@ -3973,6 +3995,29 @@ void Rasterizer::MarkPass(const GraphicsPipeline* pipeline, const RenderState& s
 }
 
 void Rasterizer::NoteFrameStart() {
+    if(Gow3Runtime::Enabled()) {
+        static const char* scene_debug=std::getenv("GOW3_SCENE_DEBUG");
+        scene_debug_frame=scene_debug && std::remove(scene_debug)==0;
+        scene_targets->debug=scene_debug_frame;
+    }
+    if (Gow3Runtime::Enabled()) {
+        scene_started=false;
+        if (Gow3Runtime::Latch()) {
+            object_motion->InvalidateHistory(); camera_motion->InvalidateHistory();
+            if (framegen_inputs) framegen_inputs->InvalidateHistory();
+        }
+        if (FrameGen::Requested() && !object_motion->Enabled()) {
+            scheduler.Finish();
+            object_motion.reset();
+            object_motion=std::make_unique<ObjectMotion>(instance,scheduler);
+            camera_motion->SetObjectMotion(object_motion.get());
+        }
+        if (FrameGen::Requested() && !framegen_inputs)
+            framegen_inputs=std::make_unique<FrameGenInputs>(instance,scheduler,runtime,texture_cache,*object_motion,scene_targets.get());
+        Shader::MotionVectors::enabled=FrameGen::Requested();
+        const auto [w,h]=Gow3Runtime::RenderSize(Gow3Runtime::Applied());
+        if(scene_targets->SetSize({w,h})) begin_memo.valid=false;
+    }
     if (auto* profiler = GpuProfiler::Get()) {
         profiler->BeginFrame();
     }

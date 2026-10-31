@@ -11,6 +11,10 @@
 #include "common/logging/log.h"
 #include "core/emulator_settings.h"
 #include "gow3_settings.h"
+#include "gow3_runtime_control.h"
+#ifdef __APPLE__
+extern "C" unsigned long long Gow3MetalPresentationTimeNs();
+#endif
 #include "imgui/renderer/imgui_core.h"
 #include "sdl_window.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -112,6 +116,16 @@ void Swapchain::SetHDR(bool hdr) {
 
 bool Swapchain::AcquireNextImage() {
     vk::Device device = instance.GetDevice();
+    // Two presents per game frame can wrap this semaphore ring before the
+    // game-frame fence catches up. Wait for the exact submission that consumed
+    // this binary acquire signal; a drawable alone does not guarantee that.
+    if(frame_index<acquisition_done.size()) {
+        const auto ticket=acquisition_done[frame_index];
+        if(ticket.value) {
+            const vk::SemaphoreWaitInfo wait{.semaphoreCount=1,.pSemaphores=&ticket.timeline,.pValues=&ticket.value};
+            if(device.waitSemaphores(wait,std::numeric_limits<u64>::max())!=vk::Result::eSuccess)return false;
+        }
+    }
     vk::Result result =
         device.acquireNextImageKHR(swapchain, std::numeric_limits<u64>::max(),
                                    image_acquired[frame_index], VK_NULL_HANDLE, &image_index);
@@ -136,7 +150,19 @@ bool Swapchain::AcquireNextImage() {
 }
 
 bool Swapchain::Present(bool generated) {
-    const vk::PresentTimeGOOGLE time{.presentID=++timing_id,.desiredPresentTime=0};
+    u64 desired{};
+#ifdef __APPLE__
+    const auto live=Gow3Runtime::Applied();
+    if(Gow3Runtime::Enabled() && (live.interpolation==1 || live.interpolation==2) && instance.HasDisplayTiming()) {
+        const auto rate=std::min(Gow3Runtime::RealLimit(live,Gow3Runtime::refresh_hz)*2,Gow3Runtime::refresh_hz.load());
+        const u64 period=1000000000ull/std::max(1u,rate), now=Gow3MetalPresentationTimeNs();
+        if(pacing_rate!=rate || !pacing_next || pacing_next<now || pacing_next>now+4*period)
+            pacing_next=now+period;
+        else pacing_next+=period;
+        pacing_rate=rate;desired=pacing_next;
+    } else {pacing_next=0;pacing_rate=0;}
+#endif
+    const vk::PresentTimeGOOGLE time{.presentID=++timing_id,.desiredPresentTime=desired};
     const vk::PresentTimesInfoGOOGLE times{.swapchainCount=1,.pTimes=&time};
     if(instance.HasDisplayTiming())timing_generated[time.presentID]=generated;
     const vk::PresentInfoKHR present_info = {
@@ -158,6 +184,8 @@ bool Swapchain::Present(bool generated) {
                 std::printf("Display timing: skipped non-distinct timestamp for present %u\n",p.presentID);
                 timing_generated.erase(found);continue;
             }
+            static FILE* trace=[]()->FILE*{const char* path=std::getenv("GOW3_PRESENT_TRACE");return path?std::fopen(path,"w"):nullptr;}();
+            if(trace){std::fprintf(trace,"{\"generated\":%s,\"desired\":%llu,\"actual\":%llu}\n",found->second?"true":"false",(unsigned long long)p.desiredPresentTime,(unsigned long long)p.actualPresentTime);if(p.presentID%120==0)std::fflush(trace);}
             if(!timing_start)timing_start=p.actualPresentTime;
             if(found->second)++timing_extra;else ++timing_real;
             if(timing_last && p.actualPresentTime>timing_last)timing_intervals.push_back(p.actualPresentTime-timing_last);
@@ -333,6 +361,7 @@ void Swapchain::Destroy() {
     }
 
     image_acquired.clear();
+    acquisition_done.clear();
     present_ready.clear();
 }
 

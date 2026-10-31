@@ -50,6 +50,12 @@
 #undef MemoryBarrier // gow3: winnt.h macro (through fmt), clashes with vk::MemoryBarrier
 #endif
 
+#ifdef __APPLE__
+extern "C" void Gow3UpdateMetalDisplayLink(void*,unsigned);
+extern "C" unsigned Gow3MetalDisplayLinkRate();
+extern "C" unsigned Gow3MetalDisplayLinkDesiredRate(unsigned);
+#endif
+
 namespace Vulkan {
 
 bool CanBlitToSwapchain(const vk::PhysicalDevice physical_device, vk::Format format) {
@@ -303,7 +309,7 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     : window{window_}, liverpool{liverpool_},
       instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
                EmulatorSettings.IsVkCrashDiagnosticEnabled()},
-      draw_scheduler{instance, true}, present_scheduler{instance}, flip_scheduler{instance},
+      draw_scheduler{instance, true}, present_scheduler{instance,false,true}, flip_scheduler{instance},
       swapchain{instance, window}, runtime{instance, draw_scheduler},
       rasterizer{std::make_unique<Rasterizer>(instance, draw_scheduler, runtime, liverpool)},
       texture_cache{rasterizer->GetTextureCache()} {
@@ -322,10 +328,6 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
     }
 
 #ifdef __APPLE__
-    if(FrameGen::Requested()){
-        frame_interpolator=std::make_unique<FrameInterpolator>(instance.GetInstance(),device,VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr);
-        std::printf("Framegen: requested native MetalFX, available=%d problem=%s\n",frame_interpolator->Available(),frame_interpolator->Problem()?frame_interpolator->Problem():"none");
-    }
     if (const char* mode = std::getenv("GOW3_METALFX_MODE")) {
         if (std::strcmp(mode,"spatial") == 0) {
             metalfx = std::make_unique<MetalFx>(instance.GetInstance(),
@@ -359,11 +361,12 @@ Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_
         return;
     }
 
-    // gow3: by default the cached pipelines load while the game runs (a corner note shows the
-    // progress). Otherwise rebuilding them takes up to minutes before the first game frame:
-    // show what is happening instead of a black window.
+    // Complete known pipelines before starting the game. A fresh cache cannot
+    // predict unseen variants; first use waits for those in PipelineCache.
+    // The old background/skip policy remains available for measured comparisons.
     const char* background_warmup = std::getenv("GOW3_BACKGROUND_WARMUP");
-    if ((!background_warmup || *background_warmup != '0') &&
+    if (PipelineCache::AllowsIncompleteDraws() &&
+        (!background_warmup || *background_warmup != '0') &&
         rasterizer->GetPipelineCache().StartBackgroundWarmUp()) {
         return;
     }
@@ -393,6 +396,8 @@ Presenter::~Presenter() {
     Check(flip_scheduler.CommandBuffer().reset());
 
 #ifdef __APPLE__
+    if(interpolation_scheduler) {interpolation_scheduler->Finish();interpolation_scheduler.reset();}
+    interpolation_targets.clear();
     interpolation_linear.reset();interpolation_view.reset();
     interpolation_output=VideoCore::UniqueImage{};frame_interpolator.reset();
     metalfx_view.reset();
@@ -422,6 +427,8 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
     }
 
     const vk::Format format = swapchain.GetSurfaceFormat().format;
+    const std::array families{instance.GetGraphicsQueueFamilyIndex(),instance.GetPresentQueueFamilyIndex()};
+    const bool concurrent=families[0]!=families[1];
     const vk::ImageCreateInfo image_info = {
         .flags = vk::ImageCreateFlagBits::eMutableFormat,
         .imageType = vk::ImageType::e2D,
@@ -432,6 +439,9 @@ void Presenter::RecreateFrame(Frame* frame, u32 width, u32 height) {
         .samples = vk::SampleCountFlagBits::e1,
         .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst |
                  vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eSampled,
+        .sharingMode = concurrent?vk::SharingMode::eConcurrent:vk::SharingMode::eExclusive,
+        .queueFamilyIndexCount = concurrent?2u:0u,
+        .pQueueFamilyIndices = concurrent?families.data():nullptr,
     };
 
     const VmaAllocationCreateInfo alloc_info = {
@@ -586,7 +596,7 @@ static void DumpRaw(const Instance& instance, Scheduler& scheduler, vk::CommandB
 
 #ifdef __APPLE__
 vk::ImageView Presenter::UpscaleMetalFx(vk::ImageView perceptual_view, vk::CommandBuffer& cmd,
-        vk::Extent2D& size, bool encoded_srgb, bool dump, int index, bool generated) {
+        vk::Extent2D& size, bool encoded_srgb, bool dump, int index, bool generated, vk::Image source, vk::Format source_format, vk::Format sampled_format) {
     // Real and reduced generated frames have different input dimensions. Keep
     // their native scaler objects alive instead of rebuilding one twice per flip.
     auto& scaler = generated ? metalfx_generated : metalfx;
@@ -594,6 +604,15 @@ vk::ImageView Presenter::UpscaleMetalFx(vk::ImageView perceptual_view, vk::Comma
         scaler = std::make_unique<MetalFx>(instance.GetInstance(), instance.GetDevice(),
             VULKAN_HPP_DEFAULT_DISPATCHER.vkGetInstanceProcAddr);
         ASSERT_MSG(scaler->Available(), "MetalFX generated-frame scaler unavailable");
+    }
+    if (Gow3Runtime::Enabled()) {
+        const auto s=Gow3Runtime::Applied();
+        const auto w=Gow3Runtime::Widths[s.resolution], h=Gow3Runtime::Heights[s.resolution];
+        if(w!=metalfx_width || h!=metalfx_height) {
+            draw_scheduler.Finish();cmd=draw_scheduler.CommandBuffer();
+            metalfx_view.reset();metalfx_output=VideoCore::UniqueImage{};metalfx_initialized=false;
+            metalfx_width=w;metalfx_height=h;
+        }
     }
     if (!metalfx_output) {
         draw_scheduler.Finish();
@@ -613,6 +632,45 @@ vk::ImageView Presenter::UpscaleMetalFx(vk::ImageView perceptual_view, vk::Comma
             .format=metalfx_float_output ? format : encoded_srgb ? vk::Format::eR8G8B8A8Srgb : format,
             .components={vk::ComponentSwizzle::eIdentity,vk::ComponentSwizzle::eIdentity,vk::ComponentSwizzle::eIdentity,vk::ComponentSwizzle::eOne},
             .subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}}));
+    }
+    if (Gow3Runtime::Enabled() && source) {
+        const auto [w,h]=Gow3Runtime::RenderSize(Gow3Runtime::Applied());
+        const vk::Extent2D input_size{w,h};
+        if(size!=input_size) {
+            if(!runtime_input || runtime_input_size!=input_size || runtime_input_format!=source_format || runtime_input_sample_format!=sampled_format) {
+                draw_scheduler.Finish();cmd=draw_scheduler.CommandBuffer();
+                runtime_input_view.reset();runtime_input=VideoCore::UniqueImage(instance.GetDevice(),instance.GetAllocator());
+                runtime_input.Create({.flags=vk::ImageCreateFlagBits::eMutableFormat,.imageType=vk::ImageType::e2D,
+                    .format=source_format,.extent={w,h,1},.mipLevels=1,.arrayLayers=1,.samples=vk::SampleCountFlagBits::e1,
+                    .tiling=vk::ImageTiling::eOptimal,.usage=vk::ImageUsageFlagBits::eTransferDst|vk::ImageUsageFlagBits::eSampled|vk::ImageUsageFlagBits::eColorAttachment});
+                VkExportMetalObjectCreateInfoEXT e{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT};e.exportObjectType=VK_EXPORT_METAL_OBJECT_TYPE_METAL_TEXTURE_BIT_EXT;
+                // The guest display may reinterpret RGBA backing bytes through
+                // a BGRA view. Retain that view after resizing, just as in the
+                // non-resized path, or red and blue are exchanged by MetalFX.
+                const auto view_format=sampled_format==vk::Format::eUndefined?source_format:sampled_format;
+                const auto perceptual=(view_format==vk::Format::eB8G8R8A8Srgb)?vk::Format::eB8G8R8A8Unorm:
+                    (view_format==vk::Format::eR8G8B8A8Srgb)?vk::Format::eR8G8B8A8Unorm:view_format;
+                runtime_input_view=Check(instance.GetDevice().createImageViewUnique({.pNext=&e,.image=vk::Image(runtime_input),.viewType=vk::ImageViewType::e2D,
+                    .format=perceptual,.subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}}));
+                runtime_input_size=input_size;runtime_input_format=source_format;runtime_input_sample_format=sampled_format;runtime_input_initialized=false;
+            }
+            const std::array barriers{
+                vk::ImageMemoryBarrier2{.srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,.srcAccessMask=vk::AccessFlagBits2::eMemoryWrite,
+                    .dstStageMask=vk::PipelineStageFlagBits2::eTransfer,.dstAccessMask=vk::AccessFlagBits2::eTransferRead,
+                    .oldLayout=vk::ImageLayout::eGeneral,.newLayout=vk::ImageLayout::eGeneral,.image=source,.subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}},
+                vk::ImageMemoryBarrier2{.srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,.srcAccessMask=vk::AccessFlagBits2::eMemoryRead,
+                    .dstStageMask=vk::PipelineStageFlagBits2::eTransfer,.dstAccessMask=vk::AccessFlagBits2::eTransferWrite,
+                    .oldLayout=runtime_input_initialized?vk::ImageLayout::eGeneral:vk::ImageLayout::eUndefined,.newLayout=vk::ImageLayout::eGeneral,
+                    .image=vk::Image(runtime_input),.subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}}};
+            cmd.pipelineBarrier2({.imageMemoryBarrierCount=u32(barriers.size()),.pImageMemoryBarriers=barriers.data()});
+            vk::ImageBlit blit{.srcSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},.dstSubresource={vk::ImageAspectFlagBits::eColor,0,0,1}};
+            blit.srcOffsets[1]=vk::Offset3D{int(size.width),int(size.height),1};blit.dstOffsets[1]=vk::Offset3D{int(w),int(h),1};
+            cmd.blitImage(source,vk::ImageLayout::eGeneral,vk::Image(runtime_input),vk::ImageLayout::eGeneral,blit,vk::Filter::eLinear);
+            const vk::MemoryBarrier2 ready{.srcStageMask=vk::PipelineStageFlagBits2::eTransfer,.srcAccessMask=vk::AccessFlagBits2::eTransferWrite,
+                .dstStageMask=vk::PipelineStageFlagBits2::eAllCommands,.dstAccessMask=vk::AccessFlagBits2::eMemoryRead};
+            cmd.pipelineBarrier2({.memoryBarrierCount=1,.pMemoryBarriers=&ready});
+            perceptual_view=*runtime_input_view;size=input_size;runtime_input_initialized=true;
+        }
     }
     ASSERT_MSG(scaler->Configure(size.width,size.height,metalfx_width,metalfx_height,
         perceptual_view,vk::Image(metalfx_output)),"MetalFX spatial scaler configuration failed");
@@ -662,20 +720,56 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
                               const VideoCore::ImageViewInfo& ui_view, vk::CommandBuffer& cmd,
                               bool dump, int index) {
     frame->has_generated = false;
+    frame->generated_async = false;
     auto* inputs = rasterizer->GetFrameGenInputs();
+    if (Gow3Runtime::Enabled() && !FrameGen::Requested()) {
+        if (frame_interpolator) frame_interpolator->ResetHistory();
+        if (inputs) inputs->InvalidateHistory();
+        return;
+    }
     if (!inputs)
         return;
+    if(Gow3Runtime::Enabled() && frame_interpolator && !frame_interpolator->Available()) {
+        Gow3Runtime::interpolation_supported=false;
+        auto safe=Gow3Runtime::Requested();safe.interpolation=0;safe.cap=true;
+        Gow3Runtime::RequestedBits()=Gow3Runtime::Pack(safe);
+        Gow3Overlay::ShowNotice("MetalFX interpolation unavailable; real frames retained",4000);
+        inputs->InvalidateHistory();return;
+    }
     // A menu, movie, missing scene snapshot or unsupported format must show the
     // real frame only. A reset on the next valid frame prevents cross-scene ghosts.
     if (!frame_interpolator || !frame_interpolator->Available() || frame->is_hdr || !ui_id ||
         !inputs->Ready(address) || !Gow3Settings::Get().vsync ||
         std::getenv("GOW3_FRAMEGEN_INPUTS_ONLY")) {
+        static auto report = std::chrono::steady_clock::time_point{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now-report > std::chrono::seconds(5)) {
+            std::printf("Framegen waiting: %s (HDR=%d UI=%d VSync=%d)\n",
+                inputs->PendingReason(address), frame->is_hdr, bool(ui_id), bool(Gow3Settings::Get().vsync));
+            report=now;
+        }
         if (frame_interpolator)
             frame_interpolator->ResetHistory();
         inputs->FinishFrame();
         return;
     }
     const auto size = inputs->Size();
+    bool async_enabled = true;
+    if (const char* path = std::getenv("GOW3_FRAMEGEN_ASYNC_CONTROL")) {
+        if (FILE* file = std::fopen(path, "r")) {
+            async_enabled = std::fgetc(file) != '0';
+            std::fclose(file);
+        }
+    }
+    const bool separate=async_enabled && interpolation_scheduler &&
+        (!Gow3Runtime::Enabled() || !Gow3Runtime::Applied().scaling) && !Gow3Settings::Get().spatial_aa;
+    auto& target=interpolation_targets[frame->id];
+    auto& interpolation_output=separate?target.output:this->interpolation_output;
+    auto& interpolation_view=separate?target.view:this->interpolation_view;
+    auto& interpolation_linear=separate?target.linear:this->interpolation_linear;
+    auto& interpolation_size=separate?target.size:this->interpolation_size;
+    auto& interpolation_initialized=separate?target.initialized:this->interpolation_initialized;
+    interpolation_report_size=size;
     const auto device = instance.GetDevice();
     constexpr vk::ImageSubresourceRange range{vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
     if (interpolation_size != size) {
@@ -684,6 +778,7 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
         interpolation_linear.reset();
         interpolation_view.reset();
         interpolation_output = VideoCore::UniqueImage(device, instance.GetAllocator());
+        const std::array families{instance.GetGraphicsQueueFamilyIndex(),instance.GetPresentQueueFamilyIndex()};
         interpolation_output.Create({.flags = vk::ImageCreateFlagBits::eMutableFormat,
                                      .imageType = vk::ImageType::e2D,
                                      .format = vk::Format::eB8G8R8A8Unorm,
@@ -694,7 +789,10 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
                                      .tiling = vk::ImageTiling::eOptimal,
                                      .usage = vk::ImageUsageFlagBits::eColorAttachment |
                                               vk::ImageUsageFlagBits::eSampled |
-                                              vk::ImageUsageFlagBits::eTransferSrc});
+                                              vk::ImageUsageFlagBits::eTransferSrc,
+                                     .sharingMode = separate?vk::SharingMode::eConcurrent:vk::SharingMode::eExclusive,
+                                     .queueFamilyIndexCount = separate?2u:0u,
+                                     .pQueueFamilyIndices = separate?families.data():nullptr});
         VkExportMetalObjectCreateInfoEXT e{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT};
         e.exportObjectType = VK_EXPORT_METAL_OBJECT_TYPE_METAL_TEXTURE_BIT_EXT;
         interpolation_view =
@@ -726,11 +824,19 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
         view.format = vk::Format::eR8G8B8A8Unorm;
     if (view.format == vk::Format::eB8G8R8A8Srgb)
         view.format = vk::Format::eB8G8R8A8Unorm;
-    const auto ui_handle = *ui.FindView(view).image_view;
-    runtime.Transit(&ui, vk::ImageLayout::eGeneral, vk::PipelineStageFlagBits2::eAllCommands,
-                    vk::AccessFlagBits2::eShaderRead);
+    auto& targets=rasterizer->GetSceneTargets();
+    vk::ImageView ui_handle{};
+    vk::Image ui_image=ui.GetImage();
+    vk::Extent2D ui_size{ui.info.size.width,ui.info.size.height};
+    if(auto proxy=targets.SampleProxy(ui,view)) {
+        ui_image=proxy->image;ui_handle=proxy->view;const auto physical=targets.ProxySize(ui);ui_size={physical.width,physical.height};targets.PrepareSample(ui,0,vk::ImageLayout::eGeneral);
+    } else {
+        ui_handle=*ui.FindView(view).image_view;
+        runtime.Transit(&ui,vk::ImageLayout::eGeneral,vk::PipelineStageFlagBits2::eAllCommands,
+                        vk::AccessFlagBits2::eShaderRead);
+    }
     runtime.FlushBarriers();
-    const auto resources = inputs->Inputs(inputs->PrepareUI(ui_handle,cmd));
+    const auto resources = inputs->Inputs(inputs->PrepareUI(ui_handle,cmd,ui_size));
     auto parameters = inputs->Parameters();
     const auto temporal_size = inputs->TemporalSize();
     const bool configured =
@@ -742,11 +848,14 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
         return;
     }
     if (dump) {
+        std::printf("Framegen capture UI: %ux%u view=%s\n",ui_size.width,ui_size.height,vk::to_string(view.format).c_str());
         const vk::MemoryBarrier2 read{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
                                       .srcAccessMask = vk::AccessFlagBits2::eMemoryWrite,
                                       .dstStageMask = vk::PipelineStageFlagBits2::eTransfer,
                                       .dstAccessMask = vk::AccessFlagBits2::eTransferRead};
         cmd.pipelineBarrier2({.memoryBarrierCount = 1, .pMemoryBarriers = &read});
+        DumpRaw(instance,draw_scheduler,cmd,ui_image,vk::ImageLayout::eGeneral,
+                ui_size.width,ui_size.height,"framegen-ui",index);
         DumpRaw(instance, draw_scheduler, cmd, inputs->ColorImage(), vk::ImageLayout::eGeneral,
                 size.width, size.height, "framegen-color", index);
         DumpRaw(instance, draw_scheduler, cmd, inputs->PreviousColorImage(),
@@ -780,8 +889,10 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
         inputs->FinishFrame();
         return;
     }
-    draw_scheduler.WaitExternal(frame_interpolator->DoneSemaphore(), value);
-    cmd = draw_scheduler.CommandBuffer();
+    auto& finish_scheduler=separate?*interpolation_scheduler:draw_scheduler;
+    if(separate)inputs->Consumer(frame_interpolator->DoneSemaphore(),value);
+    finish_scheduler.WaitExternal(frame_interpolator->DoneSemaphore(), value);
+    cmd = finish_scheduler.CommandBuffer();
     if (dump && frame_interpolator->OutputInterpolated()) {
         std::printf("Framegen capture: interpolated=1 delta=%.6f color=%ux%u\n",
                     parameters.delta_seconds, size.width, size.height);
@@ -789,7 +900,7 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
         b.newLayout = vk::ImageLayout::eGeneral;
         b.dstAccessMask = vk::AccessFlagBits2::eTransferRead;
         cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b});
-        DumpRaw(instance, draw_scheduler, cmd, vk::Image(interpolation_output),
+        DumpRaw(instance, finish_scheduler, cmd, vk::Image(interpolation_output),
                 vk::ImageLayout::eGeneral, size.width, size.height, "framegen-intermediate-bgra",
                 index);
         b.srcAccessMask = vk::AccessFlagBits2::eTransferRead;
@@ -808,7 +919,7 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
                               aa);
             output = spatial_aa.LinearView();
         }
-        if (metalfx) {
+        if (metalfx && (!Gow3Runtime::Enabled() || Gow3Runtime::Applied().scaling)) {
             if (!aa) {
                 b.oldLayout = vk::ImageLayout::eShaderReadOnlyOptimal;
                 b.newLayout = vk::ImageLayout::eGeneral;
@@ -816,7 +927,7 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
                 interpolation_initialized = false;
             }
             output = UpscaleMetalFx(aa ? spatial_aa.PerceptualView() : *interpolation_view, cmd,
-                                    output_size, true, false, 0, true);
+                                    output_size, true, false, 0, true,vk::Image(interpolation_output),vk::Format::eB8G8R8A8Unorm);
         } else if (aa)
             spatial_aa.PrepareForVulkan(cmd);
         const vk::ImageMemoryBarrier2 target{
@@ -832,10 +943,22 @@ void Presenter::GenerateFrame(Frame* frame, u64 address, VideoCore::ImageId ui_i
         cmd.pipelineBarrier2({.imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &target});
         auto settings = pp_settings;
         settings.srgb_input = metalfx && metalfx_float_output;
-        output = fsr_pass.Render(cmd, output, output_size, {generated->width, generated->height},
-                                 fsr_settings, false);
+        settings.rcas_attenuation=-1.0f;
+        if(!settings.hdr && output_size==vk::Extent2D{generated->width,generated->height} &&
+           fsr_settings.use_rcas && HostPasses::FsrPass::IdentityMode()==0)
+            settings.rcas_attenuation=fsr_settings.rcas_attenuation;
+        else
+            output = fsr_pass.Render(cmd, output, output_size, {generated->width, generated->height},
+                                     fsr_settings, false);
         pp_pass.Render(cmd, output, output_size, *generated, settings);
         frame->has_generated = true;
+    }
+    if(separate) {
+        generated->ready_semaphore=finish_scheduler.GetWorkSemaphore()->Handle();
+        generated->ready_tick=finish_scheduler.CurrentTick();
+        finish_scheduler.Flush();
+        frame->generated_async=true;
+        cmd=draw_scheduler.CommandBuffer();
     }
     inputs->FinishFrame();
 }
@@ -894,6 +1017,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
 
     vk::ImageView image_view{};
     vk::Extent2D image_size{};
+    vk::Image present_source{};
+    bool present_proxy = false;
     bool metalfx_encoded = false;
     if (upscaled) {
         const auto device = instance.GetDevice();
@@ -928,11 +1053,21 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
                     vk::ImageLayout::eTransferSrcOptimal, image.info.size.width,
                     image.info.size.height, "display", frame_dump_index);
         }
-        image_view = *image.FindView(view_info).image_view;
-        image_size = vk::Extent2D{image.info.size.width, image.info.size.height};
-        runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
+        auto& targets = rasterizer->GetSceneTargets();
+        if (auto proxy = targets.SampleProxy(image, view_info)) {
+            image_view = proxy->view;
+            present_source = proxy->image;
+            const auto size = targets.ProxySize(image);
+            image_size = {size.width, size.height};
+            present_proxy = true;
+        } else {
+            image_view = *image.FindView(view_info).image_view;
+            present_source = image.GetImage();
+            image_size = vk::Extent2D{image.info.size.width, image.info.size.height};
+            runtime.Transit(&image, vk::ImageLayout::eShaderReadOnlyOptimal,
                         vk::PipelineStageFlagBits2::eFragmentShader|vk::PipelineStageFlagBits2::eComputeShader,
                         vk::AccessFlagBits2::eShaderRead);
+        }
         runtime.FlushBarriers();
     }
     const int aa_mode=Gow3Settings::Get().spatial_aa;
@@ -943,7 +1078,9 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         auto perceptual_info=view_info;
         perceptual_info.format=view_info.format==vk::Format::eR8G8B8A8Srgb?
             vk::Format::eR8G8B8A8Unorm:vk::Format::eB8G8R8A8Unorm;
-        auto perceptual=*texture_cache.GetImage(image_id).FindView(perceptual_info).image_view;
+        auto& image = texture_cache.GetImage(image_id);
+        auto perceptual = present_proxy ? rasterizer->GetSceneTargets().SampleProxy(image, perceptual_info)->view
+                                        : *image.FindView(perceptual_info).image_view;
         spatial_aa.Render(cmdbuf,draw_scheduler,perceptual,image_view,image_size,aa_mode);
         if(frame_dump)DumpRaw(instance,draw_scheduler,cmdbuf,spatial_aa.Image(),vk::ImageLayout::eGeneral,
             image_size.width,image_size.height,"spatial-aa",frame_dump_index);
@@ -955,10 +1092,11 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             aa_used,image_size.width,image_size.height);
         last_aa=aa_mode;
     }
-    const auto hud_input_size = image_size;
+    auto hud_input_size = image_size;
+    if(Gow3Runtime::Enabled()){const auto [w,h]=Gow3Runtime::RenderSize(Gow3Runtime::Applied());hud_input_size={w,h};}
     bool hud_metalfx_applied = false;
 #ifdef __APPLE__
-    if (metalfx && !upscaled) {
+    if (metalfx && !upscaled && (!Gow3Runtime::Enabled() || Gow3Runtime::Applied().scaling)) {
         static unsigned color_trace = 0;
         if (color_trace++ < 3) std::printf("MetalFX display: base=%s view=%s presentation=%s pixel_format=%u\n",
             vk::to_string(texture_cache.GetImage(image_id).info.pixel_format).c_str(),
@@ -1002,15 +1140,20 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             perceptual_info.format = vk::Format::eR8G8B8A8Unorm;
         if (perceptual_info.format == vk::Format::eB8G8R8A8Srgb)
             perceptual_info.format = vk::Format::eB8G8R8A8Unorm;
-        const auto perceptual_view = aa_used?spatial_aa.PerceptualView():
-            *texture_cache.GetImage(image_id).FindView(perceptual_info).image_view;
+        auto& image = texture_cache.GetImage(image_id);
+        const auto perceptual_view = aa_used ? spatial_aa.PerceptualView() : present_proxy
+            ? rasterizer->GetSceneTargets().SampleProxy(image, perceptual_info)->view
+            : *image.FindView(perceptual_info).image_view;
         if(!aa_used) {
-            runtime.Transit(&texture_cache.GetImage(image_id),vk::ImageLayout::eGeneral,
+            if (present_proxy) rasterizer->GetSceneTargets().PrepareSample(image, 0, vk::ImageLayout::eGeneral);
+            else runtime.Transit(&image,vk::ImageLayout::eGeneral,
                 vk::PipelineStageFlagBits2::eAllCommands,vk::AccessFlagBits2::eShaderRead);
             runtime.FlushBarriers();
         }
         image_view = UpscaleMetalFx(perceptual_view,cmdbuf,image_size,
-                                   metalfx_encoded,frame_dump,frame_dump_index);
+                                   metalfx_encoded,frame_dump,frame_dump_index,false,
+                                   aa_used ? spatial_aa.Image() : present_source,
+                                   image.info.pixel_format,view_info.format);
         hud_metalfx_applied = true;
         // The SDR output uses an sRGB sampling view, matching the original display.
         if (!metalfx_float_output) metalfx_encoded = false;
@@ -1050,17 +1193,38 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
         fsr_settings.use_rcas &&
         Gow3Graphics::FsrPassRuns(fsr_settings.enable, true, int(image_size.width), int(image_size.height),
                                   int(frame->width), int(frame->height));
-    image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
-                                 fsr_settings, frame->is_hdr);
+    static std::array<int,6> last_filter_chain{-1,-1,-1,-1,-1,-1};
+    const std::array<int,6> filter_chain{int(image_size.width),int(image_size.height),
+        int(frame->width),int(frame->height),int(fsr_settings.enable),int(fsr_settings.use_rcas)};
+    if(trace_resolution && filter_chain!=last_filter_chain) {
+        std::printf("Presentation filters: input=%ux%u output=%ux%u FSR1=%d RCAS=%d active=%d\n",
+            image_size.width,image_size.height,frame->width,frame->height,fsr_settings.enable,
+            fsr_settings.use_rcas,Gow3Graphics::FsrPassRuns(fsr_settings.enable,fsr_settings.use_rcas,
+                image_size.width,image_size.height,frame->width,frame->height));
+        last_filter_chain=filter_chain;
+    }
+    auto presentation_settings = pp_settings;
+    presentation_settings.rcas_attenuation = -1.0f;
+#ifdef __APPLE__
+    // Identity-size sharpening and presentation share one fragment pass. This
+    // retains RCAS and its half-precision math without EASU or an RGBA16F trip.
+    if (!frame->is_hdr && !pp_settings.hdr && image_size == vk::Extent2D{frame->width,frame->height} &&
+        fsr_settings.use_rcas && HostPasses::FsrPass::IdentityMode() == 0 &&
+        attribute.attrib.pixel_format != Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb) {
+        presentation_settings.rcas_attenuation = fsr_settings.rcas_attenuation;
+    } else
+#endif
+        image_view = fsr_pass.Render(cmdbuf, image_view, image_size, {frame->width, frame->height},
+                                     fsr_settings, frame->is_hdr);
 
     // Vulkan has no sRGB variant of the 10-bit format, so an A2R10G10B10Srgb buffer reaches
     // the post process pass still sRGB encoded and has to be decoded there instead.
-    pp_settings.srgb_input =
+    presentation_settings.srgb_input =
         metalfx_encoded || attribute.attrib.pixel_format == Libraries::VideoOut::PixelFormat::A2R10G10B10Srgb;
     // gow3: black bars around a cutscene when the render resolution is not 16:9 (movie_bars.h).
-    pp_settings.picture = MovieBars::Cutscenes().Bars(image_size.width, image_size.height,
+    presentation_settings.picture = MovieBars::Cutscenes().Bars(image_size.width, image_size.height,
                                                       MovieBars::NowMs());
-    pp_pass.Render(cmdbuf, image_view, image_size, *frame, pp_settings);
+    pp_pass.Render(cmdbuf, image_view, image_size, *frame, presentation_settings);
     if (frame_dump) {
         // The presented image as the swapchain blit reads it (General after the pass).
         const vk::MemoryBarrier2 done{.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands,
@@ -1081,7 +1245,7 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     frame->ready_tick = draw_scheduler.CurrentTick();
     SubmitInfo info{};
     draw_scheduler.Flush(info);
-    if(frame->has_generated){frame->generated->ready_semaphore=frame->ready_semaphore;frame->generated->ready_tick=frame->ready_tick;}
+    if(frame->has_generated && !frame->generated_async){frame->generated->ready_semaphore=frame->ready_semaphore;frame->generated->ready_tick=frame->ready_tick;}
 
     // gow3: the GPU command thread runs at most GOW3_FRAMES_AHEAD (default 1) guest frames
     // ahead of the GPU: it waits here for the frame that many flips back. When the GPU is the
@@ -1225,7 +1389,9 @@ void Presenter::PresentLoadingFrame() {
     SubmitInfo info{};
     info.AddWait(swapchain.GetImageAcquiredSemaphore());
     info.AddSignal(swapchain.GetPresentReadySemaphore());
+    const auto acquired_tick=present_scheduler.CurrentTick();
     present_scheduler.Flush(info);
+    swapchain.AcquisitionConsumed(present_scheduler.GetWorkSemaphore()->Handle(),acquired_tick);
     {
         std::scoped_lock submit_lock{Scheduler::submit_mutex};
         swapchain.Present();
@@ -1236,6 +1402,23 @@ void Presenter::PresentLoadingFrame() {
 
 void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame) {
 #ifdef __APPLE__
+    // Transfer layer ownership only after all old submissions have scheduled
+    // their presents. nextDrawable and CAMetalDisplayLink must never overlap.
+    const auto live=Gow3Runtime::Applied();
+    // Fixed 60 Hz display-link presentation is qualified for 30+30. Keep
+    // higher-rate interpolation on the ordinary acquisition path until its
+    // deadline behavior under GPU saturation is qualified as well.
+    const bool high_rate_experiment=std::getenv("GOW3_FRAMEGEN_DISPLAY_LINK_HIGH_RATE")!=nullptr;
+    const unsigned requested=Gow3Runtime::Enabled() && live.interpolation ?
+        (live.interpolation==1 ? 60 : high_rate_experiment ? Gow3Runtime::refresh_hz.load() : 0) : 0;
+    const auto link_rate=Gow3MetalDisplayLinkDesiredRate(requested);
+    if(link_rate!=Gow3MetalDisplayLinkRate()) {
+        // Queue a marker, then wait WITHOUT holding the submission mutex:
+        // native MetalFX may be waiting for a ready event from another submit.
+        present_scheduler.Finish();
+        Gow3UpdateMetalDisplayLink(window.GetWindowInfo().render_surface,link_rate);
+    }
+
     if (is_game_frame && !is_reusing_frame && frame->has_generated) {
         // VSync/FIFO queues the midpoint before the current frame. Do not add a
         // CPU sleep: drawable acquisition already supplies presentation pacing.
@@ -1253,7 +1436,7 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
         if (seconds >= 5) {
             Gow3Overlay::SetFrameGenerationRates(float(interpolation_real_count / seconds),
                                                  float(interpolation_generated_count / seconds),
-                                                 interpolation_size.width, interpolation_size.height);
+                                                 interpolation_report_size.width, interpolation_report_size.height);
             std::printf("Framegen stats: real=%.3f generated=%.3f presents=%.3f per second "
                         "(submission counters; actual presentation is in Display timing)\n",
                         interpolation_real_count / seconds, interpolation_generated_count / seconds,
@@ -1460,7 +1643,9 @@ void Presenter::Present(Frame* frame, bool is_reusing_frame, bool is_game_frame)
     info.AddWait(frame->ready_semaphore, frame->ready_tick);
     info.AddSignal(swapchain.GetPresentReadySemaphore());
     info.AddSignal(frame->present_done);
+    const auto acquired_tick=scheduler.CurrentTick();
     scheduler.Flush(info);
+    swapchain.AcquisitionConsumed(scheduler.GetWorkSemaphore()->Handle(),acquired_tick);
 
     // Present to swapchain.
     {
@@ -1507,6 +1692,9 @@ Frame* Presenter::GetRenderFrame() {
         }
     }
 
+    if(Gow3Runtime::Enabled()) {
+        const auto s=Gow3Runtime::Applied();expected_frame_width=Gow3Runtime::Widths[s.resolution];expected_frame_height=Gow3Runtime::Heights[s.resolution];
+    }
     if (frame->width != expected_frame_width || frame->height != expected_frame_height ||
         frame->is_hdr != swapchain.GetHDR()) {
         RecreateFrame(frame, expected_frame_width, expected_frame_height);
@@ -1532,3 +1720,16 @@ void Presenter::SetExpectedGameSize(s32 width, s32 height) {
 }
 
 } // namespace Vulkan
+
+
+
+#ifdef __APPLE__
+extern "C" __attribute__((visibility("default"))) bool Gow3MetalAsyncSubmit() {
+    if (!Vulkan::FrameGen::Requested()) return false;
+    if (const char* path=std::getenv("GOW3_FRAMEGEN_SUBMIT_CONTROL"))
+        if (FILE* file=std::fopen(path,"r")) {
+            const bool enabled=std::fgetc(file)!='0';std::fclose(file);return enabled;
+        }
+    return true;
+}
+#endif

@@ -1,4 +1,4 @@
-GOD OF WAR III — COMMUNITY ARM64 EDITION 0.4.1
+GOD OF WAR III — COMMUNITY ARM64 EDITION 0.4.20
 
 ENGLISH
 1. Move God of War III.app to Applications and open it.
@@ -78,8 +78,9 @@ With the 60 FPS cap the app temporarily selects 60 Hz, then restores the previou
 display mode on exit. Unlimited leaves the refresh mode unchanged.
 O cap de 60 FPS usa 60 Hz temporariamente; Ilimitado preserva a escolha da tela.
 El límite de 60 FPS usa 60 Hz temporalmente; Ilimitado conserva el modo de pantalla.
-The game HUD always shows actual render dimensions and MetalFX mode/preset,
-including when the optional Apple Metal performance HUD is off.
+The launcher HUD switch hides both performance overlays when off. Key 0 toggles
+shortcut hints, 1 performance, 2 MetalFX, 3 resolution and 4 the 60 FPS / 60 Hz cap.
+Frame generation is excluded from this build.
 
 DATA / DADOS / DATOS
 ~/Library/Application Support/God of War III ARM64
@@ -88,3 +89,43 @@ app. An update preserves them. Logs are available from the launcher's Open logs
 button; preparation-stage logs are under Prepared/<recipe>/<dump>/Base or Profiles.
 Exit through the game menu to save progress before using Stop game.
 Source and issues: https://github.com/xPXavierx/gow3-macos-arm64
+
+
+COMMUNITY SHADERS — DOWNLOAD AND PREPARE
+Click Play for the automatic daily update check. No GitHub account is needed to
+download the official signed catalogue. Community shaders > Update official
+catalogue checks now; it only downloads/verifies. Compatible combinations are
+prepared from your own dump next time you start the game and cached on your Mac.
+The shared catalogue contains descriptions, not another player's compiled GPU cache.
+
+CONTRIBUTE ON GITHUB
+Play normally, exit the game and open Community shaders > Contribute on GitHub.
+Confirm Continue on GitHub. Finder selects GOW3-<digest>.txt; your browser opens the
+official form. Sign in, drag that selected file into the attachment field and
+click Create. Opening the browser alone does not submit it. No dump, saves or logs.
+Submissions are validated, reviewed and tested before signed publication.
+
+SHADERS COMUNITARIOS / SHADERS COMUNITÁRIOS
+PT-BR: Jogar verifica atualizações diariamente, sem conta GitHub para baixar.
+Shaders comunitários > Atualizar catálogo oficial só baixa/verifica; a preparação
+acontece ao iniciar o jogo e o cache é reutilizado. Para contribuir: jogue, saia e
+use Contribuir pelo GitHub > Continuar no GitHub. Arraste o .txt selecionado no
+Finder para o formulário, entre na sua conta e confirme Create. Nada é enviado
+automaticamente. Não anexe dump, saves ou logs. Contribuições passam por revisão.
+
+ES: Jugar busca actualizaciones a diario, sin cuenta de GitHub para descargar.
+Shaders comunitarios > Actualizar catálogo oficial solo descarga/verifica; se
+prepara al iniciar el juego y se reutiliza la caché. Para contribuir: juega, sal y
+usa Contribuir en GitHub > Continuar en GitHub. Arrastra el .txt seleccionado en
+Finder al formulario, inicia sesión y confirma Create. Nada se envía automáticamente.
+No adjuntes dump, partidas ni registros. Se revisan las contribuciones antes de publicarse.
+
+GUIDES / GUIAS / GUÍAS
+https://github.com/xPXavierx/gow3-macos-arm64/blob/macos-arm64/docs/community-shaders.md
+https://github.com/xPXavierx/gow3-macos-arm64/blob/macos-arm64/docs/community-shaders.pt-BR.md
+https://github.com/xPXavierx/gow3-macos-arm64/blob/macos-arm64/docs/community-shaders.es.md
+
+The catalogue is partial; new combinations can still pause for compilation.
+It is not a complete-campaign or zero-stutter guarantee. Clearing shader cache is
+for troubleshooting/comparisons, not normal catalogue updates. Saves, settings,
+ARM64 preparation and downloaded official catalogue data are preserved.

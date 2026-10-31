@@ -13,11 +13,14 @@ Swift UI's lower deployment target does not establish support for older systems.
 
 The UI offers English, Brazilian Portuguese and Spanish; fixed 720p, 1080p,
 1440p or 2160p output; native rendering or spatial MetalFX Quality, Balanced or
-Performance; 60 FPS or Unlimited; and the Metal HUD. Frame generation stays off.
-The in-game HUD always includes actual game-image input dimensions and applied
+Performance; 60 FPS or Unlimited; and a performance HUD switch. Frame generation stays off.
+The switch controls both Apple's Metal HUD and the in-game diagnostic overlay.
+When enabled, the latter includes actual game-image input dimensions and applied
 MetalFX status/preset, published atomically by the renderer before window fitting.
-It remains visible when the optional Apple Metal HUD is off. English, Brazilian
-Portuguese and Spanish labels follow the launcher language.
+When disabled, both overlays are hidden; the game's own health/mana UI is unchanged.
+English, Brazilian Portuguese and Spanish labels follow the launcher language.
+The system cursor stays hidden while the game has focus; changing to another
+application releases it. The host settings menu retains its own mouse cursor.
 V-Sync, Retina, fullscreen and the two-image swapchain remain enabled. The default
 60 FPS mode retains the checkpoint's minimum presentation duration.
 
@@ -41,6 +44,15 @@ the dump itself or a containing folder up to two levels above it; cancellation
 preserves the previous choice. Missing folders are checked again before Play.
 Executable/module hashes are checked before boot. This local package supports the
 same executable used for its AOT preparation, not arbitrary game updates/mods.
+
+The footer's **Clear shader cache** action removes only
+`User/cache/CUSA01623` under the application's data directory. Saves, preferences,
+other game caches and prepared CPU code are preserved. It is disabled while the
+launcher is preparing/running a game, and takes the same `session.lock` flock as
+`session.py` to exclude sessions launched by another app copy. Play is blocked
+while clearing; redirected child paths are refused. Missing caches are harmless.
+This clears the port's cache, not internal macOS/Metal caches. The next game
+session rebuilds encountered variants; first use can pause again.
 
 ## Build
 
@@ -107,3 +119,8 @@ archive.** The local app contains game-derived executable images and AOT code,
 although the full dump/assets stay external. It is a private build for this
 user's supplied dump. This launcher source, build recipes and port patches can
 be included in the source-only archive separately.
+
+Graphics startup prepares known cached pipelines before play. Unseen variants
+wait for their required shaders instead of omitting draws. This avoids incomplete
+rendering from pending compilation, but first-use pauses remain possible. See
+[shader preparation and comparison](../native/SHADER_PREPARATION.md).

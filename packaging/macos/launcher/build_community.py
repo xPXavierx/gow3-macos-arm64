@@ -74,8 +74,23 @@ def main():
     subprocess.run(['/usr/bin/xcrun', 'swiftc', '-O', '-target', 'arm64-apple-macos14.0',
         '-framework', 'CoreGraphics', str(source / 'DisplayMode.swift'),
         '-o', str(resources / 'DisplayMode')], check=True)
-    for name in ('session.py', 'community.py', 'Help-pt-BR.txt'):
+    for name in ('session.py', 'community.py', 'aot_vector_cache.py', 'Help-pt-BR.txt'):
         shutil.copy2(source / name, resources / ('Help.txt' if name == 'Help-pt-BR.txt' else name))
+    shutil.copy2(repo / 'packaging/macos/native/shader_catalog.py', resources / 'shader_catalog.py')
+    shutil.copy2(repo / 'packaging/macos/native/community_catalog.py', resources / 'community_catalog.py')
+    shutil.copy2(repo / 'packaging/macos/native/catalog_service.py', resources / 'catalog_service.py')
+    guide_folder = resources / 'Guides'
+    guide_folder.mkdir(exist_ok=True)
+    for guide in ('community-shaders.md', 'community-shaders.pt-BR.md', 'community-shaders.es.md'):
+        shutil.copy2(repo / 'docs' / guide, guide_folder / guide)
+    shutil.copy2(source/'CommunityCatalogue.pub',resources/'CommunityCatalogue.pub')
+    subprocess.run(['/usr/bin/xcrun','swiftc','-O','-target','arm64-apple-macos14.0',
+        str(source/'CatalogTrust.swift'),'-o',str(resources/'CatalogTrust')],check=True)
+    subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(resources/'CatalogTrust')],check=True)
+    shutil.copy2(Path(__file__).with_name('CommunityCatalog.jsonl'), resources / 'CommunityCatalog.jsonl')
+    if (resources / 'ShaderCatalog').exists():
+        shutil.rmtree(resources / 'ShaderCatalog')
+    shutil.copytree(Path(__file__).with_name('ShaderCatalog'), resources / 'ShaderCatalog')
     runtime = resources / 'Runtime'
     shutil.copy2(repo / 'run.py', runtime / 'run.py')
     shutil.rmtree(runtime / 'scripts')
@@ -125,7 +140,7 @@ def main():
     # Hash the preparation policy, headers and native tools, independently of UI
     # cosmetics. A changed recipe cannot reuse stale locally generated code.
     h = hashlib.sha256(b'community-aot-v1;zig-0.15.2;arm64-macos26;O2;fp-contract-off;no-strict-aliasing\n')
-    inputs = [resources / 'community.py', resources / 'supported-game.json', compiler / 'zig']
+    inputs = [resources / 'community.py', resources / 'aot_vector_cache.py', resources / 'supported-game.json', compiler / 'zig']
     inputs += list((resources / 'Recompiler/include').rglob('*.h')) + list(tools.iterdir())
     inputs += list((runtime / 'scripts').glob('*.py')) + list(native.glob('*.py'))
     inputs += list((runtime / 'patches').glob('*.xml'))
@@ -133,13 +148,15 @@ def main():
         h.update(str(file.relative_to(resources)).encode() + b'\0' + file.read_bytes())
     recipe = h.hexdigest()[:24]
     manifest = json.loads((resources / 'build-manifest.json').read_text())
-    manifest.update(distribution='community-first-run', version='0.4.1', profiles=0,
+    manifest.update(distribution='community-first-run', version='0.4.20', profiles=0,
         local_private_aot=False, automatic_preparation=True, preparation_recipe=recipe,
         compiler='Zig 0.15.2 / Clang 20.1.2', requires_xcode=False, requires_homebrew=False,
-        initial_preparation_offline=True, tested_title_id='CUSA01623', tested_version='1.02')
+        initial_preparation_offline=True, tested_title_id='CUSA01623', tested_version='1.02',
+        signed_community_catalogue=True, community_contribution='github-browser-consent',
+        community_catalogue_abi='f9b9a649560a0b85')
     (resources / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     plist = plistlib.loads((contents / 'Info.plist').read_bytes())
-    plist.update(CFBundleVersion='5', CFBundleShortVersionString='0.4.1')
+    plist.update(CFBundleVersion='24', CFBundleShortVersionString='0.4.20')
     (contents / 'Info.plist').write_bytes(plistlib.dumps(plist))
     forbidden = {'boot-linked.bin', 'eboot.bin', 'eboot.elf', 'linked.elf', 'functions.tsv', 'offsets.txt',
                  'libgow3-recompiled.dylib', 'analysis.json', 'link.json', 'aot-patches.json', 'preferences.json'}

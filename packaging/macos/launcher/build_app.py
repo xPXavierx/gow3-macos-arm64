@@ -38,7 +38,7 @@ subprocess.run(['/usr/bin/xcrun', 'swiftc', '-O', '-target', 'arm64-apple-macos1
     '-o', str(resources/'DisplayMode')], check=True)
 plist = {'CFBundleExecutable':'GOW3Launcher','CFBundleIdentifier':'org.gow3pc.launcher',
     'CFBundleName':'God of War III','CFBundleDisplayName':'God of War III · Apple Silicon',
-    'CFBundlePackageType':'APPL','CFBundleVersion':'5','CFBundleShortVersionString':'0.4.1',
+    'CFBundlePackageType':'APPL','CFBundleVersion':'24','CFBundleShortVersionString':'0.4.20',
     'LSMinimumSystemVersion':'26.0','LSArchitecturePriority':['arm64'],
     'LSApplicationCategoryType':'public.app-category.games','LSSupportsGameMode':True,
     'GCSupportsGameMode':True,'NSHighResolutionCapable':True,
@@ -58,6 +58,20 @@ if a.profiles:
     shutil.copy2(a.profiles/'God_of_War_III_Remastered.xml',rt/'patches/God_of_War_III_Remastered.xml')
 shutil.copy2(Path(__file__).with_name('session.py'),resources/'session.py')
 shutil.copy2(Path(__file__).with_name('Help-pt-BR.txt'),resources/'Help.txt')
+shutil.copy2(repo / 'packaging/macos/native/shader_catalog.py', resources / 'shader_catalog.py')
+shutil.copy2(repo / 'packaging/macos/native/community_catalog.py', resources / 'community_catalog.py')
+shutil.copy2(repo / 'packaging/macos/native/catalog_service.py', resources / 'catalog_service.py')
+guide_folder = resources / 'Guides'
+guide_folder.mkdir(exist_ok=True)
+for guide in ('community-shaders.md', 'community-shaders.pt-BR.md', 'community-shaders.es.md'):
+    shutil.copy2(repo / 'docs' / guide, guide_folder / guide)
+shutil.copy2(Path(__file__).with_name('CommunityCatalogue.pub'), resources / 'CommunityCatalogue.pub')
+subprocess.run(['/usr/bin/xcrun','swiftc','-O','-target','arm64-apple-macos14.0',
+    str(Path(__file__).with_name('CatalogTrust.swift')),'-o',str(resources/'CatalogTrust')],check=True)
+shutil.copy2(Path(__file__).with_name('CommunityCatalog.jsonl'), resources / 'CommunityCatalog.jsonl')
+if (resources / 'ShaderCatalog').exists():
+    shutil.rmtree(resources / 'ShaderCatalog')
+shutil.copytree(Path(__file__).with_name('ShaderCatalog'), resources / 'ShaderCatalog')
 prof = resources/'Profiles'
 prof.mkdir()
 profile_count = 0
@@ -92,7 +106,7 @@ queue = []
 for src in (a.renderer,a.moltenvk):
     dest=frameworks/src.name
     shutil.copy2(src,dest); originals[dest]=src.resolve();queue.append(dest)
-for binary in (macos/'GOW3Launcher',resources/'DisplayMode',host,rt/'bin/gow3-probe-arm64',py/'bin/python3.14'):
+for binary in (macos/'GOW3Launcher',resources/'DisplayMode',resources/'CatalogTrust',host,rt/'bin/gow3-probe-arm64',py/'bin/python3.14'):
     queue.append(binary);originals[binary]=binary
 for binary in (py/'lib/python3.14/lib-dynload').glob('*.so'):
     queue.append(binary)
@@ -182,10 +196,14 @@ for binary in prof.rglob('*.dylib'):
 subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(rt/'bin/gow3-probe-arm64.app')],check=True)
 subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(app)],check=True)
 subprocess.run(['/usr/bin/codesign','--verify','--deep','--strict',str(app)],check=True)
-(resources/'build-manifest.json').write_text(json.dumps({'architecture':'arm64','minimum_macos':'26.0','profiles':profile_count,
+(resources/'build-manifest.json').write_text(json.dumps({'version':'0.4.20','architecture':'arm64','minimum_macos':'26.0','profiles':profile_count,
     'bundled_libraries':len(list(frameworks.iterdir())),'full_game_dump_bundled':False,
     'local_private_aot':not a.runtime_only,'runtime_staging_only':a.runtime_only,
-    'display_info_hud':True,'default_language':'en','branding':branding},indent=2))
+    'display_info_hud':True,'default_language':'en','branding':branding,
+    'signed_community_catalogue':True,'community_contribution':'github-browser-consent',
+    'community_catalogue_abi':'f9b9a649560a0b85',
+    'frame_generation_available':False,'frame_generation_available_in_launcher':False,
+    'frame_generation_default':False},indent=2))
 # The manifest is a sealed resource too.
 subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(app)],check=True)
 print('Built',app,flush=True)

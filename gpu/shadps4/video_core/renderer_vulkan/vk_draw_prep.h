@@ -9,7 +9,9 @@
 // the graphics pipeline and resource sharps of each direct draw. All helpers run as
 // SCHED_IDLE: they only use idle cores. The GPU thread uses a prepared draw only when the
 // running register checksums match and the flattened user data it computes itself equals the
-// worker's; otherwise it takes the regular path. Workers never create or compile anything.
+// worker's; otherwise it takes the regular path. Once the shader modules are known, workers
+// also queue missing pipeline combinations from owned snapshots. The GPU thread checks the
+// live full key before publishing/using one; a required draw always waits if it is not ready.
 
 #pragma once
 
@@ -127,6 +129,10 @@ public:
         std::atomic<bool> scanned{false};
         std::atomic<bool> claimed{false};
         std::atomic<bool> gpu_done{false};
+        // Protected by DrawPreparation::mutex; a miss can be retried when a
+        // newly published shader makes the still-pending draws preparable.
+        u64 preparation_generation{};
+        bool preparation_finished = false;
     };
 
 private:

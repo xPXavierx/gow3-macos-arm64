@@ -2,38 +2,47 @@
 #version 450
 #extension GL_EXT_samplerless_texture_functions : require
 layout(local_size_x=8,local_size_y=8)in;
+#ifndef DEPTH_MOTION_ONLY
 layout(binding=0)uniform texture2D color_src;
+#endif
 #ifndef UI_ONLY
 layout(binding=1)uniform texture2D depth_src;
 layout(binding=2)uniform texture2D vertex_motion;
 #endif
+#ifndef DEPTH_MOTION_ONLY
 layout(binding=3,rgba8)uniform writeonly image2D color_dst;
+#endif
 #ifndef UI_ONLY
 layout(binding=4,r32f)uniform writeonly image2D depth_dst;
 layout(binding=5,rg16f)uniform writeonly image2D motion_dst;
 #endif
 void main(){
  ivec2 p=ivec2(gl_GlobalInvocationID.xy);
+#ifndef DEPTH_MOTION_ONLY
  if(all(lessThan(p,imageSize(color_dst)))){
- ivec2 colorStep=(textureSize(color_src,0)+imageSize(color_dst)-1)/imageSize(color_dst);
- vec3 color=vec3(0);int samples=0;
- for(int y=0;y<colorStep.y;++y)for(int x=0;x<colorStep.x;++x){
-  ivec2 at=min(p*colorStep+ivec2(x,y),textureSize(color_src,0)-1);
-  color+=texelFetch(color_src,at,0).rgb;++samples;
+ vec2 lo=vec2(p)*vec2(textureSize(color_src,0))/vec2(imageSize(color_dst));
+ vec2 hi=vec2(p+1)*vec2(textureSize(color_src,0))/vec2(imageSize(color_dst));
+ vec3 color=vec3(0);float weight=0;
+ for(int y=int(floor(lo.y));y<int(ceil(hi.y));++y)for(int x=int(floor(lo.x));x<int(ceil(hi.x));++x){
+  vec2 overlap=max(vec2(0),min(hi,vec2(x+1,y+1))-max(lo,vec2(x,y)));
+  float w=overlap.x*overlap.y;
+  color+=texelFetch(color_src,clamp(ivec2(x,y),ivec2(0),textureSize(color_src,0)-1),0).rgb*w;weight+=w;
  }
- imageStore(color_dst,p,vec4(color/float(samples),1));
+ imageStore(color_dst,p,vec4(color/max(weight,1e-6),1));
  }
+#endif
 #ifndef UI_ONLY
  if(any(greaterThanEqual(p,imageSize(depth_dst))))return;
- ivec2 step=(textureSize(depth_src,0)+imageSize(depth_dst)-1)/imageSize(depth_dst);
- ivec2 base=p*step,nearest=min(base,textureSize(depth_src,0)-1);
+ vec2 depthLo=vec2(p)*vec2(textureSize(depth_src,0))/vec2(imageSize(depth_dst));
+ vec2 depthHi=vec2(p+1)*vec2(textureSize(depth_src,0))/vec2(imageSize(depth_dst));
+ ivec2 nearest=clamp(ivec2(floor(depthLo)),ivec2(0),textureSize(depth_src,0)-1);
  float z=texelFetch(depth_src,nearest,0).r;
- // Forward depth: retain the nearest surface and the vector at that same pixel.
- for(int y=0;y<step.y;++y)for(int x=0;x<step.x;++x){
-  ivec2 at=min(base+ivec2(x,y),textureSize(depth_src,0)-1);
+ for(int y=int(floor(depthLo.y));y<int(ceil(depthHi.y));++y)for(int x=int(floor(depthLo.x));x<int(ceil(depthHi.x));++x){
+  ivec2 at=clamp(ivec2(x,y),ivec2(0),textureSize(depth_src,0)-1);
   float d=texelFetch(depth_src,at,0).r;if(d<z){z=d;nearest=at;}
  }
- vec4 mv=texelFetch(vertex_motion,nearest,0);
+ ivec2 motionAt=clamp(ivec2((vec2(nearest)+0.5)*vec2(textureSize(vertex_motion,0))/vec2(textureSize(depth_src,0))),ivec2(0),textureSize(vertex_motion,0)-1);
+ vec4 mv=texelFetch(vertex_motion,motionAt,0);
 #ifdef COMPACT_MOTION
  bool history=true; // invalid history was zeroed in the producing fragment shader
 #else

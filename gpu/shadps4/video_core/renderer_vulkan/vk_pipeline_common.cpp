@@ -36,8 +36,15 @@ void Pipeline::BindResources(DescriptorWrites& set_writes,
         IsCompute() ? vk::PipelineBindPoint::eCompute : vk::PipelineBindPoint::eGraphics;
     const auto stage_flags = IsCompute() ? vk::ShaderStageFlagBits::eCompute : AllGraphicsStageBits;
     const vk::PipelineLayout layout = *pipeline_layout;
-    scheduler.Record([layout, stage_flags, push_data](vk::CommandBuffer cmdbuf) {
-        cmdbuf.pushConstants(layout, stage_flags, 0u, sizeof(push_data), &push_data);
+    // Each shader indexes metadata by its constant unified binding. Copy only
+    // the used prefix, retaining the original 128-byte header for all pipelines.
+    const u32 bindings = set_writes.empty() ? 0 :
+        set_writes.back().dstBinding + set_writes.back().descriptorCount;
+    const u32 push_bytes = offsetof(Shader::PushData, image_sizes) + 4 * std::min(bindings, Shader::PushData::ImageSizeCount);
+    const auto data = scheduler.RecordData(std::span<const u32>{
+        reinterpret_cast<const u32*>(&push_data), push_bytes / 4});
+    scheduler.Record([layout, stage_flags, data](vk::CommandBuffer cmdbuf) {
+        cmdbuf.pushConstants(layout, stage_flags, 0u, u32(data.size_bytes()), data.data());
     });
 
     // Bind descriptor set.

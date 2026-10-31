@@ -1,10 +1,13 @@
 // gow3: SDL3 window for the Vulkan swapchain (Cocoa, Windows, X11 or Wayland).
 #include <cstdio>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <SDL3/SDL.h>
 #ifdef __APPLE__
 #include <SDL3/SDL_metal.h>
+extern "C" void Gow3SetMetalHud(void*,bool);
+extern "C" void Gow3UpdateMetalDisplayLink(void*,unsigned);
 #endif
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -12,6 +15,7 @@
 #include "gow3_overlay.h"
 #include "gow3_graphics.h"
 #include "gow3_settings.h"
+#include "gow3_runtime_control.h"
 
 namespace Frontend {
 
@@ -75,6 +79,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
         metal_view=SDL_Metal_CreateView(window);
         ASSERT_MSG(metal_view,"Cannot create Metal view: {}",SDL_GetError());
         window_info.render_surface=SDL_Metal_GetLayer(metal_view);
+        if(Gow3Runtime::Enabled()) Gow3SetMetalHud(window_info.render_surface,Gow3Runtime::Requested().hud);
 #endif
     } else {
         UNREACHABLE_MSG("Unsupported SDL video driver {}", driver ? driver : "(none)");
@@ -93,8 +98,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     }
 #endif
     ApplyDisplayMode(Gow3Settings::Get().display_mode);
-    // gow3: the game has no mouse; the in-game menu draws its own cursor (Gow3Overlay::SetOpen).
-    SDL_HideCursor();
+    UpdateCursorMode();
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     width = w;
@@ -130,9 +134,45 @@ void WindowSDL::ApplyDisplayMode(int mode) {
 
 WindowSDL::~WindowSDL() {
 #ifdef __APPLE__
+    Gow3UpdateMetalDisplayLink(window_info.render_surface,0);
+#endif
+    SDL_SetWindowRelativeMouseMode(window, false);
+    SDL_ShowCursor();
+#ifdef __APPLE__
     if (metal_view) SDL_Metal_DestroyView(metal_view);
 #endif
     SDL_DestroyWindow(window);
+}
+
+void WindowSDL::UpdateCursorMode() {
+    const bool focused = (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+    const bool relative = focused && !text_active && !Gow3Overlay::CapturesInput();
+    // Hiding only once before the Cocoa fullscreen transition can leave the
+    // system cursor visible. Relative mode keeps it hidden while playing and
+    // SDL releases it when another app gains focus. The host menu needs absolute
+    // mouse coordinates and draws its own cursor.
+    if (SDL_GetWindowRelativeMouseMode(window) != relative) {
+        if (!SDL_SetWindowRelativeMouseMode(window, relative)) {
+            LOG_WARNING(Frontend, "Relative mouse mode: {}", SDL_GetError());
+        }
+    }
+    if (focused) SDL_HideCursor();
+    else SDL_ShowCursor();
+    const int state = int(focused) | (int(relative) << 1);
+    if (state != cursor_state) {
+        cursor_state = state;
+        std::printf("Window cursor: focused=%d hidden=%d relative=%d\n", int(focused),
+                    int(!SDL_CursorVisible()), int(SDL_GetWindowRelativeMouseMode(window)));
+    }
+    if(std::getenv("GOW3_WINDOW_STATS")) {
+        static auto report=std::chrono::steady_clock::time_point{};
+        const auto now=std::chrono::steady_clock::now();
+        if(now-report>std::chrono::seconds(1)) {
+            const auto flags=SDL_GetWindowFlags(window);
+            std::printf("Window visibility: focused=%d occluded=%d hidden=%d minimized=%d\n",int(focused),int(bool(flags&SDL_WINDOW_OCCLUDED)),int(bool(flags&SDL_WINDOW_HIDDEN)),int(bool(flags&SDL_WINDOW_MINIMIZED)));
+            report=now;
+        }
+    }
 }
 
 void WindowSDL::BeginTextInput(const std::string& initial, const std::string& prompt) {
@@ -172,6 +212,20 @@ bool WindowSDL::PollEvents() {
     }
     if (const int mode = Gow3Settings::Get().display_mode; mode != display_mode) {
         ApplyDisplayMode(mode);
+    }
+    if (!text_active && !Gow3Overlay::CapturesInput()) Gow3Runtime::PollCommands();
+#ifdef __APPLE__
+    static int last_hud=-1;
+    if(Gow3Runtime::Enabled() && last_hud!=int(Gow3Runtime::Requested().hud)) {
+        last_hud=Gow3Runtime::Requested().hud;Gow3SetMetalHud(window_info.render_surface,last_hud);
+    }
+#endif
+    static auto display_check=std::chrono::steady_clock::time_point{};
+    const auto now=std::chrono::steady_clock::now();
+    if (Gow3Runtime::Enabled() && now-display_check>std::chrono::milliseconds(500)) {
+        display_check=now;
+        const auto* mode=SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
+        if (mode && mode->refresh_rate>0) Gow3Runtime::ReportDisplay(unsigned(mode->refresh_rate+.5f));
     }
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
@@ -222,6 +276,7 @@ bool WindowSDL::PollEvents() {
             break;
         }
     }
+    UpdateCursorMode();
     return is_open;
 }
 

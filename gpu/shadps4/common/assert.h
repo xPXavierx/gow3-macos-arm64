@@ -14,6 +14,22 @@
 void assert_fail_impl();
 [[noreturn]] void unreachable_impl();
 
+namespace Common {
+// Speculation may read an unfinished future descriptor. Reject its job locally;
+// assertions in required rendering retain their normal fatal behavior.
+class ScopedSpeculativeCompilation {
+public:
+    ScopedSpeculativeCompilation() : previous{active} { active = true; }
+    ~ScopedSpeculativeCompilation() { active = previous; }
+    static bool Active() { return active; }
+    ScopedSpeculativeCompilation(const ScopedSpeculativeCompilation&) = delete;
+    ScopedSpeculativeCompilation& operator=(const ScopedSpeculativeCompilation&) = delete;
+private:
+    bool previous;
+    static inline thread_local bool active = false;
+};
+}
+
 #ifdef _MSC_VER
 #define SHAD_NO_INLINE __declspec(noinline)
 #else

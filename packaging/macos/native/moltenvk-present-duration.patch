@@ -1,8 +1,49 @@
 diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
-index ef8ca60..8cb66dd 100644
+index ef8ca60..c25e878 100644
 --- a/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
 +++ b/MoltenVK/MoltenVK/GPUObjects/MVKImage.mm
-@@ -1659,7 +1659,16 @@ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffe
+@@ -17,6 +17,7 @@
+  */
+ 
+ #include "MVKImage.h"
++#include <dlfcn.h>
+ #include "MVKQueue.h"
+ #include "MVKSwapchain.h"
+ #include "MVKSurface.h"
+@@ -1615,7 +1616,20 @@ id<CAMetalDrawable> MVKPresentableSwapchainImage::getCAMetalDrawable() {
+ 			uint32_t attemptCnt = _swapchain->getImageCount();	// Attempt a resonable number of times
+ 			for (uint32_t attemptIdx = 0; !_mtlDrawable && attemptIdx < attemptCnt; attemptIdx++) {
+ 				uint64_t startTime = getPerformanceTimestamp();
+-				_mtlDrawable = [_swapchain->getCAMetalLayer().nextDrawable retain];	// retained
++                using Acquire = bool(*)(void*,void**);
++                static Acquire acquire = [] {
++                    const char* host=getenv("GOW3_METAL_PACING_HOST");if(!host)return (Acquire)nullptr;
++                    void* image=dlopen(host,RTLD_NOLOAD|RTLD_LAZY);if(!image)return (Acquire)nullptr;
++                    auto fn=reinterpret_cast<Acquire>(dlsym(image,"Gow3AcquireMetalDisplayDrawable"));
++                    using Register=void(*)(unsigned);
++                    auto registerHost=reinterpret_cast<Register>(dlsym(image,"Gow3RegisterMetalPresentationAdapter"));
++                    if(fn && registerHost)registerHost(1);
++                    dlclose(image);return fn;
++                }();
++                void* native=nullptr;
++                if(acquire && acquire((void*)_swapchain->getCAMetalLayer(),&native))
++                    _mtlDrawable=(id<CAMetalDrawable>)native; // retained by the host
++                else _mtlDrawable=[_swapchain->getCAMetalLayer().nextDrawable retain];
+ 				addPerformanceInterval(getPerformanceStats().queue.retrieveCAMetalDrawable, startTime);
+ 				hasInvalidFormat = _mtlDrawable && !_mtlDrawable.texture.pixelFormat;
+ 				if (hasInvalidFormat) { releaseMetalDrawable(); }
+@@ -1656,10 +1670,27 @@ VkResult MVKPresentableSwapchainImage::presentCAMetalDrawable(id<MTLCommandBuffe
+ 		if (presentInfo.presentMode != VK_PRESENT_MODE_MAX_ENUM_KHR) {
+ 			mtlDrwbl.layer.displaySyncEnabledMVK = (presentInfo.presentMode != VK_PRESENT_MODE_IMMEDIATE_KHR);
+ 		}
++        using Present = bool(*)(void*);
++        static Present nativePresent=[] {
++            const char* host=getenv("GOW3_METAL_PACING_HOST");if(!host)return (Present)nullptr;
++            void* image=dlopen(host,RTLD_NOLOAD|RTLD_LAZY);if(!image)return (Present)nullptr;
++            auto fn=reinterpret_cast<Present>(dlsym(image,"Gow3PresentMetalDisplayDrawable"));dlclose(image);return fn;
++        }();
++        if(nativePresent && nativePresent((void*)mtlDrwbl))return;
++
  		if (presentInfo.desiredPresentTime) {
  			[mtlDrwbl presentAtTime: (double)presentInfo.desiredPresentTime * 1.0e-9];
  		} else {
@@ -20,3 +61,53 @@ index ef8ca60..8cb66dd 100644
  		}
  	}];
  
+diff --git a/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm b/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
+index dec4b45..283ae51 100644
+--- a/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
++++ b/MoltenVK/MoltenVK/GPUObjects/MVKQueue.mm
+@@ -18,6 +18,7 @@
+ 
+ #include "MVKInstance.h"
+ #include "MVKQueue.h"
++#include <dlfcn.h>
+ #include "MVKSurface.h"
+ #include "MVKSwapchain.h"
+ #include "MVKSync.h"
+@@ -84,8 +85,26 @@ VkResult MVKQueue::submit(MVKQueueSubmission* qSubmit) {
+ 	// Submit regardless of config result, to ensure submission semaphores and fences are signalled.
+ 	// The submissions will ensure a misconfiguration will be safe to execute.
+ 	VkResult rslt = qSubmit->getConfigurationResult();
+-	if (_execQueue) {
+-		std::unique_lock lock(_execQueueMutex);
++    using NativeAsync = bool(*)();
++    static NativeAsync nativeAsync = [] {
++        NativeAsync fn = nullptr;
++        if (const char* host = getenv("GOW3_METAL_PACING_HOST")) {
++            if (void* image = dlopen(host, RTLD_NOLOAD | RTLD_LAZY)) {
++                fn = reinterpret_cast<NativeAsync>(dlsym(image, "Gow3MetalAsyncSubmit"));
++                dlclose(image);
++            }
++        }
++        return fn;
++    }();
++    const bool useAsync = _execQueue && (nativeAsync ? nativeAsync() : !getMVKConfig().synchronousQueueSubmits);
++    if (_execQueue && !useAsync) {
++        // Drain earlier async jobs before a live switch back to synchronous
++        // execution on this same Vulkan/Metal queue. Preserve submission order.
++        std::unique_lock lock(_execQueueMutex);
++        while (_execQueueJobCount) _execQueueConditionVariable.wait(lock);
++    }
++    if (useAsync) {
++        std::unique_lock lock(_execQueueMutex);
+ 		_execQueueJobCount++;
+ 
+ 		dispatch_async(_execQueue, ^{
+@@ -302,7 +321,7 @@ void MVKQueue::initName() {
+ 
+ void MVKQueue::initExecQueue() {
+ 	_execQueue = nil;
+-	if ( !getMVKConfig().synchronousQueueSubmits ) {
++	if ( !getMVKConfig().synchronousQueueSubmits || getenv("GOW3_METAL_PACING_HOST") ) {
+ 		// Determine the dispatch queue priority
+ 		dispatch_qos_class_t dqQOS;
+ 		switch (_globalPriority) {

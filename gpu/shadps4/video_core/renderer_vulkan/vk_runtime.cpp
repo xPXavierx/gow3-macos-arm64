@@ -194,9 +194,10 @@ void Runtime::InlineData(VideoCore::Buffer* dst, u64 offset, u32 value) {
 
 bool Runtime::Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                       vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,
-                      std::optional<VideoCore::SubresourceRange> subres_range) {
+                      std::optional<VideoCore::SubresourceRange> subres_range,
+                      std::source_location caller) {
     BeforeImageAccess();
-    if (scene_targets) scene_targets->NativeAccess(*image, dst_access);
+    if (scene_targets) scene_targets->NativeAccess(*image, dst_access, caller.function_name(), caller.line());
     const size_t prev_num_barriers = static_cast<size_t>(image_barriers.size());
     image->GetBarriers(image_barriers, dst_layout, dst_access, dst_stage, subres_range);
     return image_barriers.size() != prev_num_barriers;
@@ -260,10 +261,18 @@ void Runtime::UploadImage(VideoCore::Image* dst, const VideoCore::Buffer* src,
 
 void Runtime::CopyAliasImage(VideoCore::Image* src, VideoCore::Image* dst,
                              const vk::Extent3D& extent) {
+    if (scene_targets && scene_targets->debug) {
+        std::printf("Scene alias request: format %u %ux%u -> format %u %ux%u region %ux%ux%u src_uid %llu dst_uid %llu\n",
+            u32(src->info.pixel_format), src->info.size.width, src->info.size.height,
+            u32(dst->info.pixel_format), dst->info.size.width, dst->info.size.height,
+            extent.width, extent.height, extent.depth, (unsigned long long)src->image_uid,
+            (unsigned long long)dst->image_uid);
+    }
     SetBackingSamples(src, src->info.num_samples);
     SetBackingSamples(dst, dst->info.num_samples);
     scheduler.EndRendering();
     const TransferMark mark{*this, "image alias copy", *dst};
+    if (scene_targets && scene_targets->CopyAlias(*src, *dst, extent)) return;
     const u32 layers = std::min(src->info.resources.layers, dst->info.resources.layers);
     const vk::ImageCopy region{
         .srcSubresource{.aspectMask = vk::ImageAspectFlagBits::eColor, .layerCount = layers},

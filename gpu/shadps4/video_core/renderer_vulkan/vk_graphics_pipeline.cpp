@@ -494,10 +494,17 @@ void GraphicsPipeline::GetVertexInputs(
     for (const auto& attrib : fetch_shader->attributes) {
         const auto step_rate = attrib.GetStepRate();
         const auto buffer = attrib.GetSharp(vs_info);
+        const auto format = LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt());
+        // A future fetch descriptor may still be incomplete. Reject it before
+        // the driver sees an undefined vertex format (Metal asserts internally
+        // rather than returning a recoverable pipeline-creation error).
+        ASSERT_MSG(format != vk::Format::eUndefined,
+                   "Vertex attribute {} has an incomplete format {}/{}",
+                   attrib.semantic, u32(buffer.GetDataFmt()), u32(buffer.GetNumberFmt()));
         attributes.push_back(Attribute{
             .location = attrib.semantic,
             .binding = attrib.semantic,
-            .format = LiverpoolToVK::SurfaceFormat(buffer.GetDataFmt(), buffer.GetNumberFmt()),
+            .format = format,
             .offset = 0,
         });
         bindings.push_back(Binding{

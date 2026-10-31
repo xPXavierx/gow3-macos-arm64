@@ -320,6 +320,7 @@ public:
         Id sampled_type;
         Id image_type;
         AmdGpu::ImageType view_type;
+        u32 size_binding = 0;
         bool is_integer = false;
         bool is_storage = false;
         bool is_null = false;

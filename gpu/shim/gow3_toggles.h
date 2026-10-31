@@ -40,6 +40,7 @@ enum : std::uint64_t {
     ParallelCopies = 131072,
     AsyncFences = 262144,
     PoolSmallCopies = 524288,
+    DiscardSceneResample = 1ull << 31, ///< full-target copies do not load overwritten pixels
     RecordPrefetch = 1ull << 32,
     TextureViewMemo = 1ull << 33,
     TextureBindHelper = 1ull << 34,
@@ -76,6 +77,7 @@ enum : std::uint64_t {
     PartialHeightViews = 1ull << 58,
     SplitUnusedDepthPlane = 1ull << 59,
     PreciseDepthAccess = 1ull << 62,
+    SceneAliasProxy = 1ull << 63, ///< clipped same-format alias copy directly from current proxy
     /// Explicit rounded scalar operations instead of Metal no-contraction helper calls.
     ExplicitRoundedMath = 1ull << 60,
     /// The same exact scalar lowering for vertex programs (independent diagnostic A/B).

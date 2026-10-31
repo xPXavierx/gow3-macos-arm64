@@ -66,6 +66,7 @@ struct FetchShaderSnapshot {
     std::optional<FetchShaderData> fetch;
     std::vector<AmdGpu::Buffer> buffers;
     void Capture(const Info& source);
+    void CapturePipeline(const Info& source, Info& owned, std::vector<u32>& user_data);
 };
 
 class ScopedFetchShaderSnapshot {

@@ -51,6 +51,7 @@ public:
     [[nodiscard]] TemporalUpscaler& GetUpscaler() noexcept {
         return *upscaler;
     }
+    [[nodiscard]] SceneTargets& GetSceneTargets() noexcept { return *scene_targets; }
     FrameGenInputs* GetFrameGenInputs()const{return framegen_inputs.get();}
 
     [[nodiscard]] VideoCore::TextureCache& GetTextureCache() noexcept {
@@ -287,7 +288,7 @@ private:
     std::array<u64, 4> texture_set_why{}; ///< misses: other key, generation, image check, new
     /// Returns true when the stage's images were bound from the memo.
     bool BindTexturesFromSet(const Shader::Info& stage, const PreparedStage* prepared,
-                             u32 first_image_idx, bool& barrier, TextureSet*& slot);
+                             u32 first_binding, bool& barrier, TextureSet*& slot);
     /// The prepared sharps of `stage` in the current prepared draw, if they fit it.
     const PreparedStage* FindPreparedStage(const Shader::Info& stage) const;
     /// Whether the helper may bind textures for this pipeline at all (fixed descriptor layout,

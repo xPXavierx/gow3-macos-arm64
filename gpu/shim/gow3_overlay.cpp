@@ -14,6 +14,7 @@
 
 #include <SDL3/SDL.h>
 #include "gow3_settings.h"
+#include "gow3_runtime_control.h"
 #include "gow3_orbs.h"
 #include "gow3_actors.h"
 #include "gow3_graphics.h"
@@ -317,7 +318,7 @@ std::atomic<uint64_t> display_info{0};
 std::string OverlayText() {
     namespace P = Gow3PerfStats;
     const auto& s = Gow3Settings::Get();
-    const unsigned items = s.overlay_items;
+    const unsigned items = Gow3Runtime::Enabled() ? (P::Fps|P::FrameTime|P::Gpu|P::Cpu) : s.overlay_items.load();
     if ((items & (P::Gpu | P::Cpu | P::Ram | P::Vram)) && overlay_instance) {
         P::Start(*overlay_instance);
     }
@@ -325,6 +326,7 @@ std::string OverlayText() {
     sample.fps = frame_ms_avg > 0.0f ? 1000.0f / frame_ms_avg : 0.0f;
     sample.frame_ms = frame_ms_avg;
     sample.upscaler = UpscalerLabel(s.upscaler);
+    if(Gow3Runtime::Enabled()) sample.gpu_name="GPU";
     auto text = P::Format(sample, items, s.overlay_layout == 0);
     static const bool display_hud = [] {
         const char* value = std::getenv("GOW3_HUD_DISPLAY_INFO");
@@ -335,12 +337,12 @@ std::string OverlayText() {
         int((display_bits >> 14) & 0x3fff), int((display_bits >> 28) & 0x3fff),
         int((display_bits >> 42) & 0x3fff)};
     const bool display_metalfx = (display_bits >> 56) & 1;
-    if (display_hud && display_size[0] > 0 && display_size[1] > 0) {
+    if ((display_hud || Gow3Runtime::Enabled()) && display_size[0] > 0 && display_size[1] > 0) {
         static const std::string language = [] {
             const char* value = std::getenv("GOW3_LAUNCHER_LANGUAGE");
             return std::string(value ? value : "en");
         }();
-        static const std::string preset = [] {
+        const std::string preset = Gow3Runtime::Enabled() ? Gow3Runtime::Scales[Gow3Runtime::Applied().scaling] : [] {
             const char* value = std::getenv("GOW3_METALFX_PRESET");
             return std::string(value ? value : "quality");
         }();
@@ -362,7 +364,7 @@ std::string OverlayText() {
         if (!text.empty()) text += '\n';
         text += info;
     }
-    if (framegen_rates_available && ((items & P::Fps) || display_hud)) {
+    if (framegen_rates_available && (!Gow3Runtime::Enabled() || Gow3Runtime::Applied().interpolation) && ((items & P::Fps) || display_hud)) {
         static const std::string language = [] {
             const char* value = std::getenv("GOW3_LAUNCHER_LANGUAGE");
             return std::string(value ? value : "en");
@@ -948,6 +950,25 @@ void Notice() {
     ImGui::End();
 }
 
+void ShortcutOverlay() {
+    const auto s=Gow3Runtime::Requested();
+    const ImGuiViewport* viewport=ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos({viewport->WorkPos.x+12*base_scale,viewport->WorkPos.y+12*base_scale},ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(.72f);
+    ImGui::Begin("##shortcuts",nullptr,ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_AlwaysAutoResize|
+        ImGuiWindowFlags_NoInputs|ImGuiWindowFlags_NoNav|ImGuiWindowFlags_NoFocusOnAppearing);
+    const char* language=std::getenv("GOW3_LAUNCHER_LANGUAGE");
+    const bool pt=language&&!std::strcmp(language,"pt-BR"), es=language&&!std::strcmp(language,"es");
+    ImGui::TextUnformatted(pt?"ATALHOS":es?"ATAJOS":"SHORTCUTS");
+    ImGui::Separator();
+    ImGui::TextUnformatted(pt?"0  Mostrar / ocultar atalhos":es?"0  Mostrar / ocultar atajos":"0  Show / hide shortcuts");
+    ImGui::Text("1  %s: %s",pt?"Desempenho":es?"Rendimiento":"Performance",s.hud?"ON":"OFF");
+    ImGui::Text("2  MetalFX: %s",Gow3Runtime::Scales[s.scaling]);
+    ImGui::Text("3  %s: %u x %u",pt?"Resolucao":es?"Resolucion":"Resolution",Gow3Runtime::Widths[s.resolution],Gow3Runtime::Heights[s.resolution]);
+    ImGui::Text("4  %s: %s",pt?"Limite de quadros":es?"Limite de cuadros":"Frame cap",s.cap?"60 FPS":"Unlimited");
+    ImGui::End();
+}
+
 } // namespace
 
 void SetFrameGenerationRates(float rendered, float generated, unsigned width, unsigned height) {
@@ -1016,8 +1037,8 @@ void Init(const Vulkan::Instance& instance, vk::Format format, u32 image_count) 
     info.Instance = vk_instance;
     info.PhysicalDevice = instance.GetPhysicalDevice();
     info.Device = instance.GetDevice();
-    info.QueueFamily = instance.GetGraphicsQueueFamilyIndex();
-    info.Queue = instance.GetGraphicsQueue();
+    info.QueueFamily = instance.GetPresentQueueFamilyIndex();
+    info.Queue = instance.GetPresentQueue();
     // Font atlas plus the save list pictures (up to 33, and a closed list's until freed).
     info.DescriptorPoolSize = 128;
     info.MinImageCount = std::max(image_count, 2u);
@@ -1141,6 +1162,14 @@ bool HandleEvent(const SDL_Event& event) {
             const char* env = std::getenv("GOW3_FRAME_CAPTURE_KEY");
             return env && *env == '1';
         }();
+        if (!is_open && !text_entry_active && event.key.key >= SDLK_0 && event.key.key <= SDLK_5 &&
+            !(event.key.mod & (SDL_KMOD_CTRL|SDL_KMOD_ALT|SDL_KMOD_GUI))) {
+            const auto key=unsigned(event.key.key-SDLK_0);
+            if (key==0||key==1||key==2||key==3||key==4||key==5) {
+                if (down && !event.key.repeat && Gow3Runtime::Shortcut(key)) return true;
+                if (Gow3Runtime::Enabled()) return true;
+            }
+        }
         if (event.key.key == SDLK_F12) {
             if (down && !event.key.repeat) {
                 VideoCore::RequestScreenshot(VideoCore::ScreenshotRequest::GameOnly);
@@ -1268,7 +1297,7 @@ void SetLoading(bool active, u32 done, u32 total) {
 bool Visible() {
     const auto& s = Gow3Settings::Get();
     return initialized && (loading || background_total || menu_open || text_entry_active || choice_active ||
-                           choice_retiring || s.show_fps || NoticeActive() ||
+                           choice_retiring || s.show_fps || (Gow3Runtime::Enabled() && Gow3Runtime::Requested().shortcuts) || NoticeActive() ||
                            (s.actor_watch_supported && s.enemy_health_bar));
 }
 
@@ -1358,16 +1387,17 @@ void Render(vk::CommandBuffer cmdbuf, vk::ImageView view, vk::Extent2D extent) {
     if (menu_open) {
         Menu();
     }
+    if (Gow3Runtime::Enabled() && Gow3Runtime::Requested().shortcuts && !menu_open) ShortcutOverlay();
     if (Gow3Settings::Get().show_fps && !menu_open) {
         FpsCounter();
     }
-    if (NoticeActive()) {
+    if (NoticeActive() && (!Gow3Runtime::Enabled() || Gow3Runtime::Requested().hud)) {
         Notice();
     }
     if (!loading && !menu_open) {
         HealthDisplay();
     }
-    if (background_total && !loading && !menu_open) {
+    if (background_total && Gow3Settings::Get().show_fps && !loading && !menu_open) {
         BackgroundLoading();
     }
     if (text_entry_active) {

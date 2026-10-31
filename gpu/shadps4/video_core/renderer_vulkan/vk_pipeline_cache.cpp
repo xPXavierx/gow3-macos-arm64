@@ -46,7 +46,7 @@ struct AsyncShaderCompilation {
     AsyncJob<std::shared_ptr<AsyncShaderCompilation>> job;
     Shader::Info info;
     Shader::RuntimeInfo runtime{};
-    std::vector<u32> code, user_data, geometry_code, binary;
+    std::vector<u32> code, user_data, geometry_code, binary, flat_snapshot;
     std::unique_ptr<Shader::Pools> pools;
     CompilerPool<Shader::Pools>* pool_cache{};
     std::optional<Shader::IR::Program> ir;
@@ -78,6 +78,23 @@ struct AsyncGraphicsCompilation {
     GraphicsPipeline::SerializationSupport data;
     std::unique_ptr<GraphicsPipeline> pipeline;
     bool failure_logged = false;
+};
+
+// Only immutable, fully specialized snapshots cross this boundary. The GPU thread
+// owns publication; workers cannot change live Programs or the rendering cache.
+struct PipelineCache::GraphicsLookahead {
+    std::mutex mutex;
+    std::unordered_set<GraphicsPipelineKey> known;
+    std::unordered_map<GraphicsPipelineKey, std::shared_ptr<AsyncGraphicsCompilation>> builds;
+    std::atomic<bool> ready{false};
+    std::atomic<u64> queued{}, published{}, used{}, ready_on_use{}, failed{}, wait_ns{};
+    struct Stage {
+        const Program* program;
+        std::shared_ptr<AsyncShaderCompilation> build;
+    };
+    std::vector<Stage> shaders;
+    std::atomic<u64> shader_queued{}, shader_published{}, shader_used{}, shader_ready{}, shader_failed{}, shader_wait_ns{};
+    static constexpr size_t Capacity = 12;
 };
 
 constexpr static auto SpirvVersion1_6 = 0x00010600U;
@@ -239,6 +256,12 @@ const Shader::RuntimeInfo& PipelineCache::BuildRuntimeInfo(PipelineSelection& se
         info.hw.fs.addr_flags = regs.ps_input_addr;
         info.hw.fs.num_inputs = regs.num_interp;
         info.hw.fs.front_face_all_bits = regs.barycentric_control.front_face_all_bits;
+        info.hw.fs.depth_before_shader = regs.depth_shader_control.depth_before_shader;
+        if (info.hw.fs.depth_before_shader) {
+            static std::atomic_flag reported = ATOMIC_FLAG_INIT;
+            if (!reported.test_and_set())
+                std::puts("Depth before shader: guest early depth/stencil request preserved in shader variants");
+        }
         info.hw.fs.num_samples =
             regs.ps_input_addr.sample_coverage_ena && regs.ps_input_ena.sample_coverage_ena
                 ? regs.aa_config.NumSamples()
@@ -341,6 +364,8 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
     : instance{instance_}, scheduler{scheduler_}, liverpool{liverpool_},
       desc_heap{instance, scheduler.GetWorkSemaphore(), DescriptorHeapSizes} {
     sel.regs = &liverpool->regs;
+    ASSERT_MSG(instance.GetPhysicalDevice().getProperties().limits.maxPushConstantsSize >= sizeof(Shader::PushData),
+               "Device does not support the logical image dimension push constants");
     const auto& vk12_props = instance.GetVk12Properties();
     profile = Shader::Profile{
         .max_viewport_width = instance.GetMaxViewportWidth(),
@@ -431,16 +456,32 @@ PipelineCache::PipelineCache(const Instance& instance_, Scheduler& scheduler_,
         });
         compiler = std::make_unique<AsyncCompiler>(count, 64, [](unsigned index) {
             Common::SetCurrentThreadName(("gow3:ShaderCompile" + std::to_string(index)).c_str());
-            Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+            Common::SetCurrentThreadPriority(AllowsIncompleteDraws()
+                ? Common::ThreadPriority::Low : Common::ThreadPriority::High);
         });
         LOG_INFO(Render_Vulkan, "gow3: async graphics compilation ready ({} capture, {} compile workers)",
                  capture_count, count);
     }
+    if (std::getenv("GOW3_COMMUNITY_RECORD_DIR"))
+        community_recorder = std::make_unique<AsyncCompiler>(1, 1024, [](unsigned) {
+            Common::SetCurrentThreadName("gow3:CatalogRecorder");
+            Common::SetCurrentThreadPriority(Common::ThreadPriority::Low);
+        });
+    std::printf("Shader policy: %s\n", AllowsIncompleteDraws()
+        ? "skip pending draws; background warm-up (comparison)"
+        : "complete required draws; prewarm known pipelines before play");
+    const char* ahead = std::getenv("GOW3_SHADER_LOOKAHEAD");
+    if (!AllowsIncompleteDraws() && (!ahead || std::strcmp(ahead, "0") != 0) &&
+        !EmulatorSettings.IsShaderCollect() && !EmulatorSettings.IsPatchShaders()) {
+        lookahead = std::make_unique<GraphicsLookahead>();
+    }
+    std::printf("Pipeline look-ahead: %s\n", lookahead ? "enabled (validated command snapshots)" : "disabled");
 }
 
 PipelineCache::~PipelineCache() {
     StopWarmUp();
     FinishCompilations();
+    if (community_recorder) community_recorder->Stop();
 }
 
 // gow3: shader/pipeline compile time on the GPU thread, reported by GOW3_FRAME_STATS.
@@ -464,6 +505,23 @@ struct PhaseTimer {
         active = false;
     }
     ~PhaseTimer() { Stop(); }
+};
+struct RequiredWaitTimer : PhaseTimer {
+    const char* phase;
+    u64 hash;
+    RequiredWaitTimer(std::atomic<u64>& counter, const char* phase, u64 hash)
+        : PhaseTimer{counter}, phase{phase}, hash{hash} {}
+    ~RequiredWaitTimer() {
+        static const bool trace = std::getenv("GOW3_SHADER_TRACE") != nullptr;
+        if (trace) {
+            const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+            if (ms >= 2.0) {
+                std::printf("Required shader wait: %s %016llx %.3f ms\n", phase,
+                            (unsigned long long)hash, ms);
+            }
+        }
+    }
 };
 struct CompileTimer {
     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
@@ -523,7 +581,7 @@ bool PipelineCache::QueueShader(Program& program, HwStage stage, SwStage l_stage
         return false;
     }
     {
-        PhaseTimer waiting{g_gow3_guest_wait_ns};
+        RequiredWaitTimer waiting{g_gow3_guest_wait_ns, "guest capture", params.hash};
         capture_job.Wait();
     }
     if (!capture_job.Poll()) {
@@ -593,6 +651,7 @@ void PipelineCache::PublishShaders(bool wait) {
         const auto perm_hash = HashCombine(hash, build->permutation);
         Vulkan::SetObjectName(instance.GetDevice(), build->module,
                              GetShaderName(build->info.hw_stage, hash, build->permutation));
+        ExportShaderRecipe(build->info, build->spec, build->permutation, build->binary);
         RegisterShaderBinary(std::move(build->binary), hash, build->permutation);
         {
             std::unique_lock lock{programs_mutex};
@@ -608,6 +667,7 @@ void PipelineCache::PublishShaders(bool wait) {
             program->AddPermut(build->module, std::move(build->spec));
             build->module = nullptr;
             program->pending.reset();
+            NotifyPreparation();
         }
         retire();
     }
@@ -632,6 +692,7 @@ void PipelineCache::PublishGraphics(bool wait) {
         const auto key = it.key();
         build->pipeline->PublishStages(build->live_infos);
         RegisterPipelineData(key, std::hash<GraphicsPipelineKey>{}(key), build->data);
+    ExportPipelineRecipe(key, build->data);
         graphics_pipelines.emplace(key, std::move(build->pipeline));
         ++num_new_pipelines;
         it = pending_graphics.erase(it);
@@ -639,11 +700,29 @@ void PipelineCache::PublishGraphics(bool wait) {
 }
 
 void PipelineCache::FinishCompilations() {
+    if (lookahead) {
+        lookahead->ready.store(false, std::memory_order_release);
+    }
     if (compiler) {
         capture_compiler->Stop();
         compiler->Stop();
         PublishShaders(true);
         PublishGraphics(true);
+        if (lookahead) {
+            std::scoped_lock lock{lookahead->mutex};
+            for (auto& [key, build] : lookahead->builds) {
+                build->job.Wait();
+                // Consume unused results too: their future owns a shared_ptr to
+                // its build and must not leave an ownership cycle at shutdown.
+                build->job.Poll();
+            }
+            lookahead->builds.clear();
+            for (auto& stage : lookahead->shaders) {
+                stage.build->job.Wait();
+                stage.build->job.Poll();
+            }
+            lookahead->shaders.clear();
+        }
         std::vector<vk::PipelineCache> sources;
         for (const auto& cache : worker_pipeline_caches) {
             sources.push_back(*cache);
@@ -659,6 +738,14 @@ bool PipelineCache::AsyncCompilation() const {
     return compiler && Gow3Settings::Get().async_shaders.load(std::memory_order_relaxed);
 }
 
+bool PipelineCache::AllowsIncompleteDraws() {
+    static const bool skip = [] {
+        const char* policy = std::getenv("GOW3_SHADER_POLICY");
+        return policy && std::strcmp(policy, "skip") == 0;
+    }();
+    return skip;
+}
+
 void PipelineCache::SeedWorkerCaches() {
     if (!compiler || worker_caches_seeded) {
         return;
@@ -668,15 +755,246 @@ void PipelineCache::SeedWorkerCaches() {
         ASSERT_MSG(result == vk::Result::eSuccess, "Failed to seed compiler pipeline cache");
     }
     worker_caches_seeded = true;
+    if (lookahead) {
+        {
+            std::unique_lock lock{programs_mutex};
+            for (auto& [hash, program] : program_cache) {
+                if (!program->info_template && !program->modules.empty()) {
+                    program->info_template = std::make_unique<Shader::Info>(program->info);
+                }
+            }
+        }
+        std::scoped_lock lock{lookahead->mutex};
+        for (const auto& [key, pipeline] : graphics_pipelines) {
+            lookahead->known.insert(key);
+        }
+        lookahead->ready.store(true, std::memory_order_release);
+    }
 }
 
 void PipelineCache::ReportCompilerStats() {
+    if (program_aliases_ready.load(std::memory_order_acquire)) {
+        std::printf("Shader equivalence stats: %llu requests reused, %llu alias requests declined\n",
+                    (unsigned long long)program_alias_hits.exchange(0),
+                    (unsigned long long)program_alias_rejected.exchange(0));
+    }
     if (compiler) {
         std::printf("Compiler stats: capture queue %zu, compile queue %zu; queue waits: capture "
                     "%.1f ms, compile %.1f ms; pools retained %zu, reused %u\n",
                     capture_compiler->Depth(), compiler->Depth(),
                     capture_compiler->QueueWaitNs() / 1e6, compiler->QueueWaitNs() / 1e6,
                     compiler_pools.Retained(), g_gow3_pool_reuses.exchange(0));
+    }
+    if (lookahead) {
+        std::scoped_lock lock{lookahead->mutex};
+        std::printf("Pipeline look-ahead stats: %llu queued, %llu published, %llu taken (%llu ready), %llu failed; "
+                    "%.1f ms required wait; %zu outstanding\n",
+                    (unsigned long long)lookahead->queued.exchange(0),
+                    (unsigned long long)lookahead->published.exchange(0),
+                    (unsigned long long)lookahead->used.exchange(0),
+                    (unsigned long long)lookahead->ready_on_use.exchange(0),
+                    (unsigned long long)lookahead->failed.exchange(0),
+                    lookahead->wait_ns.exchange(0) / 1e6, lookahead->builds.size());
+        std::printf("Shader look-ahead stats: %llu queued, %llu published, %llu taken (%llu ready), %llu rejected; "
+                    "%.1f ms required wait; %zu outstanding\n",
+                    (unsigned long long)lookahead->shader_queued.exchange(0),
+                    (unsigned long long)lookahead->shader_published.exchange(0),
+                    (unsigned long long)lookahead->shader_used.exchange(0),
+                    (unsigned long long)lookahead->shader_ready.exchange(0),
+                    (unsigned long long)lookahead->shader_failed.exchange(0),
+                    lookahead->shader_wait_ns.exchange(0) / 1e6, lookahead->shaders.size());
+    }
+}
+
+void PipelineCache::PrepareAheadShader(const Program& program, const Shader::Info& info,
+                                      const Shader::ShaderParams& params,
+                                      const Shader::StageSpecialization& spec) {
+    if (!lookahead || !lookahead->ready.load(std::memory_order_acquire) || !AsyncCompilation() ||
+        (info.hw_stage != HwStage::Vertex && info.hw_stage != HwStage::Fragment)) {
+        return;
+    }
+    const auto exists = [&] {
+        return std::ranges::any_of(lookahead->shaders, [&](const auto& stage) {
+            return stage.program == &program && stage.build->spec == spec;
+        });
+    };
+    {
+        std::scoped_lock lock{lookahead->mutex};
+        if (lookahead->shaders.size() >= GraphicsLookahead::Capacity || exists() || !compiler->HasCapacity()) {
+            return;
+        }
+    }
+    auto build = std::make_shared<AsyncShaderCompilation>();
+    auto* previous_recovery = runtime_fault_recover;
+    sigjmp_buf recover;
+    if (sigsetjmp(recover, 0)) {
+        runtime_fault_recover = previous_recovery;
+        return;
+    }
+    runtime_fault_recover = &recover;
+    build->device = instance.GetDevice();
+    build->code.assign(params.code.begin(), params.code.end());
+    build->user_data.assign(params.user_data.begin(), params.user_data.end());
+    build->flat_snapshot = info.flattened_ud_buf;
+    build->info = Shader::Info(info.hw_stage, info.sw_stage, params);
+    build->info.user_data = build->user_data;
+    build->info.compilation_flat_snapshot = Shader::Info::CompilationSnapshot{build->flat_snapshot, info.srt_info};
+    build->runtime = spec.runtime_info;
+    build->binding = spec.start;
+    build->spec = spec; // immutable identity until GPU-thread adoption
+    build->spec.info = &build->info;
+    build->pool_cache = &compiler_pools;
+    // GetProgram's guest-read recovery guard still covers this capture. After
+    // it, translation/emission cannot follow guest resource/fetch pointers.
+    build->fetch.Capture(info);
+    build->fetch.info = &build->info;
+    runtime_fault_recover = previous_recovery;
+    for (const auto& buffer : build->fetch.buffers) {
+        const auto fmt = buffer.GetDataFmt();
+        const auto number = buffer.GetNumberFmt();
+        if ((LiverpoolToVK::TrySurfaceFormat(fmt, number) == vk::Format::eUndefined &&
+             fmt != AmdGpu::DataFormat::FormatInvalid) ||
+            (number == AmdGpu::NumberFormat::SnormNz &&
+             fmt != AmdGpu::DataFormat::Format8 && fmt != AmdGpu::DataFormat::Format8_8 &&
+             fmt != AmdGpu::DataFormat::Format8_8_8_8 && fmt != AmdGpu::DataFormat::Format16 &&
+             fmt != AmdGpu::DataFormat::Format16_16 && fmt != AmdGpu::DataFormat::Format16_16_16_16)) {
+            ++lookahead->shader_failed;
+            return;
+        }
+    }
+    std::scoped_lock lock{lookahead->mutex};
+    if (lookahead->shaders.size() >= GraphicsLookahead::Capacity || exists()) {
+        return;
+    }
+    if (build->job.Start(*compiler, [this, build] {
+        Common::ScopedSpeculativeCompilation speculative;
+        PhaseTimer compile{g_gow3_async_ns};
+        auto [pools, reused] = compiler_pools.Acquire();
+        build->pools = std::move(pools);
+        if (reused) ++g_gow3_pool_reuses;
+        Shader::Gcn::ScopedFetchShaderSnapshot fetch{build->fetch};
+        build->ir.emplace(Shader::TranslateProgram(build->code, *build->pools, build->info,
+                                                   build->runtime, profile));
+        const Shader::StageSpecialization compiled(build->info, build->runtime, profile, build->spec.start);
+        if (compiled.buffers.size() != build->spec.buffers.size() ||
+            compiled.images.size() != build->spec.images.size() ||
+            compiled.samplers.size() != build->spec.samplers.size() ||
+            !(compiled == build->spec)) {
+            throw std::runtime_error("Speculative shader specialization changed");
+        }
+        build->binary = Shader::Backend::SPIRV::EmitSPIRV(profile, build->runtime, *build->ir, build->binding);
+        build->module = CompileSPV(build->binary, instance.GetDevice());
+        build->ir.reset();
+        compiler_pools.Recycle(std::move(build->pools));
+        return build;
+    })) {
+        lookahead->shaders.push_back({&program, std::move(build)});
+        ++lookahead->shader_queued;
+    }
+}
+
+bool PipelineCache::TakeAheadShader(Program& program, const Shader::StageSpecialization& spec) {
+    if (!lookahead) return false;
+    std::shared_ptr<AsyncShaderCompilation> build;
+    {
+        std::scoped_lock lock{lookahead->mutex};
+        const auto it = std::ranges::find_if(lookahead->shaders, [&](const auto& stage) {
+            return stage.program == &program && stage.build->spec == spec;
+        });
+        if (it == lookahead->shaders.end()) return false;
+        build = it->build;
+        lookahead->shaders.erase(it);
+    }
+    auto result = build->job.Poll();
+    if (result) {
+        ++lookahead->shader_ready;
+    } else {
+        const auto started = std::chrono::steady_clock::now();
+        {
+            RequiredWaitTimer waiting{g_gow3_compile_wait_ns, "ahead stage", program.info.pgm_hash};
+            build->job.Wait();
+        }
+        lookahead->shader_wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        result = build->job.Poll();
+    }
+    if (!result) {
+        ++lookahead->shader_failed;
+        LOG_WARNING(Render_Vulkan, "Speculative shader {:#x} rejected: {}; compiling required stage",
+                    program.info.pgm_hash, build->job.Error());
+        return false;
+    }
+    PublishAheadShader(program, build);
+    ++lookahead->shader_used;
+    return true;
+}
+
+void PipelineCache::PublishAheadShader(Program& program, const std::shared_ptr<AsyncShaderCompilation>& build) {
+    // The requesting draw or periodic GPU pump is the only writer. Never hold
+    // lookahead->mutex while acquiring programs_mutex: preparation takes them
+    // in the other order while reading program templates.
+    if (std::ranges::find(program.modules, build->spec, &Program::Module::spec) != program.modules.end()) {
+        return;
+    }
+    const size_t permutation = program.modules.size();
+    const auto hash = program.info.pgm_hash;
+    ExportShaderRecipe(build->info, build->spec, permutation, build->binary);
+    RegisterShaderBinary(std::move(build->binary), hash, permutation);
+    std::unique_lock lock{programs_mutex};
+    build->spec.info = &program.info;
+    RegisterShaderMeta(program.info, build->spec.fetch_shader_data, build->spec,
+                       HashCombine(hash, permutation), permutation);
+    program.AddPermut(build->module, std::move(build->spec));
+    build->module = nullptr;
+    NotifyPreparation();
+    ++lookahead->shader_published;
+}
+
+void PipelineCache::PublishAhead() {
+    if (!lookahead) return;
+    std::vector<GraphicsLookahead::Stage> shaders;
+    std::vector<std::shared_ptr<AsyncGraphicsCompilation>> pipelines;
+    {
+        std::scoped_lock lock{lookahead->mutex};
+        for (auto it = lookahead->shaders.begin(); it != lookahead->shaders.end();) {
+            auto result = it->build->job.Poll();
+            if (result) {
+                shaders.push_back(std::move(*it));
+                it = lookahead->shaders.erase(it);
+            } else if (it->build->job.Failed()) {
+                ++lookahead->shader_failed;
+                LOG_WARNING(Render_Vulkan, "Speculative shader preparation rejected: {}", it->build->job.Error());
+                it = lookahead->shaders.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = lookahead->builds.begin(); it != lookahead->builds.end();) {
+            auto result = it->second->job.Poll();
+            if (result) {
+                pipelines.push_back(std::move(it->second));
+                lookahead->known.insert(it->first);
+                it = lookahead->builds.erase(it);
+            } else if (it->second->job.Failed()) {
+                ++lookahead->failed;
+                LOG_WARNING(Render_Vulkan, "Speculative pipeline preparation rejected: {}", it->second->job.Error());
+                it = lookahead->builds.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (auto& stage : shaders) {
+        PublishAheadShader(*const_cast<Program*>(stage.program), stage.build);
+    }
+    for (auto& build : pipelines) {
+        const auto& key = build->selection.graphics_key;
+        build->pipeline->PublishStages(build->live_infos);
+        RegisterPipelineData(key, std::hash<GraphicsPipelineKey>{}(key), build->data);
+    ExportPipelineRecipe(key, build->data);
+        const auto [it, inserted] = graphics_pipelines.emplace(key, std::move(build->pipeline));
+        num_new_pipelines += inserted;
+        ++lookahead->published;
     }
 }
 
@@ -685,7 +1003,125 @@ bool PipelineCache::PrepareGraphicsPipeline(PipelineSelection& worker_sel) {
     if (worker_sel.regs->stage_enable.hs_en) {
         return false;
     }
-    return RefreshGraphicsKey(worker_sel) && !worker_sel.worker->failed;
+    if (!RefreshGraphicsKey(worker_sel) || worker_sel.worker->failed) {
+        return false;
+    }
+    PrepareAheadPipeline(worker_sel);
+    return true;
+}
+
+void PipelineCache::PrepareAheadPipeline(const PipelineSelection& selection) {
+    if (!lookahead || !lookahead->ready.load(std::memory_order_acquire) || !AsyncCompilation()) {
+        return;
+    }
+    const auto& key = selection.graphics_key;
+    {
+        std::scoped_lock lock{lookahead->mutex};
+        if (lookahead->known.contains(key) || lookahead->builds.contains(key) ||
+            lookahead->builds.size() >= GraphicsLookahead::Capacity || !compiler->HasCapacity()) {
+            return;
+        }
+    }
+    auto build = std::make_shared<AsyncGraphicsCompilation>();
+    build->selection = selection;
+    build->selection.regs = nullptr;
+    build->selection.worker = nullptr;
+    for (const auto& stage : selection.worker->stages) {
+        const auto logical = selection.worker->infos.at(stage.program).sw_stage;
+        build->live_infos[u32(logical)] = &stage.program->info;
+    }
+    // Capture the fetch program while speculative guest reads are still guarded.
+    // The compiler will subsequently read only these owned copies.
+    sigjmp_buf recover;
+    if (sigsetjmp(recover, 0)) {
+        runtime_fault_recover = nullptr;
+        return;
+    }
+    runtime_fault_recover = &recover;
+    for (u32 i = 0; i < MaxShaderStages; ++i) {
+        if (!selection.infos[i]) {
+            continue;
+        }
+        build->infos[i] = std::make_unique<Shader::Info>();
+        build->fetch[i].CapturePipeline(*selection.infos[i], *build->infos[i], build->user_data[i]);
+        build->selection.infos[i] = build->infos[i].get();
+    }
+    runtime_fault_recover = nullptr;
+    std::scoped_lock lock{lookahead->mutex};
+    if (lookahead->known.contains(key) || lookahead->builds.contains(key) ||
+        lookahead->builds.size() >= GraphicsLookahead::Capacity) {
+        return;
+    }
+    if (build->job.Start(*compiler, [this, build] {
+        Common::ScopedSpeculativeCompilation speculative;
+        Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
+        PhaseTimer compile{g_gow3_async_ns};
+        auto& s = build->selection;
+        // This cache was created without EXTERNALLY_SYNCHRONIZED_BIT. Vulkan
+        // serializes cache access internally, including concurrent pipeline builds.
+        build->pipeline = std::make_unique<GraphicsPipeline>(
+            instance, scheduler, desc_heap, profile, s.graphics_key, *pipeline_cache,
+            s.infos, s.runtime_infos, s.fetch_shader, s.modules, build->data, false);
+        return build;
+    })) {
+        lookahead->builds.emplace(key, std::move(build));
+        ++lookahead->queued;
+    }
+}
+
+void PipelineCache::MarkPipelineKnown(const GraphicsPipelineKey& key) {
+    if (lookahead) {
+        std::scoped_lock lock{lookahead->mutex};
+        lookahead->known.insert(key);
+    }
+}
+
+const GraphicsPipeline* PipelineCache::TakeAheadPipeline(const PipelineSelection& selection) {
+    if (!lookahead) {
+        return nullptr;
+    }
+    std::shared_ptr<AsyncGraphicsCompilation> build;
+    {
+        std::scoped_lock lock{lookahead->mutex};
+        const auto it = lookahead->builds.find(selection.graphics_key);
+        if (it == lookahead->builds.end()) {
+            lookahead->known.insert(selection.graphics_key);
+            return nullptr;
+        }
+        build = std::move(it->second);
+        lookahead->builds.erase(it);
+        lookahead->known.insert(selection.graphics_key);
+    }
+    auto result = build->job.Poll();
+    if (result) {
+        ++lookahead->ready_on_use;
+    } else {
+        const auto started = std::chrono::steady_clock::now();
+        {
+            RequiredWaitTimer waiting{g_gow3_compile_wait_ns, "ahead pipeline", std::hash<GraphicsPipelineKey>{}(selection.graphics_key)};
+            build->job.Wait();
+        }
+        lookahead->wait_ns += std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        result = build->job.Poll();
+    }
+    if (!result) {
+        ++lookahead->failed;
+        LOG_WARNING(Render_Vulkan, "Speculative pipeline {:#x} failed: {}; building required draw",
+                    std::hash<GraphicsPipelineKey>{}(selection.graphics_key), build->job.Error());
+        return nullptr;
+    }
+    // RefreshGraphicsKey has validated the live program hashes, specializations,
+    // vertex formats and full render state. A speculative result is never used
+    // merely because a worker's earlier register checksum happened to match.
+    build->pipeline->PublishStages(selection.infos);
+    RegisterPipelineData(selection.graphics_key,
+                         std::hash<GraphicsPipelineKey>{}(selection.graphics_key), build->data);
+    ExportPipelineRecipe(selection.graphics_key, build->data);
+    const auto [it, inserted] = graphics_pipelines.emplace(selection.graphics_key, std::move(build->pipeline));
+    num_new_pipelines += inserted;
+    ++lookahead->used;
+    return it->second.get();
 }
 
 const GraphicsPipeline* PipelineCache::TryPreparedPipeline(const PreparedDraw& prepared) {
@@ -727,6 +1163,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     PublishShaders();
     PublishGraphics();
     PumpWarmUp();
+    if (lookahead && (++ahead_pump_draws & 255) == 0) {
+        PublishAhead();
+    }
     used_prepared = nullptr;
     if (prepared) {
         if (const auto* pipeline = TryPreparedPipeline(*prepared)) {
@@ -736,6 +1175,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     }
     sel.draw_indirect_params = params;
     if (!RefreshGraphicsKey(sel)) {
+        ASSERT_MSG(AllowsIncompleteDraws() || !sel.compilation_pending,
+                   "Required graphics stages did not become ready");
         if (sel.compilation_pending) {
             ++g_gow3_pending_draws;
         }
@@ -746,6 +1187,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
         if (found != graphics_pipelines.end()) {
             return found->second.get();
         }
+        if (const auto* ahead = TakeAheadPipeline(sel)) {
+            return ahead;
+        }
         if (!pending_graphics.contains(sel.graphics_key) && compiler->HasCapacity()) {
             PhaseTimer capture{g_gow3_snapshot_ns};
             auto build = std::make_shared<AsyncGraphicsCompilation>();
@@ -754,11 +1198,9 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             build->live_infos = sel.infos;
             for (u32 i = 0; i < MaxShaderStages; ++i) {
                 if (sel.infos[i]) {
-                    build->infos[i] = std::make_unique<Shader::Info>(*sel.infos[i]);
-                    build->user_data[i].assign(sel.infos[i]->user_data.begin(), sel.infos[i]->user_data.end());
-                    build->infos[i]->user_data = build->user_data[i];
+                    build->infos[i] = std::make_unique<Shader::Info>();
+                    build->fetch[i].CapturePipeline(*sel.infos[i], *build->infos[i], build->user_data[i]);
                     build->selection.infos[i] = build->infos[i].get();
-                    build->fetch[i].Capture(*build->infos[i]);
                 }
             }
             const bool queued = build->job.Start(*compiler, [this, build] {
@@ -766,9 +1208,14 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                 Shader::Gcn::ScopedFetchShaderSnapshot snapshot{build->fetch[u32(SwStage::Vertex)]};
                 PhaseTimer compile{g_gow3_async_ns};
                 auto& s = build->selection;
+                // Complete mode waits for each requested pipeline, so these builds
+                // do not overlap. Reuse the warmed main cache: rotating through
+                // private worker caches recompiles shared Metal shader libraries.
+                const auto cache = AllowsIncompleteDraws()
+                    ? *worker_pipeline_caches[AsyncCompiler::WorkerIndex()] : *pipeline_cache;
                 build->pipeline = std::make_unique<GraphicsPipeline>(
                     instance, scheduler, desc_heap, profile, s.graphics_key,
-                    *worker_pipeline_caches[AsyncCompiler::WorkerIndex()],
+                    cache,
                     s.infos, s.runtime_infos, s.fetch_shader, s.modules, build->data, false);
                 return build;
             });
@@ -776,11 +1223,43 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
                 pending_graphics.emplace(sel.graphics_key, std::move(build));
             }
         }
-        ++g_gow3_pending_draws;
-        return nullptr;
+        if (AllowsIncompleteDraws()) {
+            ++g_gow3_pending_draws;
+            return nullptr;
+        }
+        // Background jobs keep their captured guest inputs. Wait only for this
+        // pipeline, not the rest of the queue, before submitting its draw.
+        if (const auto pending = pending_graphics.find(sel.graphics_key);
+            pending != pending_graphics.end()) {
+            auto build = pending->second;
+            {
+                RequiredWaitTimer waiting{g_gow3_compile_wait_ns, "pipeline", std::hash<GraphicsPipelineKey>{}(sel.graphics_key)};
+                build->job.Wait();
+            }
+            PublishGraphics();
+            if (const auto ready = graphics_pipelines.find(sel.graphics_key);
+                ready != graphics_pipelines.end()) {
+                return ready->second.get();
+            }
+            if (build->job.Failed()) {
+                UNREACHABLE_MSG("Required graphics pipeline {:#x} failed: {}",
+                                std::hash<GraphicsPipelineKey>{}(sel.graphics_key), build->job.Error());
+            }
+            // A completed job with a cache lookup miss is not a compiler failure.
+            // Preserve the draw via the synchronous path rather than aborting the
+            // application with an empty compiler error (as 0.4.3 did).
+            LOG_WARNING(Render_Vulkan,
+                        "Completed pipeline {:#x} was not published under snapshot {:#x}; "
+                        "rebuilding synchronously",
+                        std::hash<GraphicsPipelineKey>{}(sel.graphics_key),
+                        std::hash<GraphicsPipelineKey>{}(build->selection.graphics_key));
+        }
+        // A full queue must not discard a draw: build it on the requesting
+        // thread using the existing synchronous path below.
     }
     const auto [it, is_new] = graphics_pipelines.try_emplace(sel.graphics_key);
     if (is_new) {
+        MarkPipelineKnown(sel.graphics_key);
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(sel.graphics_key);
         LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
         CompileTimer timer;
@@ -791,6 +1270,7 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
             sel.runtime_infos, sel.fetch_shader, sel.modules, sdata, false);
 
         RegisterPipelineData(sel.graphics_key, pipeline_hash, sdata);
+    ExportPipelineRecipe(sel.graphics_key, sdata);
         ++num_new_pipelines;
 
         if (EmulatorSettings.IsShaderCollect()) {
@@ -847,7 +1327,10 @@ bool PipelineCache::RefreshGraphicsKey(PipelineSelection& sel) {
     const bool db_enabled = db.needs_attachment;
     // Keep the backing image's combined format for stencil-only rendering.
     key.omit_depth_attachment = db_enabled && !db.needs_depth;
-    if (std::getenv("GOW3_DEPTH_DIAGNOSTICS")) {
+    // Process-start diagnostics must not take libc's environment lock for every
+    // draw on the command thread and all preparation workers.
+    static const bool depth_diagnostics = std::getenv("GOW3_DEPTH_DIAGNOSTICS") != nullptr;
+    if (depth_diagnostics) {
         static std::mutex mutex;
         static std::vector<std::array<u32, 3>> seen;
         const std::array data{std::bit_cast<u32>(regs.depth_control),
@@ -1203,6 +1686,7 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
     CompileTimer timer;
 
+    const auto start_binding = binding;
     const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
@@ -1218,6 +1702,10 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
         module = CompileSPV(spv, instance.GetDevice());
     }
 
+    if (!is_patched) {
+        const Shader::StageSpecialization recorded{info, runtime_info, profile, start_binding};
+        ExportShaderRecipe(info, recorded, perm_idx, spv);
+    }
     RegisterShaderBinary(std::move(spv), info.pgm_hash, perm_idx);
 
     const auto name = GetShaderName(info.hw_stage, info.pgm_hash, perm_idx);
@@ -1229,10 +1717,62 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     return module;
 }
 
+
+
 PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage hw_stage,
                                                 SwStage sw_stage,
-                                                const Shader::ShaderParams& params,
-                                                Shader::Backend::Bindings& binding) {
+                                                const Shader::ShaderParams& input_params,
+                                                Shader::Backend::Bindings& binding, bool allow_alias) {
+    auto params = input_params;
+    if (allow_alias && program_aliases_ready.load(std::memory_order_acquire)) {
+        const auto alias = program_aliases.find(params.hash);
+        if (alias != program_aliases.end() && alias->second.stage == hw_stage) {
+            const auto& code = *alias->second.code;
+            if (code.size() == params.code.size() &&
+                std::memcmp(code.data(), params.code.data(), params.code.size_bytes()) == 0) {
+                params.hash = alias->second.canonical;
+            } else {
+                ++program_alias_rejected;
+            }
+        }
+    }
+    const bool aliased = params.hash != input_params.hash;
+    const auto matches = [aliased](const Shader::StageSpecialization& cached,
+                                   const Shader::StageSpecialization& current, bool material) {
+        return cached == current && (!(aliased || material) ||
+            (cached.buffers.size() == current.buffers.size() &&
+             cached.images.size() == current.images.size() &&
+             cached.samplers.size() == current.samplers.size() &&
+             cached.bitset == current.bitset && current == cached));
+    };
+    const auto safe_module = [&](size_t index) {
+        if (!aliased) return true;
+        const auto safe = alias_safe_modules.find(params.hash);
+        return safe != alias_safe_modules.end() && safe->second.contains(index);
+    };
+    const auto safe_fetch = [](const Shader::Info& info, const Shader::StageSpecialization& spec) {
+        if (!spec.fetch_shader_data) return true;
+        for (const auto& attribute : spec.fetch_shader_data->attributes) {
+            const auto sharp = attribute.GetSharp(info);
+            const auto format = AmdGpu::NumberFormat(sharp.num_format);
+            // Neutral catalogue reconstruction has no shader-side fetch number
+            // conversion. Other conversions keep their original program ID.
+            if (format == AmdGpu::NumberFormat::Uscaled || format == AmdGpu::NumberFormat::Sscaled ||
+                format == AmdGpu::NumberFormat::SnormNz) return false;
+        }
+        return true;
+    };
+    const auto material_at = [&](size_t index) {
+        const auto found = material_modules.find(params.hash);
+        return found != material_modules.end() && found->second.contains(index);
+    };
+    const auto compatible = [&](const auto& modules, const auto& module,
+                                const Shader::StageSpecialization& spec, const Shader::Info& info) {
+        const size_t index = &module - modules.data();
+        const bool material = material_at(index);
+        return safe_module(index) && matches(module.spec,spec,material) &&
+            (!(aliased || material) || safe_fetch(info,spec));
+    };
     auto runtime_info = BuildRuntimeInfo(sel, hw_stage, sw_stage);
     if (sel.worker) {
         // gow3: draw-preparation worker: look up only, with the worker's own Info copy.
@@ -1260,16 +1800,26 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         runtime_fault_recover = &recover;
         info.RefreshFlatBuf();
         auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
-        runtime_fault_recover = nullptr;
-        const auto it = std::ranges::find(program->modules, spec, &Program::Module::spec);
+        const auto it = std::ranges::find_if(program->modules,
+            [&](const auto& module) { return compatible(program->modules,module,spec,info); });
+        if (aliased && (it == program->modules.end() || !safe_fetch(info, spec))) {
+            runtime_fault_recover = nullptr;
+            lk.unlock();
+            ++program_alias_rejected;
+            return GetProgram(sel, hw_stage, sw_stage, input_params, binding, false);
+        }
         if (it == program->modules.end()) {
+            PrepareAheadShader(*program, info, params, spec);
+            runtime_fault_recover = nullptr;
             worker.failed = true;
             return {};
         }
+        runtime_fault_recover = nullptr;
+        if (aliased) ++program_alias_hits;
         info.AddBindings(binding);
         const size_t perm_idx = std::distance(program->modules.begin(), it);
         worker.stages.push_back(
-            {program, params.hash, hw_stage, info.pgm_base, &info.flattened_ud_buf});
+            {program, input_params.hash, hw_stage, info.pgm_base, &info.flattened_ud_buf});
         return std::make_tuple(&info, it->module, it->spec.fetch_shader_data,
                                HashCombine(params.hash, perm_idx));
     }
@@ -1278,14 +1828,17 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     const bool compile_async = AsyncCompilation() && hw_stage != HwStage::Compute &&
                                !sel.regs->stage_enable.hs_en &&
                                !EmulatorSettings.IsShaderCollect();
-    if (!compile_async && it_pgm != program_cache.end() && it_pgm->second->pending) {
+    const bool required = !AllowsIncompleteDraws();
+    if ((!compile_async || (required && it_pgm != program_cache.end() &&
+                           it_pgm->second->modules.empty())) &&
+        it_pgm != program_cache.end() && it_pgm->second->pending) {
         {
-            PhaseTimer waiting{g_gow3_compile_wait_ns};
+            RequiredWaitTimer waiting{g_gow3_compile_wait_ns, "stage", params.hash};
             it_pgm->second->pending->job.Wait();
         }
         PublishShaders();
     }
-    if (!compile_async && it_pgm != program_cache.end() && it_pgm->second->modules.empty() &&
+    if ((!compile_async || required) && it_pgm != program_cache.end() && it_pgm->second->modules.empty() &&
         !it_pgm->second->compilation_failed) {
         std::unique_lock lock{programs_mutex};
         program_cache.erase(it_pgm);
@@ -1294,10 +1847,20 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     if (it_pgm == program_cache.end()) {
         auto new_program = std::make_unique<Program>(hw_stage, sw_stage, params);
         if (compile_async) {
-            QueueShader(*new_program, hw_stage, sw_stage, params, runtime_info, binding, 0, true);
-            std::unique_lock lock{programs_mutex};
-            program_cache.emplace(params.hash, std::move(new_program));
-            return {};
+            const bool queued = QueueShader(*new_program, hw_stage, sw_stage, params,
+                                            runtime_info, binding, 0, true);
+            if (queued || !required) {
+                {
+                    std::unique_lock lock{programs_mutex};
+                    program_cache.emplace(params.hash, std::move(new_program));
+                }
+                // Re-enter after insertion so the normal lookup waits and
+                // publishes the result without retaining job-owned pointers.
+                return required ? GetProgram(sel, hw_stage, sw_stage, params, binding) : Result{};
+            }
+            ASSERT_MSG(!new_program->compilation_failed,
+                       "Required shader {:#x} capture failed", params.hash);
+            // Queue saturation falls through to synchronous compilation.
         }
         auto start = binding;
         const auto module =
@@ -1312,12 +1875,15 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         {
             std::unique_lock lk{programs_mutex};
             program_cache.emplace(params.hash, std::move(new_program));
+            NotifyPreparation();
         }
         return std::make_tuple(&program->info, module, program->modules[0].spec.fetch_shader_data,
                                perm_hash);
     }
 
     auto& program = it_pgm.value();
+    ASSERT_MSG(!required || !program->compilation_failed,
+               "Required shader {:#x} compilation failed", params.hash);
     if (program->compilation_failed || (program->modules.empty() && program->pending)) {
         return {};
     }
@@ -1335,6 +1901,10 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
     info.user_data = params.user_data;
     info.RefreshFlatBuf();
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
+    if (aliased && !safe_fetch(info, spec)) {
+        ++program_alias_rejected;
+        return GetProgram(sel, hw_stage, sw_stage, input_params, binding, false);
+    }
 
     size_t perm_idx = program->modules.size();
     u64 perm_hash = HashCombine(params.hash, perm_idx);
@@ -1343,21 +1913,50 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
 
     // gow3: consecutive draws of a program almost always use the same permutation.
     auto it = program->last_used < program->modules.size() &&
-                      program->modules[program->last_used].spec == spec
+                      compatible(program->modules,program->modules[program->last_used],spec,info)
                   ? program->modules.begin() + program->last_used
-                  : std::ranges::find(program->modules, spec, &Program::Module::spec);
+                  : std::ranges::find_if(program->modules,
+                        [&](const auto& module) { return compatible(program->modules,module,spec,info); });
+    if (it == program->modules.end() && aliased) {
+        ++program_alias_rejected;
+        return GetProgram(sel, hw_stage, sw_stage, input_params, binding, false);
+    }
     if (it != program->modules.end()) {
+        if (aliased) ++program_alias_hits;
         program->last_used = std::distance(program->modules.begin(), it);
     }
     if (it == program->modules.end()) {
-        if (program->pending || std::ranges::find(program->failed_permutations, spec) !=
-                                    program->failed_permutations.end()) {
+        if (TakeAheadShader(*program, spec)) {
+            info.AddBindings(binding);
+            perm_idx = program->modules.size() - 1;
+            return std::make_tuple(&info, program->modules[perm_idx].module,
+                                   program->modules[perm_idx].spec.fetch_shader_data,
+                                   HashCombine(params.hash, perm_idx));
+        }
+        if (program->pending && required) {
+            {
+                RequiredWaitTimer waiting{g_gow3_compile_wait_ns, "stage", params.hash};
+                program->pending->job.Wait();
+            }
+            PublishShaders();
+            return GetProgram(sel, hw_stage, sw_stage, params, binding);
+        }
+        const bool failed = std::ranges::find(program->failed_permutations, spec) !=
+                            program->failed_permutations.end();
+        ASSERT_MSG(!required || !failed,
+                   "Required shader {:#x} permutation compilation failed", params.hash);
+        if (program->pending || failed) {
             return {};
         }
         if (compile_async) {
-            QueueShader(*program, hw_stage, sw_stage, params, runtime_info, binding, perm_idx, false,
-                        std::move(spec));
-            return {};
+            const bool queued = QueueShader(*program, hw_stage, sw_stage, params, runtime_info,
+                                            binding, perm_idx, false, spec);
+            if (queued || !required) {
+                return required ? GetProgram(sel, hw_stage, sw_stage, params, binding) : Result{};
+            }
+            ASSERT_MSG(std::ranges::find(program->failed_permutations, spec) ==
+                           program->failed_permutations.end(),
+                       "Required shader {:#x} permutation capture failed", params.hash);
         }
         auto new_info = Shader::Info(hw_stage, sw_stage, params);
         module = CompileModule(new_info, runtime_info, params.code, perm_idx, binding);
@@ -1365,6 +1964,7 @@ PipelineCache::Result PipelineCache::GetProgram(PipelineSelection& sel, HwStage 
         RegisterShaderMeta(info, spec.fetch_shader_data, spec, perm_hash, perm_idx);
         std::unique_lock lk{programs_mutex};
         program->AddPermut(module, std::move(spec));
+        NotifyPreparation();
     } else {
         info.AddBindings(binding);
         module = it->module;

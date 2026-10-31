@@ -11,12 +11,15 @@ namespace Vulkan::HostPasses {
 
 class FsrPass {
 public:
+    ~FsrPass();
     struct Settings {
         bool enable{true};
         bool use_rcas{true};
         float rcas_attenuation{0.25f};
     };
 
+    // Diagnostic policy: 0 fused presentation, 1 legacy EASU+RCAS, 2 direct compute RCAS.
+    static unsigned IdentityMode();
     void Create(vk::Device device, VmaAllocator allocator, u32 num_images);
 
     vk::ImageView Render(vk::CommandBuffer cmdbuf, vk::ImageView input, vk::Extent2D input_size,

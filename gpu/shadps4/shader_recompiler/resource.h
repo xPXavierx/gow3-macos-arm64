@@ -132,6 +132,7 @@ struct ImageResource {
     /// gow3: read other than by normalized sampling without offsets (texel loads, size
     /// queries, offsets): needs the native-size image, not a reduced scene proxy.
     bool needs_native{};
+    bool needs_exact_size{}; ///< Preserve descriptor extent even when reading a scaled image.
     u8 constant_mip_index{};
     MipStorageFallbackMode mip_fallback_mode{};
     SharpFetchPostOp post_op{};
@@ -228,6 +229,9 @@ struct PushData {
     static constexpr u32 BufOffsetIndex = UdRegsIndex + NUM_USER_DATA_REGS / 4;
     static constexpr u32 MotionParamIndex = BufOffsetIndex + NUM_BUFFERS / 16 + 1;
     static constexpr u32 SceneSizeIndex = MotionParamIndex + 1;
+    static constexpr u32 SceneBaseIndex = SceneSizeIndex + 1;
+    static constexpr u32 ImageSizesIndex = SceneBaseIndex + 1;
+    static constexpr u32 ImageSizeCount = 128;
 
     float xoffset;
     float yoffset;
@@ -238,12 +242,17 @@ struct PushData {
     u32 motion_param; ///< gow3: object motion parameter index (0: off)
     u32 scene_size; ///< reduced width | height << 16; zero means native pixel coordinates
 
+    u32 scene_base; ///< Exact logical scene dimensions; avoids rounded scale ratios.
+
+    // Indexed by the existing unified descriptor binding; zero means physical == logical.
+    // Keeps shader resource layouts and captured SRT snapshots unchanged.
+    std::array<u32, ImageSizeCount> image_sizes{};
+
     void AddOffset(u32 binding, u32 offset) {
         ASSERT(offset < 256 && binding < buf_offsets.size());
         buf_offsets[binding] = offset;
     }
 };
-static_assert(sizeof(PushData) <= 128,
-              "PushData size is greater than minimum size guaranteed by Vulkan spec");
+static_assert(sizeof(PushData) == 644); // checked against device limits before pipeline creation
 
 } // namespace Shader

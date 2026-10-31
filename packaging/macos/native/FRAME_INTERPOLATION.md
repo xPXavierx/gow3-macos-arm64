@@ -1,5 +1,9 @@
 # Experimental MetalFX frame interpolation
 
+**Archived experiment:** excluded from build 0.4.18 and the launcher. The current
+build supports resolution, spatial MetalFX and real-frame limits only. This
+document preserves the former implementation for future research.
+
 This is an opt-in, native ARM64 implementation of Apple's public
 `MTLFXFrameInterpolator` API. It requires macOS 26, a supported Apple GPU, and
 MetalFX frame-interpolation headers from SDK 26 to build the effect. The M3 Max
@@ -63,8 +67,9 @@ eligibility remain available. No private Game Mode API is used.
 The GoW depth-copy pass provides the active projection and the scene's depth
 addresses. Projection values are checked for finite ranges and aspect ratio;
 near/far and vertical field of view are derived from the active coefficients.
-The scene color and depth are captured after post processing and before the
-game clears scene depth to draw its HUD. Unsupported or missing inputs use the
+Depth and motion are captured before the HUD depth clear. Final scene color is
+captured from the current color attachment before the first indexed HUD draw,
+including opaque interface geometry with depth enabled. Unsupported or missing inputs use the
 real frame only; skipped interpolation invalidates native history. Interpolation
 waits for two warm-up encodes before presenting an intermediate result.
 
@@ -263,3 +268,9 @@ shader compiles. This validates the packaged ordinary path after cleanup, not
 reported no Vulkan/Metal errors, and four production SPIR-V modules passed
 spirv-val. Six native runtime/loader checks and 195 Python tests passed (59
 Python cases skipped for unavailable compiled/platform prerequisites).
+
+## 0.4.15 input and presentation corrections
+
+See [the native interpolation review](INTERPOLATION_REVIEW.md) for the corrected
+scene/UI framebuffer contract, CAMetalDisplayLink ownership, paired-driver
+compatibility guard, asynchronous submission and bounded validation limits.

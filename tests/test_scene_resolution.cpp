@@ -71,7 +71,25 @@ int main() {
         cmd.pipelineBarrier2({.memoryBarrierCount=1,.pMemoryBarriers=&b}, dispatch);
         const vk::BufferImageCopy region{.imageSubresource={aspect,0,0,1},
             .imageOffset={s32(w-1),s32(h-1),0},.imageExtent={1,1,1}};
-        cmd.copyImageToBuffer(image, layout, readback, region, dispatch);
+        const bool transition = layout != vk::ImageLayout::eGeneral && layout != vk::ImageLayout::eTransferSrcOptimal;
+        const vk::ImageMemoryBarrier2 readable{
+            .srcStageMask=vk::PipelineStageFlagBits2::eAllCommands,
+            .srcAccessMask=vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite,
+            .dstStageMask=vk::PipelineStageFlagBits2::eTransfer,
+            .dstAccessMask=vk::AccessFlagBits2::eTransferRead,
+            .oldLayout=layout,.newLayout=vk::ImageLayout::eTransferSrcOptimal,
+            .image=image,.subresourceRange={aspect,0,1,0,1}};
+        if (transition) cmd.pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&readable},dispatch);
+        cmd.copyImageToBuffer(image, transition ? vk::ImageLayout::eTransferSrcOptimal : layout, readback, region, dispatch);
+        if (transition) {
+            auto restored=readable;
+            restored.oldLayout=readable.newLayout;restored.newLayout=layout;
+            restored.srcStageMask=vk::PipelineStageFlagBits2::eTransfer;
+            restored.srcAccessMask=vk::AccessFlagBits2::eTransferRead;
+            restored.dstStageMask=vk::PipelineStageFlagBits2::eAllCommands;
+            restored.dstAccessMask=vk::AccessFlagBits2::eMemoryRead;
+            cmd.pipelineBarrier2({.imageMemoryBarrierCount=1,.pImageMemoryBarriers=&restored},dispatch);
+        }
         const vk::MemoryBarrier2 host{.srcStageMask=vk::PipelineStageFlagBits2::eTransfer,
             .srcAccessMask=vk::AccessFlagBits2::eTransferWrite,
             .dstStageMask=vk::PipelineStageFlagBits2::eHost,
@@ -108,7 +126,9 @@ int main() {
         const auto output = stencil_index > 7 ? SceneResolution::Size{3840,2160}
                                              : SceneResolution::Size{};
         const auto size = SceneResolution::ForPreset(preset, output);
-        targets.SetSize(size);
+        if (targets.SetSize(size)) {
+            assert(!images[color_id].scene_proxy && !images[depth_id].scene_proxy);
+        }
         assert(SceneResolution::Unpack(SceneResolution::Pack(size)) == size);
         clear_native(0xffff0000, copied_stencil); // blue
         auto c = targets.Read(color_id,cv);
@@ -131,6 +151,25 @@ int main() {
             .colorAttachmentCount=1,.pColorAttachments=&color,
             .pDepthAttachment=&depth,.pStencilAttachment=&depth}, dispatch);
         cmd.endRendering(dispatch);
+        // Presentation must consume the physical target, including when a live
+        // change made it larger than the logical image. Exporting another view
+        // and preparing GENERAL for MetalFX must not resolve it back down first.
+        const auto sampled = targets.SampleProxy(images[color_id], cv);
+        assert(sampled && sampled->image == c.image);
+        assert(targets.ProxySize(images[color_id]) == size);
+        assert(pixel(sampled->image, vk::ImageAspectFlagBits::eColor,
+                     sampled->layout, size.width, size.height) == 0xff0000ff);
+        assert(targets.PrepareSample(images[color_id],0,vk::ImageLayout::eGeneral)
+               == vk::ImageLayout::eGeneral);
+        assert(targets.ProxyCurrent(images[color_id]));
+        const auto sampled_depth = targets.SampleProxy(images[depth_id],dv);
+        assert(sampled_depth && sampled_depth->image == d.image);
+        assert(std::bit_cast<float>(pixel(sampled_depth->image,vk::ImageAspectFlagBits::eDepth,
+                                         sampled_depth->layout,size.width,size.height)) == .75f);
+        const auto feedback = targets.SnapshotProxy(images[color_id],cv);
+        assert(feedback && feedback->image != c.image);
+        assert(pixel(feedback->image,vk::ImageAspectFlagBits::eColor,feedback->layout,size.width,size.height)==0xff0000ff);
+        assert(targets.ProxyCurrent(images[color_id]));
         runtime.Transit(&images[color_id],vk::ImageLayout::eTransferSrcOptimal,
             vk::PipelineStageFlagBits2::eTransfer,vk::AccessFlagBits2::eTransferRead);
         runtime.FlushBarriers();
@@ -148,6 +187,114 @@ int main() {
         assert(pixel(c.image,vk::ImageAspectFlagBits::eColor,c.layout,size.width,size.height)==0xff00ff00);
         std::printf("Scene targets: %ux%u color/depth/stencil roundtrip PASS\n",size.width,size.height);
     }
+
+    // A non-uniform pattern verifies nearest pixel-center mapping and full
+    // coverage on both sides of the native/proxy boundary, not just clear values.
+    targets.SetSize({640,360});
+    const auto split = [&](vk::ImageView view, vk::ImageLayout layout, u32 w, u32 h) {
+        auto cmd = scheduler.CommandBuffer();
+        const vk::RenderingAttachmentInfo color{.imageView=view,.imageLayout=layout,
+            .loadOp=vk::AttachmentLoadOp::eClear,.storeOp=vk::AttachmentStoreOp::eStore,
+            .clearValue=vk::ClearValue{.color={.float32=std::array{0.f,0.f,1.f,1.f}}}};
+        cmd.beginRendering({.renderArea={{0,0},{w,h}},.layerCount=1,
+            .colorAttachmentCount=1,.pColorAttachments=&color},dispatch);
+        const vk::ClearAttachment red{.aspectMask=vk::ImageAspectFlagBits::eColor,
+            .colorAttachment=0,.clearValue=vk::ClearValue{.color={.float32=std::array{1.f,0.f,0.f,1.f}}}};
+        const vk::ClearRect left{.rect={{0,0},{w/2,h}},.baseArrayLayer=0,.layerCount=1};
+        cmd.clearAttachments(red,left,dispatch);cmd.endRendering(dispatch);
+    };
+    runtime.Transit(&images[color_id],vk::ImageLayout::eColorAttachmentOptimal,
+        vk::PipelineStageFlagBits2::eColorAttachmentOutput,vk::AccessFlagBits2::eColorAttachmentWrite);
+    runtime.FlushBarriers();
+    split(*images[color_id].FindView(cv).image_view,vk::ImageLayout::eColorAttachmentOptimal,1920,1080);
+    auto pattern=targets.Read(color_id,cv);
+    assert(pixel(pattern.image,vk::ImageAspectFlagBits::eColor,pattern.layout,320,360)==0xff0000ff);
+    assert(pixel(pattern.image,vk::ImageAspectFlagBits::eColor,pattern.layout,321,360)==0xffff0000);
+    pattern=targets.Attachment(color_id,cv);split(pattern.view,pattern.layout,640,360);
+    runtime.Transit(&images[color_id],vk::ImageLayout::eTransferSrcOptimal,
+        vk::PipelineStageFlagBits2::eTransfer,vk::AccessFlagBits2::eTransferRead);
+    runtime.FlushBarriers();
+    assert(pixel(images[color_id].GetImage(),vk::ImageAspectFlagBits::eColor,
+                 vk::ImageLayout::eTransferSrcOptimal,960,1080)==0xff0000ff);
+    assert(pixel(images[color_id].GetImage(),vk::ImageAspectFlagBits::eColor,
+                 vk::ImageLayout::eTransferSrcOptimal,961,1080)==0xffff0000);
+    std::puts("Scene targets: nearest split-pattern boundaries PASS");
+
+    // Alias copies crop logical coordinates; they must not scale the whole
+    // source into the smaller destination or resolve an entire scene first.
+    auto alias_info = ci;
+    alias_info.size = {1280,720,1};
+    const auto alias_id = images.insert(instance,runtime,views,alias_info);
+    auto half_alias_info = ci;
+    half_alias_info.size = {960,540,1};
+    const auto half_alias_id = images.insert(instance,runtime,views,half_alias_info);
+    for (auto physical : {SceneResolution::Size{640,360}, SceneResolution::Size{1130,636}}) {
+        targets.SetSize(physical);
+        auto input = targets.Attachment(color_id,cv);
+        split(input.view,input.layout,physical.width,physical.height);
+        assert(!targets.CopyAlias(images[color_id],images[alias_id],{640,360,1}));
+        assert(targets.CopyAlias(images[color_id],images[alias_id],{1280,720,1}));
+        assert(targets.ProxyCurrent(images[color_id]));
+        runtime.Transit(&images[alias_id],vk::ImageLayout::eTransferSrcOptimal,
+            vk::PipelineStageFlagBits2::eTransfer,vk::AccessFlagBits2::eTransferRead);
+        runtime.FlushBarriers();
+        const auto left = pixel(images[alias_id].GetImage(),vk::ImageAspectFlagBits::eColor,
+                                vk::ImageLayout::eTransferSrcOptimal,960,720);
+        const auto right = pixel(images[alias_id].GetImage(),vk::ImageAspectFlagBits::eColor,
+                                 vk::ImageLayout::eTransferSrcOptimal,961,720);
+        assert(left==0xff0000ff && right==0xffff0000);
+
+        // A full overwrite invalidates an old destination proxy without copying
+        // its obsolete content back over the new alias data.
+        vk::ClearValue zero{};
+        runtime.ClearImage(&images[half_alias_id],{},zero);
+        auto half = targets.Attachment(half_alias_id,cv);
+        split(half.view,half.layout,physical.width/2,physical.height/2);
+        assert(targets.ProxyCurrent(images[half_alias_id]));
+        assert(targets.CopyAlias(images[color_id],images[half_alias_id],{960,540,1}));
+        assert(!targets.ProxyCurrent(images[half_alias_id]));
+
+        // Resolve the reference source, then use the ordinary byte-preserving
+        // native alias copy and compare the same boundary pixels.
+        runtime.Transit(&images[color_id],vk::ImageLayout::eTransferSrcOptimal,
+            vk::PipelineStageFlagBits2::eTransfer,vk::AccessFlagBits2::eTransferRead);
+        runtime.CopyAliasImage(&images[color_id],&images[alias_id],{1280,720,1});
+        runtime.Transit(&images[alias_id],vk::ImageLayout::eTransferSrcOptimal,
+            vk::PipelineStageFlagBits2::eTransfer,vk::AccessFlagBits2::eTransferRead);
+        runtime.FlushBarriers();
+        assert(pixel(images[alias_id].GetImage(),vk::ImageAspectFlagBits::eColor,
+                     vk::ImageLayout::eTransferSrcOptimal,960,720)==left);
+        assert(pixel(images[alias_id].GetImage(),vk::ImageAspectFlagBits::eColor,
+                     vk::ImageLayout::eTransferSrcOptimal,961,720)==right);
+    }
+    std::puts("Scene targets: clipped alias/native equivalence and destination invalidation PASS");
+
+    // The game's four alias sources use RG16F. Check half-float channel packing
+    // as well as rejecting a bit-compatible but differently interpreted format.
+    auto rg_info = ci;
+    rg_info.pixel_format = vk::Format::eR16G16Sfloat;
+    const auto rg_id = images.insert(instance,runtime,views,rg_info);
+    rg_info.size = {320,270,1};
+    const auto rg_alias_id = images.insert(instance,runtime,views,rg_info);
+    targets.SetSize({1130,636});
+    auto rg_view = cv;
+    rg_view.format = rg_info.pixel_format;
+    auto rg = targets.Attachment(rg_id,rg_view);
+    const vk::RenderingAttachmentInfo rg_clear{.imageView=rg.view,.imageLayout=rg.layout,
+        .loadOp=vk::AttachmentLoadOp::eClear,.storeOp=vk::AttachmentStoreOp::eStore,
+        .clearValue=vk::ClearValue{.color={.float32=std::array{0.125f,0.75f,0.f,1.f}}}};
+    auto rg_cmd = scheduler.CommandBuffer();
+    rg_cmd.beginRendering({.renderArea={{0,0},{1130,636}},.layerCount=1,
+        .colorAttachmentCount=1,.pColorAttachments=&rg_clear},dispatch);
+    rg_cmd.endRendering(dispatch);
+    assert(!targets.CopyAlias(images[rg_id],images[alias_id],{1280,720,1}));
+    assert(targets.CopyAlias(images[rg_id],images[rg_alias_id],{320,270,1}));
+    runtime.Transit(&images[rg_alias_id],vk::ImageLayout::eTransferSrcOptimal,
+        vk::PipelineStageFlagBits2::eTransfer,vk::AccessFlagBits2::eTransferRead);
+    runtime.FlushBarriers();
+    assert(pixel(images[rg_alias_id].GetImage(),vk::ImageAspectFlagBits::eColor,
+                 vk::ImageLayout::eTransferSrcOptimal,320,270)==0x3a003000);
+    std::puts("Scene targets: RG16F clipped alias packing and format guard PASS");
 
     // Half-resolution mip chain (the game's bloom pyramid): one proxy per level, scaled by the
     // scene's factor, resolved into its own native level.

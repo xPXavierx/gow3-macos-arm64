@@ -42,6 +42,8 @@ private:
     bool text_requested{}, text_active{};
     int display_mode = -1; ///< applied Gow3Settings display mode (window thread)
     void ApplyDisplayMode(int mode);
+    void UpdateCursorMode();
+    int cursor_state = -1;
     int text_state{};
     std::string text, text_prompt, base_title;
     void UpdateTextTitle();

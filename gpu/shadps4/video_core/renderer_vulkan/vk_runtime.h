@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
+#include <source_location>
 
 #include "common/types.h"
 #include "video_core/buffer_cache/buffer.h"
@@ -51,7 +52,8 @@ public:
 
     bool Transit(VideoCore::Image* image, vk::ImageLayout dst_layout,
                  vk::PipelineStageFlags2 dst_stage, vk::AccessFlags2 dst_access,
-                 std::optional<VideoCore::SubresourceRange> subres_range = {});
+                 std::optional<VideoCore::SubresourceRange> subres_range = {},
+                 std::source_location caller = std::source_location::current());
 
     /// GOW3_GPU_PROFILE: a profiler segment for a transfer of `image` while it lives; the
     /// segment it interrupted continues afterwards.

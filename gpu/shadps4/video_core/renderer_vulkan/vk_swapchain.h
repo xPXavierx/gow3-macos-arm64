@@ -78,6 +78,10 @@ public:
     [[nodiscard]] vk::Semaphore GetImageAcquiredSemaphore() const {
         return image_acquired[frame_index];
     }
+    void AcquisitionConsumed(vk::Semaphore timeline, u64 value) {
+        if(acquisition_done.size()!=image_acquired.size())acquisition_done.resize(image_acquired.size());
+        acquisition_done[frame_index]={timeline,value};
+    }
 
     [[nodiscard]] vk::Semaphore GetPresentReadySemaphore() const {
         return present_ready[image_index];
@@ -137,9 +141,13 @@ private:
     u32 image_count = 0;
     u32 image_index = 0;
     u32 frame_index = 0;
+    struct AcquisitionTicket {vk::Semaphore timeline{};u64 value{};};
+    std::vector<AcquisitionTicket> acquisition_done;
     bool needs_recreation = true;
     bool needs_hdr = false;    // The game requested HDR swapchain
     u32 timing_id{};
+    u64 pacing_next{};
+    u32 pacing_rate{};
     std::unordered_map<u32,bool> timing_generated;
     u64 timing_start{},timing_last{},timing_real{},timing_extra{};
     std::vector<u64> timing_intervals;

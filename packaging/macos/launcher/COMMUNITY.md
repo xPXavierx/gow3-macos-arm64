@@ -20,6 +20,14 @@ cache. Those are generated only on the player's Mac from their selected dump.
    resolution or engine cap can prepare another profile; matching compiled objects
    are reused. Language, dump folder and all settings persist.
 
+The first launch indexes shader sources in your dump and prepares a partial corpus
+of known render descriptions locally before gameplay. No game shader code or GPU
+binaries are bundled. The asset index and compiled results are reused.
+Known graphics shaders/pipelines are prepared before game startup. New variants
+wait when required, preserving complete draws; the first encounter can still
+pause. The persistent cache reduces repeated compilation. This is separate from
+the ARM64 CPU preparation described above.
+
 **Requirements:** Apple Silicon, **macOS 26 or later**, compatible extracted dump,
 plus at least **3 GB free on the Mac** for initial preparation. Only M3 Max has
 been tested so far; other chips and the complete campaign remain unverified.
@@ -62,7 +70,7 @@ signed distribution and do not include dumps, saves, logs or compiled GPU progra
 See the [player guide](../../../docs/community-shaders.md)
 ([Português brasileiro](../../../docs/community-shaders.pt-BR.md),
 [Español](../../../docs/community-shaders.es.md)). It includes availability: the
-updated panel is currently validated locally as 0.4.20, not yet a GitHub app release.
+updated panel is available in release 0.4.20.
 
 ## Settings and data
 
@@ -77,8 +85,9 @@ updated panel is currently validated locally as 0.4.20, not yet a GitHub app rel
   session log. Unlimited does not change the display refresh rate.
 - Retina fullscreen, Game Mode metadata and V-Sync stay enabled. macOS controls
   actual Game Mode, including remembered manual opt-out.
-- No frame generation. The game HUD always displays render dimensions and MetalFX
-  status/preset, even with the optional Apple Metal HUD disabled.
+- No frame generation. The launcher HUD switch controls both Apple's Metal HUD
+  and the game diagnostic overlay, including render dimensions and MetalFX status.
+  Turning it off hides both diagnostic overlays.
 
 Preferences, saves, caches, logs and generated code are stored outside the app at:
 

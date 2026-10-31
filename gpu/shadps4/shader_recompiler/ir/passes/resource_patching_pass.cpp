@@ -125,6 +125,7 @@ public:
         image.is_atomic |= desc.is_atomic;
         image.is_written |= desc.is_written;
         image.needs_native |= desc.needs_native;
+        image.needs_exact_size |= desc.needs_exact_size;
         return index;
     }
 
@@ -241,7 +242,7 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
          opcode == IR::Opcode::ImageSampleDrefExplicitLod || opcode == IR::Opcode::ImageGather ||
          opcode == IR::Opcode::ImageGatherDref || opcode == IR::Opcode::ImageGradient ||
          opcode == IR::Opcode::ImageQueryLod) &&
-        !inst_info.has_offset && !inst_info.is_unnormalized;
+        !inst_info.has_offset && (!inst_info.is_unnormalized || opcode == IR::Opcode::ImageSampleRaw);
     ImageResource image_res = {
         .sharp_fetch = ConstructSharpFetch<AmdGpu::Image>(resource.sharps[0]),
         .is_depth = bool(inst_info.is_depth),
@@ -255,6 +256,14 @@ void PatchImageSharp(const ResourceDiscovery& resource, Info& info, Descriptors&
 
     auto image = image_res.GetSharp(info);
     ASSERT(image.GetType() != AmdGpu::ImageType::Invalid);
+    // The SPIR-V backend maps texel loads to physical pixels and reports logical
+    // dimensions from per-draw metadata. No new guest/SRT buffer reads are inserted.
+    if (!is_written && image.GetViewType(image_res.is_array) == AmdGpu::ImageType::Color2D &&
+        ((opcode == IR::Opcode::ImageRead && !inst_info.has_lod) ||
+         opcode == IR::Opcode::ImageQueryDimensions)) {
+        image_res.needs_native = false;
+        image_res.needs_exact_size = true;
+    }
 
     if (needs_mip_storage_fallback) {
         // If the mip level to IMAGE_(LOAD/STORE)_MIP is a constant, set up ImageResource
@@ -758,6 +767,15 @@ void PatchImageSampleArgs(IR::Inst& inst, Info& info, const ImageResource& image
                          view_type == AmdGpu::ImageType::Color2DMsaaArray;
     const bool unnormalized = sampler.force_unnormalized || inst_info.is_unnormalized;
     const bool needs_dimentions = (!is_msaa && unnormalized) || (is_msaa && !unnormalized);
+    // The sampler can request pixel coordinates even when the instruction itself
+    // does not. The dimension query inserted below must see the guest-size image:
+    // dividing guest pixel coordinates by a reduced proxy's size stretches UVs
+    // past 1 and clamps the rest of the frame to its upper-left region.
+    if (needs_dimentions || unnormalized) {
+        auto& resource = info.images[handle.U32() & 0xFFFF];
+        resource.needs_exact_size = true;
+        if (view_type != AmdGpu::ImageType::Color2D || inst_info.has_offset) resource.needs_native = true;
+    }
     const auto dimensions =
         needs_dimentions ? ir.ImageQueryDimension(handle, ir.Imm32(0u), ir.Imm1(false), inst_info)
                          : IR::Value{};

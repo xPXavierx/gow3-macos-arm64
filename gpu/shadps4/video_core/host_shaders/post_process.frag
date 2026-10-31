@@ -12,8 +12,23 @@ layout (push_constant) uniform settings {
     float gamma;
     bool hdr;
     bool srgb_input;
+    float rcas_attenuation;
     vec4 picture; // gow3: x0, y0, x1, y1 of the part shown; the rest is black (cutscene bars)
 } pp;
+
+#ifdef FUSED_RCAS
+#extension GL_GOOGLE_include_directive : require
+#define A_GPU 1
+#define A_GLSL 1
+#define A_HALF
+#include "fsr/ffx_a.h"
+#define FSR_RCAS_H
+AH4 FsrRcasLoadH(ASW2 p) {
+    return AH4(texelFetch(texSampler, ASU2(p), 0));
+}
+void FsrRcasInputH(inout AH1 r, inout AH1 g, inout AH1 b) {}
+#include "fsr/ffx_fsr1.h"
+#endif
 
 const float cutoff = 0.0031308, a = 1.055, b = 0.055, d = 12.92;
 vec3 gamma(vec3 rgb) {
@@ -39,7 +54,19 @@ void main() {
         color = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
-    vec4 color_linear = texture(texSampler, uv);
+    vec4 color_linear;
+#ifdef FUSED_RCAS
+    if (pp.rcas_attenuation >= 0.0) {
+        AU4 con;
+        FsrRcasCon(con, pp.rcas_attenuation);
+        AH3 c;
+        FsrRcasH(c.r, c.g, c.b, AU2(gl_FragCoord.xy), con);
+        // Same half-precision RCAS as the compute pass, immediately consumed
+        // by gamma/output encoding instead of storing and sampling RGBA16F.
+        color_linear = vec4(vec3(c), 1.0);
+    } else
+#endif
+        color_linear = texture(texSampler, uv);
     if (pp.hdr) {
         color = color_linear;
     } else {

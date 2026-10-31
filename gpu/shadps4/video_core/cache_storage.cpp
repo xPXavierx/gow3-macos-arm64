@@ -14,6 +14,7 @@
 #include <miniz.h>
 
 #include <condition_variable>
+#include <atomic>
 #include <functional>
 #include <future>
 #include <mutex>
@@ -22,7 +23,7 @@
 namespace {
 
 std::mutex submit_mutex{};
-u32 num_requests{};
+std::atomic<u32> num_requests{};
 std::condition_variable_any request_cv{};
 std::queue<std::packaged_task<void()>> req_queue{};
 std::mutex m_request{};
@@ -40,7 +41,7 @@ void ProcessIO(const std::stop_token& stoken) {
     while (!stoken.stop_requested()) {
         {
             std::unique_lock lk{submit_mutex};
-            Common::CondvarWait(request_cv, lk, stoken, [&] { return num_requests; });
+            Common::CondvarWait(request_cv, lk, stoken, [&] { return num_requests.load(std::memory_order_relaxed); });
         }
 
         if (stoken.stop_requested()) {
@@ -137,6 +138,23 @@ void DataBase::Close() {
     LOG_INFO(Render, "Cache dumped");
 }
 
+void DataBase::WaitForWrites() {
+    if (!opened) return;
+    auto promise = std::make_shared<std::promise<void>>();
+    auto completed = promise->get_future();
+    std::packaged_task<void()> barrier{[promise] { promise->set_value(); }};
+    {
+        std::scoped_lock lock{m_request};
+        req_queue.emplace(std::move(barrier));
+    }
+    {
+        std::scoped_lock lock{submit_mutex};
+        ++num_requests;
+        request_cv.notify_one();
+    }
+    completed.wait();
+}
+
 template <typename T>
 bool WriteVector(const BlobType type, std::filesystem::path&& path_, std::vector<T>&& v) {
     {
@@ -193,6 +211,10 @@ void LoadVector(BlobType type, std::filesystem::path& path, std::vector<T>& v) {
         v.resize(stat.m_uncomp_size / sizeof(T));
         mz_zip_reader_extract_to_mem(&zip_ar, index, v.data(), stat.m_uncomp_size, 0);
     } else {
+        if (!std::filesystem::is_regular_file(path)) {
+            v.clear();
+            return;
+        }
         const auto file = IOFile{path, FileAccessMode::Read};
         v.resize(file.GetSize() / sizeof(T));
         file.Read(v);

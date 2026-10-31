@@ -8,6 +8,8 @@ from pathlib import Path
 import plistlib
 import struct
 import subprocess
+import sys
+import tempfile
 
 
 def audit(app):
@@ -17,6 +19,39 @@ def audit(app):
     assert manifest['profiles'] == 0 and not manifest['local_private_aot']
     assert not (resources / 'Profiles').exists()
     assert not (resources / 'TexturePack').exists(), 'Local texture packs are private test data'
+    catalogue = resources / 'ShaderCatalog'
+    descriptions = json.loads((catalogue / 'manifest.json').read_text())
+    modern = 'contains_shader_code' in descriptions
+    if modern:
+        assert descriptions['contains_shader_code'] is False
+        assert descriptions['contains_walker_code'] is False
+        # GSR2/GPR2 are reconstructed from strictly validated portable rows.
+        # Comparing the materialized files also rejects binary code hidden in
+        # a resource description; manifest booleans alone are not sufficient.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'native'))
+        from community_catalog import materialize
+        with tempfile.TemporaryDirectory() as folder:
+            rebuilt = materialize([resources / 'CommunityCatalog.jsonl'], Path(folder))
+            assert rebuilt['files'] == descriptions['files']
+    else:
+        assert not descriptions['complete_campaign_catalog']
+        assert not descriptions['contains_game_shader_code']
+        assert not descriptions['contains_spirv_or_device_binaries']
+    expected = descriptions['files']
+    assert {p.name for p in catalogue.iterdir()} == set(expected) | {'manifest.json'}
+    for name, digest in expected.items():
+        assert Path(name).name == name
+        file = catalogue / name
+        assert not file.is_symlink() and file.stat().st_size <= 1024**2
+        assert hashlib.sha256(file.read_bytes()).hexdigest() == digest
+        if file.suffix == '.recipe':
+            assert file.read_bytes()[:4] == (b'GSR2' if modern else b'GSR1')
+        elif file.suffix == '.pso':
+            assert file.read_bytes()[:4] == (b'GPR2' if modern else b'GPR1')
+        else:
+            assert name in ('compatibility.txt', 'binary-fingerprints.tsv')
+    assert len(list(catalogue.glob('*.recipe'))) == descriptions['shader_recipes']
+    assert len(list(catalogue.glob('*.pso'))) == descriptions['pipeline_recipes']
     forbidden = {'boot-linked.bin', 'eboot.bin', 'eboot.elf', 'linked.elf', 'functions.tsv', 'offsets.txt',
         'libgow3-recompiled.dylib', 'analysis.json', 'link.json', 'preferences.json', 'aot-patches.json'}
     rows = []
@@ -54,6 +89,9 @@ def audit(app):
         'no_game_dump_or_prepared_game_code': True, 'no_user_preferences_saves_or_bytecode': True,
         'signature_integrity_valid': True, 'signature_type': 'ad-hoc', 'apple_notarized': False,
         'retina_and_game_mode_metadata': True, 'minimum_macos': '26.0',
+        'partial_graphics_catalog_verified': True,
+        'shader_recipes': descriptions['shader_recipes'],
+        'pipeline_recipes': descriptions['pipeline_recipes'],
         'files_audited': files, 'macho_count': len(rows), 'binaries': rows}
 
 

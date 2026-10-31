@@ -2,6 +2,8 @@
 //  SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "gow3_graphics.h"
+#include <cstdlib>
+#include <cstdio>
 #include "common/assert.h"
 #include "core/emulator_settings.h"
 #include "video_core/host_shaders/fsr_easu_comp.h"
@@ -26,6 +28,22 @@ struct FSRConstants {
 };
 
 namespace Vulkan::HostPasses {
+
+// Destroy Vulkan handle wrappers with the library's own dispatch configuration.
+FsrPass::~FsrPass() = default;
+
+unsigned FsrPass::IdentityMode() {
+    static const bool legacy = std::getenv("GOW3_FSR_LEGACY_RCAS_RESAMPLE") != nullptr;
+    static const char* control = std::getenv("GOW3_FSR_RCAS_CONTROL");
+    if (control) {
+        if (FILE* file = std::fopen(control, "r")) {
+            const int value = std::fgetc(file);
+            std::fclose(file);
+            if (value >= '0' && value <= '2') return unsigned(value - '0');
+        }
+    }
+    return legacy ? 1 : 0;
+}
 
 void FsrPass::Create(vk::Device device, VmaAllocator allocator, u32 num_images) {
     this->device = device;
@@ -146,6 +164,19 @@ vk::ImageView FsrPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
     if (output_size != cur_size) {
         ResizeAndInvalidate(output_size.width, output_size.height);
     }
+    // RCAS sharpens pixels already at their destination size. Feeding that
+    // request through EASU first adds an unwanted second reconstruction after
+    // MetalFX, plus a full-size RGBA16F write and a dependent compute dispatch.
+    // Retain the old path only as an explicit maintainer comparison.
+    const bool resample = input_size != output_size || IdentityMode() == 1;
+    static int reported = -1;
+    const int policy = int(resample) | (int(settings.use_rcas) << 1);
+    if (reported != policy) {
+        std::printf("Presentation FSR: EASU=%d RCAS=%d input=%ux%u output=%ux%u\n",
+            resample || !settings.use_rcas, settings.use_rcas, input_size.width, input_size.height,
+            output_size.width, output_size.height);
+        reported = policy;
+    }
     auto [width, height] = cur_size;
 
     auto& img = available_imgs[cur_image];
@@ -184,7 +215,7 @@ vk::ImageView FsrPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
             .subresourceRange = simple_subresource,
         },
     };
-    cmdbuf.pipelineBarrier2({
+    if (resample) cmdbuf.pipelineBarrier2({
         .imageMemoryBarrierCount = enter_barrier.size(),
         .pImageMemoryBarriers = enter_barrier.data(),
     });
@@ -199,7 +230,7 @@ vk::ImageView FsrPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
 
     if (settings.use_rcas) {
 
-        { // easu
+        if (resample) { // EASU only when changing dimensions
             std::array<vk::DescriptorImageInfo, 3> img_info{{
                 {
                     .imageView = input,
@@ -266,8 +297,8 @@ vk::ImageView FsrPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
             },
         };
         cmdbuf.pipelineBarrier2(vk::DependencyInfo{
-            .imageMemoryBarrierCount = img_barrier.size(),
-            .pImageMemoryBarriers = img_barrier.data(),
+            .imageMemoryBarrierCount = resample ? u32(img_barrier.size()) : 1u,
+            .pImageMemoryBarriers = img_barrier.data() + (resample ? 0 : 1),
         });
 
         { // rcas
@@ -277,7 +308,7 @@ vk::ImageView FsrPass::Render(vk::CommandBuffer cmdbuf, vk::ImageView input,
 
             std::array<vk::DescriptorImageInfo, 3> img_info{{
                 {
-                    .imageView = img.intermediary_image_view.get(),
+                    .imageView = resample ? img.intermediary_image_view.get() : input,
                     .imageLayout = vk::ImageLayout::eShaderReadOnlyOptimal,
                 },
                 {

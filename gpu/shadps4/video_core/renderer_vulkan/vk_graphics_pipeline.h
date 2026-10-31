@@ -64,6 +64,21 @@ struct GraphicsPipelineKey {
         std::memset(this, 0, sizeof(*this));
     }
 
+    // The cache hashes, compares and serializes the complete object representation,
+    // including bit-field padding. Member-wise moves inside a hash table may leave
+    // that padding behind, changing the key after insertion/rehashing. Keep every
+    // byte when copying or moving a key, as required by its existing cache format.
+    GraphicsPipelineKey(const GraphicsPipelineKey& other) noexcept {
+        std::memcpy(this, &other, sizeof(*this));
+    }
+
+    GraphicsPipelineKey& operator=(const GraphicsPipelineKey& other) noexcept {
+        if (this != &other) {
+            std::memcpy(this, &other, sizeof(*this));
+        }
+        return *this;
+    }
+
     bool operator==(const GraphicsPipelineKey& key) const noexcept {
         return std::memcmp(this, &key, sizeof(key)) == 0;
     }
@@ -98,7 +113,7 @@ public:
     ~GraphicsPipeline();
 
     // gow3: switch from compiler-owned snapshots to live stage data on publication.
-    void PublishStages(std::span<const Shader::Info*, MaxShaderStages> infos) {
+    void PublishStages(std::span<const Shader::Info* const, MaxShaderStages> infos) {
         std::ranges::copy(infos, stages.begin());
     }
 

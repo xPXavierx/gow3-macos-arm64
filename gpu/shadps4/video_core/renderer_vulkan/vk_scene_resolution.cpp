@@ -4,14 +4,20 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_util.h"
+#include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/texture_cache/texture_cache.h"
 #include "video_core/host_shaders/depth_resample_frag.h"
+#include "video_core/host_shaders/color_resample_frag.h"
 #include "video_core/host_shaders/depth_stencil_resample_frag.h"
 #include "video_core/host_shaders/depth_stencil_bits_frag.h"
 #include "video_core/host_shaders/fs_tri_vert.h"
 #include "gow3_toggles.h"
+#include "gow3_runtime_control.h"
 #include <cstdio>
 #include <cstdlib>
+#ifdef __APPLE__
+#include <vulkan/vulkan_metal.h>
+#endif
 
 namespace Vulkan {
 SceneTargets::SceneTargets(const Instance& i, Scheduler& s, Runtime& r,
@@ -22,6 +28,15 @@ SceneTargets::SceneTargets(const Instance& i, Scheduler& s, Runtime& r,
 SceneTargets::SceneTargets(const Instance& i, Scheduler& s, Runtime& r, Lookup get)
     : instance{i}, scheduler{s}, runtime{r}, lookup{std::move(get)} {
     runtime.scene_targets = this;
+    if (Gow3Runtime::Enabled()) { base={3840,2160}; size=base; }
+    if (const char* logical = std::getenv("GOW3_LOGICAL_RENDER_SIZE")) {
+        u32 w{}, h{};
+        if (std::sscanf(logical, "%ux%u", &w, &h) == 2 && w >= 320 && h >= 180 &&
+            w <= 7680 && h <= 4320) {
+            base = {w,h}; size = base;
+        }
+    }
+    std::printf("Scene logical base: %ux%u\n", base.width, base.height);
     const char* force = std::getenv("GOW3_SCENE_STENCIL_BITS");
     force_stencil_bits = force && force[0] == '1';
     CreateResampleResources();
@@ -57,6 +72,28 @@ bool SceneTargets::Blittable(vk::Format format) const {
 }
 bool SceneTargets::ShaderResampled(const VideoCore::Image& image) const {
     const auto format = image.backing->image.image_ci.format;
+    static const bool discard_resample = [] {
+        const char* value = std::getenv("GOW3_SCENE_DISCARD_RESAMPLE");
+        return value && value[0] == '1';
+    }();
+    if (discard_resample && !Gow3Toggle::Disabled(Gow3Toggle::DiscardSceneResample)) {
+        const auto features = Features(format);
+        if (image.info.props.is_depth) {
+            const auto required = vk::FormatFeatureFlagBits::eSampledImage |
+                                  vk::FormatFeatureFlagBits::eDepthStencilAttachment;
+            if ((features & required) == required &&
+                (!(image.aspect_mask & vk::ImageAspectFlagBits::eStencil) ||
+                 instance.IsShaderStencilExportSupported())) return true;
+        } else {
+            // Integer and uncommon formats retain the existing exact blit path.
+            const bool supported = format == vk::Format::eR8G8B8A8Unorm ||
+                format == vk::Format::eR8G8B8A8Srgb || format == vk::Format::eR16G16Sfloat ||
+                format == vk::Format::eR16G16B16A16Sfloat || format == vk::Format::eR32Sfloat;
+            const auto required = vk::FormatFeatureFlagBits::eSampledImage |
+                                  vk::FormatFeatureFlagBits::eColorAttachment;
+            if (supported && (features & required) == required) return true;
+        }
+    }
     if (!image.info.props.is_depth || (Blittable(format) && !force_stencil_bits)) return false;
     const auto features = Features(format);
     const auto required = vk::FormatFeatureFlagBits::eSampledImage |
@@ -70,9 +107,9 @@ bool SceneTargets::ShaderResampled(const VideoCore::Image& image) const {
 // 1 for the scene size, 2 for half resolution (the game's post-processing chain), else 0.
 // Half resolution needs a scene size that halves exactly: the proxy keeps the scene's factor,
 // so the shaders' FragCoord conversion (1920 / scene width) stays correct for it.
-static u32 SizeDivisor(const VideoCore::ImageInfo& i, SceneResolution::Size scene) {
-    if (i.size.width == 1920 && i.size.height == 1080) return 1;
-    if (i.size.width == 960 && i.size.height == 540 && scene.width % 2 == 0 &&
+static u32 SizeDivisor(const VideoCore::ImageInfo& i, SceneResolution::Size scene, SceneResolution::Size base) {
+    if (i.size.width == base.width && i.size.height == base.height) return 1;
+    if (i.size.width == base.width/2 && i.size.height == base.height/2 && scene.width % 2 == 0 &&
         scene.height % 2 == 0 && !Gow3Toggle::Disabled(Gow3Toggle::SceneHalfRes)) {
         return 2;
     }
@@ -80,7 +117,7 @@ static u32 SizeDivisor(const VideoCore::ImageInfo& i, SceneResolution::Size scen
 }
 bool SceneTargets::Eligible(const VideoCore::Image& image) const {
     const auto& i = image.info;
-    const u32 div = SizeDivisor(i, size);
+    const u32 div = SizeDivisor(i, size, base);
     if (!div || i.size.depth != 1 || i.resources.layers != 1 || i.num_samples != 1 ||
         i.props.is_block || !image.backing || image.backing->num_samples != 1) {
         return false;
@@ -93,16 +130,21 @@ bool SceneTargets::Eligible(const VideoCore::Image& image) const {
     return Blittable(image.backing->image.image_ci.format) || ShaderResampled(image);
 }
 bool SceneTargets::EligibleScene(const VideoCore::Image& image) const {
-    return image.info.size.width == 1920 && image.info.size.height == 1080 && Eligible(image);
+    return image.info.size.width == base.width && image.info.size.height == base.height && Eligible(image);
 }
 SceneResolution::Size SceneTargets::ProxySize(const VideoCore::Image& image, u32 level) const {
-    const u32 div = std::max(1u, SizeDivisor(image.info, size));
+    const u32 div = std::max(1u, SizeDivisor(image.info, size, base));
     return {std::max(1u, size.width / div >> level), std::max(1u, size.height / div >> level)};
 }
 bool SceneTargets::SetSize(SceneResolution::Size next) {
     if (next == size) return false;
     ResolveAll();
     scheduler.Finish();
+    // Native descriptor memos must become eligible again after the proxies are
+    // destroyed. Leaving this flag set made later native draws miss those memos.
+    for (const auto& [key, entry] : entries) {
+        if (auto* image = lookup(entry->source, entry->uid)) image->scene_proxy = false;
+    }
     entries.clear(); // no command buffer can still reference these images/views
     tracked.clear();
     ++generation;
@@ -119,7 +161,49 @@ void SceneTargets::ResolveAll() {
         }
     }
 }
-void SceneTargets::NativeAccess(VideoCore::Image& image, vk::AccessFlags2 access) {
+bool SceneTargets::CopyAlias(VideoCore::Image& src, VideoCore::Image& dst, vk::Extent3D extent) {
+    if (Gow3Toggle::Disabled(Gow3Toggle::SceneAliasProxy) || !ProxyCurrent(src) ||
+        src.info.props.is_depth || dst.info.props.is_depth ||
+        src.info.resources.levels != 1 || dst.info.resources.levels != 1 ||
+        src.info.resources.layers != 1 || dst.info.resources.layers != 1 ||
+        src.info.size.depth != 1 || dst.info.size.depth != 1 ||
+        src.info.type != AmdGpu::ImageType::Color2D || dst.info.type != AmdGpu::ImageType::Color2D ||
+        src.info.num_samples != 1 || dst.info.num_samples != 1 ||
+        src.backing->num_samples != 1 || dst.backing->num_samples != 1 ||
+        src.GetImage() == dst.GetImage() || extent.depth != 1 ||
+        extent.width != dst.info.size.width || extent.height != dst.info.size.height ||
+        extent.width > src.info.size.width || extent.height > src.info.size.height ||
+        src.info.pixel_format != dst.info.pixel_format ||
+        src.backing->image.image_ci.format != src.info.pixel_format ||
+        dst.backing->image.image_ci.format != src.info.pixel_format ||
+        !(dst.backing->image.image_ci.usage & vk::ImageUsageFlagBits::eColorAttachment) ||
+        !ShaderResampled(src)) {
+        return false;
+    }
+    auto& entry = *entries.find(Key(src.image_uid, 0))->second;
+    if (!entry.state.dirty) return false; // the ordinary native copy is already exact and cheaper
+    copying = true;
+    // The entire destination is overwritten. Its old proxy need not be resolved.
+    if (auto it = entries.find(Key(dst.image_uid, 0)); it != entries.end())
+        it->second->state.NativeWrite();
+    runtime.Transit(&dst, vk::ImageLayout::eColorAttachmentOptimal,
+                    vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+                    vk::AccessFlagBits2::eColorAttachmentWrite);
+    runtime.FlushBarriers();
+    Transition(entry, src.aspect_mask, vk::ImageLayout::eShaderReadOnlyOptimal,
+               vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderSampledRead);
+    // A logical-source-sized viewport clips the exact same pixel centers as the
+    // original full resolve followed by a top-left copy. The smaller render area
+    // writes only the requested destination, including non-integer scale ratios.
+    Resample(entry.image, dst.GetImage(), dst, {extent.width, extent.height}, 0, 0,
+             {src.info.size.width, src.info.size.height});
+    copying = false;
+    if (debug) std::printf("Scene alias proxy: %ux%u -> %ux%u (source remains current)\n",
+        src.info.size.width, src.info.size.height, extent.width, extent.height);
+    return true;
+}
+void SceneTargets::NativeAccess(VideoCore::Image& image, vk::AccessFlags2 access,
+                                const char* caller, u32 line) {
     if (copying || !image.scene_proxy) return; // most images never had a proxy
     constexpr auto writes = vk::AccessFlagBits2::eShaderWrite | vk::AccessFlagBits2::eTransferWrite |
         vk::AccessFlagBits2::eColorAttachmentWrite | vk::AccessFlagBits2::eDepthStencilAttachmentWrite |
@@ -129,6 +213,13 @@ void SceneTargets::NativeAccess(VideoCore::Image& image, vk::AccessFlags2 access
         const auto it = entries.find(Key(image.image_uid, level));
         if (it == entries.end()) continue;
         auto& entry = *it->second;
+        if (debug && (entry.state.dirty || (entry.state.valid && (access & writes)))) {
+            std::printf("Scene access: uid %llu address %llx %s %ux%u level %u dirty %d valid %d access %llx at %s:%u\n",
+                (unsigned long long)image.image_uid, (unsigned long long)image.info.guest_address,
+                vk::to_string(image.info.pixel_format).c_str(), image.info.size.width,
+                image.info.size.height, level, int(entry.state.dirty), int(entry.state.valid),
+                (unsigned long long)VkAccessFlags2(access), caller, line);
+        }
         if (entry.state.dirty) Copy(entry, image, true);
         if (access & writes) entry.state.NativeWrite();
     }
@@ -161,24 +252,30 @@ void SceneTargets::Copy(Entry& e, VideoCore::Image& original, bool to_native) {
     const vk::Image src = to_native ? vk::Image(e.image) : original.GetImage();
     const vk::Image dst = to_native ? original.GetImage() : vk::Image(e.image);
     if (ShaderResampled(original)) {
+        const bool depth = original.info.props.is_depth;
         constexpr auto read_layout = vk::ImageLayout::eShaderReadOnlyOptimal;
-        constexpr auto write_layout = vk::ImageLayout::eDepthStencilAttachmentOptimal;
+        const auto write_layout = depth ? vk::ImageLayout::eDepthStencilAttachmentOptimal
+                                        : vk::ImageLayout::eColorAttachmentOptimal;
         constexpr auto read_stage = vk::PipelineStageFlagBits2::eFragmentShader;
-        constexpr auto write_stage = vk::PipelineStageFlagBits2::eEarlyFragmentTests |
-                                     vk::PipelineStageFlagBits2::eLateFragmentTests;
+        const auto write_stage = depth ? vk::PipelineStageFlagBits2::eEarlyFragmentTests |
+                                         vk::PipelineStageFlagBits2::eLateFragmentTests
+                                       : vk::PipelineStageFlags2{vk::PipelineStageFlagBits2::eColorAttachmentOutput};
         constexpr auto read_access = vk::AccessFlagBits2::eShaderSampledRead;
-        constexpr auto write_access = vk::AccessFlagBits2::eDepthStencilAttachmentRead |
-                                      vk::AccessFlagBits2::eDepthStencilAttachmentWrite;
+        const auto write_access = depth ? vk::AccessFlags2{vk::AccessFlagBits2::eDepthStencilAttachmentWrite}
+                                        : vk::AccessFlags2{vk::AccessFlagBits2::eColorAttachmentWrite};
+        const VideoCore::SubresourceRange range{.base = {e.level, 0}, .extent = {1, 1}};
         runtime.Transit(&original, to_native ? write_layout : read_layout,
                         to_native ? write_stage : read_stage,
-                        to_native ? write_access : read_access);
+                        to_native ? write_access : read_access, range);
         runtime.FlushBarriers();
         Transition(e, original.aspect_mask, to_native ? read_layout : write_layout,
                    to_native ? read_stage : write_stage, to_native ? read_access : write_access);
         const auto& proxy = e.image.image_ci.extent;
         Resample(src, dst, original,
-                 to_native ? vk::Extent2D{original.info.size.width, original.info.size.height}
-                           : vk::Extent2D{proxy.width, proxy.height});
+                 to_native ? vk::Extent2D{std::max(1u, original.info.size.width >> e.level),
+                                         std::max(1u, original.info.size.height >> e.level)}
+                           : vk::Extent2D{proxy.width, proxy.height},
+                 to_native ? 0u : e.level, to_native ? e.level : 0u);
         // (Depth proxies are single-level: Eligible.)
         if (to_native) e.state.Resolved(); else e.state.CopiedToProxy();
         copying = false;
@@ -219,37 +316,41 @@ void SceneTargets::Copy(Entry& e, VideoCore::Image& original, bool to_native) {
     copying = false;
 }
 void SceneTargets::Resample(vk::Image src, vk::Image dst, const VideoCore::Image& original,
-                            vk::Extent2D dst_size) {
+                            vk::Extent2D dst_size, u32 src_level, u32 dst_level,
+                            vk::Extent2D viewport_size) {
+    if (!viewport_size.width) viewport_size = dst_size;
     const auto device = instance.GetDevice();
     const auto format = original.backing->image.image_ci.format;
+    const bool color = !original.info.props.is_depth;
     const bool stencil = bool(original.aspect_mask & vk::ImageAspectFlagBits::eStencil);
     const bool stencil_bits = stencil && !depth_stencil_frag;
     const auto make_view = [&](vk::Image image, vk::ImageAspectFlags aspect,
-                               vk::ImageUsageFlags usage) {
+                               vk::ImageUsageFlags usage, u32 level) {
         const vk::ImageViewUsageCreateInfo usage_ci{.usage = usage};
         return Check(device.createImageView({
             .pNext = &usage_ci, .image = image, .viewType = vk::ImageViewType::e2D,
-            .format = format, .subresourceRange = {aspect, 0, 1, 0, 1},
+            .format = format, .subresourceRange = {aspect, level, 1, 0, 1},
         }));
     };
-    const auto depth_view = make_view(src, vk::ImageAspectFlagBits::eDepth,
-                                      vk::ImageUsageFlagBits::eSampled);
+    const auto depth_view = make_view(src, color ? vk::ImageAspectFlagBits::eColor : vk::ImageAspectFlagBits::eDepth,
+                                      vk::ImageUsageFlagBits::eSampled, src_level);
     const auto stencil_view = stencil ? make_view(src, vk::ImageAspectFlagBits::eStencil,
-                                                  vk::ImageUsageFlagBits::eSampled)
+                                                  vk::ImageUsageFlagBits::eSampled, src_level)
                                       : vk::ImageView{};
     const auto target_view = make_view(dst, original.aspect_mask,
-                                       vk::ImageUsageFlagBits::eDepthStencilAttachment);
+                                       color ? vk::ImageUsageFlagBits::eColorAttachment : vk::ImageUsageFlagBits::eDepthStencilAttachment,
+                                       dst_level);
     scheduler.DeferOperation([device, depth_view, stencil_view, target_view] {
         device.destroyImageView(depth_view);
         if (stencil_view) device.destroyImageView(stencil_view);
         device.destroyImageView(target_view);
     });
-    const auto pipeline = ResamplePipeline(format, stencil);
+    const auto pipeline = ResamplePipeline(format, stencil, color);
     const auto layout = *resample_layout;
     scheduler.Record([=](vk::CommandBuffer cmd) {
         const vk::RenderingAttachmentInfo attachment{
             .imageView = target_view,
-            .imageLayout = vk::ImageLayout::eDepthStencilAttachmentOptimal,
+            .imageLayout = color ? vk::ImageLayout::eColorAttachmentOptimal : vk::ImageLayout::eDepthStencilAttachmentOptimal,
             .loadOp = vk::AttachmentLoadOp::eDontCare,
             .storeOp = vk::AttachmentStoreOp::eStore,
         };
@@ -260,7 +361,9 @@ void SceneTargets::Resample(vk::Image src, vk::Image dst, const VideoCore::Image
         }
         cmd.beginRendering({
             .renderArea = {{0, 0}, dst_size}, .layerCount = 1,
-            .pDepthAttachment = &attachment,
+            .colorAttachmentCount = color ? 1u : 0u,
+            .pColorAttachments = color ? &attachment : nullptr,
+            .pDepthAttachment = color ? nullptr : &attachment,
             .pStencilAttachment = stencil ? &stencil_attachment : nullptr,
         });
         const std::array infos{
@@ -279,8 +382,8 @@ void SceneTargets::Resample(vk::Image src, vk::Image dst, const VideoCore::Image
                                  vk::ArrayProxy<const vk::WriteDescriptorSet>(
                                      stencil ? 2u : 1u, writes.data()));
         cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline);
-        cmd.setViewportWithCount(vk::Viewport{0.f, 0.f, float(dst_size.width),
-                                              float(dst_size.height), 0.f, 1.f});
+        cmd.setViewportWithCount(vk::Viewport{0.f, 0.f, float(viewport_size.width),
+                                              float(viewport_size.height), 0.f, 1.f});
         cmd.setScissorWithCount(vk::Rect2D{{0, 0}, dst_size});
         if (stencil_bits) {
             // Copy depth first, then reconstruct all eight stencil bits without needing
@@ -303,6 +406,7 @@ void SceneTargets::CreateResampleResources() {
     const auto device = instance.GetDevice();
     fs_tri_vert = vk::UniqueShaderModule(CompileSPV(FS_TRI_VERT, device), device);
     depth_frag = vk::UniqueShaderModule(CompileSPV(DEPTH_RESAMPLE_FRAG, device), device);
+    color_frag = vk::UniqueShaderModule(CompileSPV(COLOR_RESAMPLE_FRAG, device), device);
     if (instance.IsShaderStencilExportSupported() && !force_stencil_bits) {
         depth_stencil_frag =
             vk::UniqueShaderModule(CompileSPV(DEPTH_STENCIL_RESAMPLE_FRAG, device), device);
@@ -328,7 +432,7 @@ void SceneTargets::CreateResampleResources() {
         .pushConstantRangeCount = 1, .pPushConstantRanges = &push,
     }));
 }
-vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil) {
+vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil, bool color) {
     const bool stencil_bits = stencil && !depth_stencil_frag;
     const std::pair key{format, stencil};
     for (const auto& [k, pipeline] : resample_pipelines) if (k == key) return *pipeline;
@@ -345,7 +449,7 @@ vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil) {
         .compareMask = 0xff, .writeMask = 0xff, .reference = 0,
     };
     const vk::PipelineDepthStencilStateCreateInfo depth_state{
-        .depthTestEnable = true, .depthWriteEnable = true,
+        .depthTestEnable = !color, .depthWriteEnable = !color,
         .depthCompareOp = vk::CompareOp::eAlways,
         .stencilTestEnable = stencil, .front = stencil_op, .back = stencil_op,
     };
@@ -360,15 +464,24 @@ vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil) {
         vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eVertex,
                                           .module = *fs_tri_vert, .pName = "main"},
         vk::PipelineShaderStageCreateInfo{.stage = vk::ShaderStageFlagBits::eFragment,
-                                          .module = stencil ? (stencil_bits ? *stencil_bits_frag :
+                                          .module = color ? *color_frag : stencil ? (stencil_bits ? *stencil_bits_frag :
                                                              *depth_stencil_frag) : *depth_frag,
                                           .pName = "main"},
     };
     const vk::PipelineRenderingCreateInfo rendering{
-        .depthAttachmentFormat = format,
+        .colorAttachmentCount = color ? 1u : 0u,
+        .pColorAttachmentFormats = color ? &format : nullptr,
+        .depthAttachmentFormat = color ? vk::Format::eUndefined : format,
         .stencilAttachmentFormat = stencil ? format : vk::Format::eUndefined,
     };
-    const vk::PipelineColorBlendStateCreateInfo color_blending{};
+    const vk::PipelineColorBlendAttachmentState color_output{
+        .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+                          vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA,
+    };
+    const vk::PipelineColorBlendStateCreateInfo color_blending{
+        .attachmentCount = color ? 1u : 0u,
+        .pAttachments = color ? &color_output : nullptr,
+    };
     const vk::PipelineViewportStateCreateInfo viewport_info{};
     const vk::PipelineVertexInputStateCreateInfo vertex_input{};
     const vk::PipelineRasterizationStateCreateInfo raster{.lineWidth = 1.f};
@@ -381,6 +494,7 @@ vk::Pipeline SceneTargets::ResamplePipeline(vk::Format format, bool stencil) {
         .layout = *resample_layout,
     }));
     const auto result = *pipeline;
+    SetObjectName(instance.GetDevice(), result, "Scene resample discard {}", vk::to_string(format));
     resample_pipelines.emplace_back(key, std::move(pipeline));
     return result;
 }
@@ -421,7 +535,16 @@ vk::ImageView SceneTargets::View(Entry& e, const VideoCore::Image& original,
         ? (info.is_storage ? original.aspect_mask : vk::ImageAspectFlags(vk::ImageAspectFlagBits::eDepth))
         : vk::ImageAspectFlags(vk::ImageAspectFlagBits::eColor);
     const auto format = original.info.props.is_depth ? original.backing->image.image_ci.format : info.format;
+    const void* next = nullptr;
+#ifdef __APPLE__
+    VkExportMetalObjectCreateInfoEXT metal_export{VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECT_CREATE_INFO_EXT};
+    if (std::getenv("GOW3_METALFX_MODE")) {
+        metal_export.exportObjectType = VK_EXPORT_METAL_OBJECT_TYPE_METAL_TEXTURE_BIT_EXT;
+        next = &metal_export;
+    }
+#endif
     auto view = Check(instance.GetDevice().createImageViewUnique({
+        .pNext = next,
         .image = e.image, .viewType = vk::ImageViewType::e2D, .format = format,
         .components = info.mapping, .subresourceRange = {aspect,0,1,0,1},
     }));
@@ -450,15 +573,15 @@ SceneTargets::Target SceneTargets::Attachment(VideoCore::ImageId id,
     return {e.image, View(e, original, attachment_info), e.layout, e.image.image_ci.usage};
 }
 bool SceneTargets::ProxyCurrent(const VideoCore::Image& image, u32 level, u32 levels) const {
-    if (copying || !image.scene_proxy || image.info.props.is_depth || levels != 1) {
+    if (copying || !image.scene_proxy || levels != 1) {
         return false;
     }
     const auto it = entries.find(Key(image.image_uid, level));
     return it != entries.end() && it->second->state.valid;
 }
-vk::ImageLayout SceneTargets::PrepareSample(const VideoCore::Image& image, u32 level) {
+vk::ImageLayout SceneTargets::PrepareSample(const VideoCore::Image& image, u32 level,
+                                           vk::ImageLayout layout) {
     auto& e = *entries.find(Key(image.image_uid, level))->second;
-    constexpr auto layout = vk::ImageLayout::eShaderReadOnlyOptimal;
     if (e.layout != layout) {
         Transition(e, image.aspect_mask, layout,
                    vk::PipelineStageFlagBits2::eVertexShader |
@@ -477,6 +600,34 @@ std::optional<SceneTargets::Target> SceneTargets::SampleProxy(
     auto& e = *entries.find(Key(image.image_uid, level))->second;
     const auto layout = PrepareSample(image, level);
     return Target{e.image, View(e, image, info), layout, e.image.image_ci.usage};
+}
+std::optional<SceneTargets::Target> SceneTargets::SnapshotProxy(
+    const VideoCore::Image& image, const VideoCore::ImageViewInfo& info) {
+    if (image.info.props.is_depth || !ProxyCurrent(image, info.range.base.level,
+                                                  info.range.extent.levels)) return std::nullopt;
+    auto& source = *entries.find(Key(image.image_uid, info.range.base.level))->second;
+    if (!source.feedback) {
+        source.feedback = std::make_unique<Entry>();
+        source.feedback->image = VideoCore::UniqueImage(instance.GetDevice(), instance.GetAllocator());
+        auto ci = source.image.image_ci;
+        ci.pNext = nullptr;
+        source.feedback->image.Create(ci);
+    }
+    auto& snapshot = *source.feedback;
+    Transition(source, image.aspect_mask, vk::ImageLayout::eTransferSrcOptimal,
+               vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferRead);
+    Transition(snapshot, image.aspect_mask, vk::ImageLayout::eTransferDstOptimal,
+               vk::PipelineStageFlagBits2::eTransfer, vk::AccessFlagBits2::eTransferWrite);
+    const vk::ImageCopy region{.srcSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},
+        .dstSubresource={vk::ImageAspectFlagBits::eColor,0,0,1}, .extent=source.image.image_ci.extent};
+    scheduler.Record([src=vk::Image(source.image), dst=vk::Image(snapshot.image), region](vk::CommandBuffer cmd) {
+        cmd.copyImage(src,vk::ImageLayout::eTransferSrcOptimal,dst,vk::ImageLayout::eTransferDstOptimal,region);
+    });
+    Transition(snapshot, image.aspect_mask, vk::ImageLayout::eShaderReadOnlyOptimal,
+               vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderSampledRead);
+    if (debug) std::printf("Scene feedback snapshot: %ux%u at %ux%u\n",
+        image.info.size.width,image.info.size.height,region.extent.width,region.extent.height);
+    return Target{snapshot.image,View(snapshot,image,info),snapshot.layout,snapshot.image.image_ci.usage};
 }
 SceneTargets::Target SceneTargets::Read(VideoCore::ImageId id,
                                        const VideoCore::ImageViewInfo& info,

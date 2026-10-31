@@ -40,8 +40,8 @@ Las contribuciones se validan y revisan antes de entrar en el catálogo oficial 
 No se comparten dumps, partidas, registros ni la caché compilada de GPU de otro jugador.
 La cobertura crece por toda la campaña; todavía no garantiza ausencia de stutter.
 
-**Disponibilidad:** el panel actualizado está en la build local 0.4.20; esta actualización
-de la app todavía no se ha publicado en GitHub. El servicio del catálogo ya está disponible.
+**Disponible en la release 0.4.20.** Descarga la aplicación actualizada en Releases.
+El servicio del catálogo oficial ya está disponible.
 La [guía para jugadores](docs/community-shaders.es.md) explica todos los pasos y
 la diferencia entre actualizar, compilar y borrar la caché.
 
@@ -52,18 +52,26 @@ la diferencia entre actualizar, compilar y borrar la caché.
 - Launcher en inglés, portugués brasileño y español. Inglés en el primer inicio;
   conserva el dump seleccionado, idioma y preferencias.
 - Salida 720p, 1080p, 1440p y 4K. Renderizado nativo o MetalFX espacial en Calidad,
-  Equilibrado y Rendimiento. El HUD indica resolución de render y MetalFX.
+  Equilibrado y Rendimiento. Al activarlo, el HUD indica resolución de render y MetalFX.
+  Desmarcar la opción del launcher oculta ambos HUD de diagnóstico.
+- Los pipelines gráficos conocidos se preparan antes de jugar. Se espera a los
+  shaders nuevos sin omitir dibujos; el primer uso aún puede provocar pausas.
+- Botón para borrar la caché de shaders, conservando partidas, ajustes y la
+  preparación ARM64. La limpieza se bloquea durante una sesión del juego.
 - Límite de 60 FPS o Ilimitado, V-Sync, pantalla completa Retina y elegibilidad
-  para Game Mode. Con límite de 60 FPS y sin frame gen, selecciona temporalmente
+  para Game Mode. Con límite de 60 FPS, selecciona temporalmente
   60 Hz y restaura la configuración anterior al salir. Mantiene resolución y
-  escala Retina. Ilimitado y frame gen no solicitan 60 Hz.
+  escala Retina. Ilimitado no solicita 60 Hz.
 - Entrada SDL3, audio/vídeo FFmpeg y ATRAC9, copia de seguridad de partidas y las
   reglas originales de lectura de texturas. Gráficos Vulkan/shadPS4 y MoltenVK.
 
+La preparación ARM64 de la CPU y la de gráficos son etapas diferentes. El backend
+gráfico convierte shaders de PS4 a SPIR-V y MoltenVK/Metal durante la ejecución.
+Los pipelines conocidos se preparan antes de jugar; todavía no existe un catálogo
+Metal completo preparado offline, y las variantes nuevas pueden causar pausas.
+
 Pruebas limitadas de combate alcanzaron aproximadamente 60 FPS en 4K nativo en
-M3 Max; no es una garantía para toda la campaña. MetalFX frame gen sigue siendo
-experimental y está desactivado en el launcher público. Se miden por separado los
-FPS reales y presentados. El experimento de texturas de mayor resolución terminó;
+M3 Max; no es una garantía para toda la campaña. Frame gen está excluido de la build y del launcher. El escalado MetalFX sigue disponible. El experimento de texturas de mayor resolución terminó;
 no se distribuye un paquete. UltraWide y los tutoriales, launchers y paquetes de
 Windows/Linux no forman parte de este port.
 

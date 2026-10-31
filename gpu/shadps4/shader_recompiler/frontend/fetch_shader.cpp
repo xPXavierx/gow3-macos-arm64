@@ -45,6 +45,22 @@ void FetchShaderSnapshot::Capture(const Info& source) {
     }
 }
 
+void FetchShaderSnapshot::CapturePipeline(const Info& source, Info& owned,
+                                          std::vector<u32>& user_data) {
+    ASSERT(&source != &owned);
+    // The recording thread can be rendering an earlier draw than the GPU
+    // command thread. Copy its effective snapshot, not the advancing members.
+    const auto ud = source.UserData();
+    const auto flat = source.FlatUserData();
+    owned = source;
+    user_data.assign(ud.begin(), ud.end());
+    owned.user_data = user_data;
+    owned.flattened_ud_buf.assign(flat.begin(), flat.end());
+    owned.pgm_base = source.ProgramBase();
+    owned.compilation_flat_snapshot.reset();
+    Capture(owned);
+}
+
 ScopedFetchShaderSnapshot::ScopedFetchShaderSnapshot(const FetchShaderSnapshot& snapshot)
     : previous{compiler_snapshot} {
     compiler_snapshot = &snapshot;

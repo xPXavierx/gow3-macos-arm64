@@ -3,13 +3,16 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
+#import <QuartzCore/QuartzCore.h>
 #include <atomic>
+#include <array>
+#include <vector>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <vulkan/vulkan_metal.h>
 
-#if __has_include(<MetalFX/MTLFXFrameInterpolator.h>)
+#if __has_include(<MetalFX/MTL4FXFrameInterpolator.h>)
 #define GOW3_FRAME_INTERPOLATION_API 1
 #else
 #define GOW3_FRAME_INTERPOLATION_API 0
@@ -22,10 +25,25 @@ struct FrameInterpolator::Impl {
     PFN_vkDestroySemaphore destroy{};
     PFN_vkExportMetalObjectsEXT export_objects{};
     id<MTLDevice> metal;
-    id<MTLCommandQueue> queue;
+#if GOW3_FRAME_INTERPOLATION_API
+    id<MTL4CommandQueue> queue API_AVAILABLE(macos(26.0));
+    id<MTL4Compiler> compiler API_AVAILABLE(macos(26.0));
+    struct Slot {
+        id<MTL4CommandAllocator> allocator API_AVAILABLE(macos(26.0));
+        id<MTL4CommandBuffer> commands API_AVAILABLE(macos(26.0));
+        id<MTLResidencySet> residency API_AVAILABLE(macos(15.0));
+        uint64_t submitted{};
+    };
+    std::array<Slot, 3> slots;
+    struct Cached {
+        std::array<unsigned long, 9> key;
+        id<MTL4FXFrameInterpolator> effect API_AVAILABLE(macos(26.0));
+    };
+    std::vector<Cached> cache;
+#endif
     id<MTLSharedEvent> ready, done;
 #if GOW3_FRAME_INTERPOLATION_API
-    id<MTLFXFrameInterpolator> effect API_AVAILABLE(macos(26.0));
+    id<MTL4FXFrameInterpolator> effect API_AVAILABLE(macos(26.0));
 #endif
     VkSemaphore ready_vk{}, done_vk{};
     unsigned width{}, height{}, output_width{}, output_height{};
@@ -89,13 +107,21 @@ FrameInterpolator::FrameInterpolator(VkInstance instance, VkDevice device,
             // Dynamic class lookup avoids a strong reference when linking older SDK
             // stubs.
             Class cls = NSClassFromString(@"MTLFXFrameInterpolatorDescriptor");
-            if (!cls || !p.metal || ![cls supportsDevice:p.metal])
+            if (!cls || !p.metal || ![cls supportsMetal4FX:p.metal])
                 return;
-            p.queue = [p.metal newCommandQueue];
-            p.queue.label = @"God of War MetalFX interpolation";
+            NSError* error = nil;
+            auto qd = [MTL4CommandQueueDescriptor new]; qd.label = @"God of War Metal 4 interpolation";
+            p.queue = [p.metal newMTL4CommandQueueWithDescriptor:qd error:&error];
+            p.compiler = [p.metal newCompilerWithDescriptor:[MTL4CompilerDescriptor new] error:&error];
+            for (auto& slot : p.slots) {
+                slot.allocator = [p.metal newCommandAllocator];
+                slot.commands = [p.metal newCommandBuffer];
+                slot.residency = [p.metal newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:&error];
+                if (!slot.allocator || !slot.commands || !slot.residency) return;
+            }
             p.ready = [p.metal newSharedEvent];
             p.done = [p.metal newSharedEvent];
-            if (!p.queue || !p.ready || !p.done || !p.Import(p.ready, p.ready_vk) ||
+            if (!p.queue || !p.compiler || !p.ready || !p.done || !p.Import(p.ready, p.ready_vk) ||
                 !p.Import(p.done, p.done_vk))
                 return;
             p.problem = nullptr;
@@ -109,6 +135,12 @@ FrameInterpolator::FrameInterpolator(VkInstance instance, VkDevice device,
     }
 }
 FrameInterpolator::~FrameInterpolator() {
+#if GOW3_FRAME_INTERPOLATION_API
+    if (@available(macOS 26.0, *)) {
+        for (const auto& slot : impl->slots)
+            if (slot.submitted) [impl->done waitUntilSignaledValue:slot.submitted timeoutMS:10000];
+    }
+#endif
     if (impl->destroy) {
         if (impl->ready_vk)
             impl->destroy(impl->device, impl->ready_vk, nullptr);
@@ -159,7 +191,16 @@ bool FrameInterpolator::Configure(unsigned w, unsigned h, unsigned ow, unsigned 
             desc.motionTextureFormat = m.pixelFormat;
             desc.outputTextureFormat = o.pixelFormat;
             desc.uiTextureFormat = uf;
-            p.effect = [desc newFrameInterpolatorWithDevice:p.metal];
+            const std::array<unsigned long,9> key{w,h,ow,oh,c.pixelFormat,d.pixelFormat,m.pixelFormat,o.pixelFormat,uf};
+            p.effect = nil;
+            for (const auto& entry : p.cache) if (entry.key == key) { p.effect = entry.effect; break; }
+            if (!p.effect) {
+                p.effect = [desc newFrameInterpolatorWithDevice:p.metal compiler:p.compiler];
+                if (p.effect) {
+                    if (p.cache.size() == 4) p.cache.erase(p.cache.begin());
+                    p.cache.push_back({key,p.effect});
+                }
+            }
             if (!p.effect)
                 return false;
             p.width = w;
@@ -174,7 +215,7 @@ bool FrameInterpolator::Configure(unsigned w, unsigned h, unsigned ow, unsigned 
             p.configured = true;
             p.force_reset = true;
             p.history_frames = 0;
-            std::printf("MetalFX frame interpolation: configured depth/motion=%ux%u "
+            std::printf("MetalFX frame interpolation: Metal 4 configured depth/motion=%ux%u "
                         "color/output=%ux%u UI=%d\n",
                         w, h, ow, oh, bool(u));
             return true;
@@ -238,40 +279,44 @@ bool FrameInterpolator::Encode(const Inputs& in, VkImage output, const Parameter
             p.effect.jitterOffsetX = 0;
             p.effect.jitterOffsetY = 0;
             p.effect.shouldResetHistory = reset;
-            auto cb = [p.queue commandBuffer];
-            if (!cb)
+            auto& slot = p.slots[value % p.slots.size()];
+            if (slot.submitted && ![p.done waitUntilSignaledValue:slot.submitted timeoutMS:10000])
                 return false;
-            static const bool profile = [] {
-                const char* v = std::getenv("GOW3_FRAMEGEN_TIMING");
-                return v && v[0] == '1';
-            }();
-            if (profile) {
-                // Profiling only: exclude upstream Vulkan work from the interpolation
-                // duration.
-                auto wait = [p.queue commandBuffer];
-                [wait encodeWaitForEvent:p.ready value:value];
-                [wait commit];
-            }
-            cb.label = @"MetalFX generated intermediate frame";
-            if (!profile)
-                [cb encodeWaitForEvent:p.ready value:value];
+            // Allocators and residency are reused only after their exact submission completes.
+            [slot.allocator reset];
+            [slot.residency removeAllAllocations];
+            NSArray* resources = @[p.effect,c,reset ? c : prev,d,m,o];
+            for (id resource in resources) if ([resource conformsToProtocol:@protocol(MTLAllocation)])
+                [slot.residency addAllocation:resource];
+            if (u) [slot.residency addAllocation:u];
+            [slot.residency commit];
+            auto cb = slot.commands;
+            [cb beginCommandBufferWithAllocator:slot.allocator];
+            [cb useResidencySet:slot.residency];
+            [p.queue waitForEvent:p.ready value:value];
             [p.effect encodeToCommandBuffer:cb];
-            [cb encodeSignalEvent:p.done value:value];
+            [cb endCommandBuffer];
+            auto options = [MTL4CommitOptions new];
             auto state = impl;
-            [cb addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-              if (profile && value % 60 == 0 && completed.status == MTLCommandBufferStatusCompleted)
-                  std::printf("Framegen GPU work: %.3f ms (isolated profiling; "
-                              "excludes upstream wait)\n",
-                              (completed.GPUEndTime - completed.GPUStartTime) * 1000);
-              if (completed.status == MTLCommandBufferStatusError) {
-                  state->error = true;
-                  std::fprintf(stderr, "MetalFX frame interpolation: GPU error: %s\n",
-                               completed.error.description.UTF8String);
-                  if (state->done.signaledValue < value)
-                      state->done.signaledValue = value;
-              }
+            id<MTLTexture> held_ui = u;
+            [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+                (void)resources; (void)held_ui; // retain this frame's exact bindings until completion
+                static const bool profile = [] { const char* v=std::getenv("GOW3_FRAMEGEN_TIMING"); return v && v[0]=='1'; }();
+                if (profile && value % 60 == 0)
+                    std::printf("Framegen GPU work: %.3f ms (Metal 4; excludes upstream queue wait)\n",
+                        (feedback.GPUEndTime-feedback.GPUStartTime)*1000);
+                if (feedback.error) {
+                    state->error = true;
+                    std::fprintf(stderr,"MetalFX Metal 4 GPU error: %s\n",feedback.error.description.UTF8String);
+                    if (state->done.signaledValue < value) state->done.signaledValue = value;
+                }
             }];
-            [cb commit];
+            [p.queue commit:&cb count:1 options:options];
+            [p.queue signalEvent:p.done value:value];
+            slot.submitted = value;
+            // The bounded configuration cache must not retain textures from old frame pools.
+            p.effect.colorTexture=nil; p.effect.prevColorTexture=nil; p.effect.depthTexture=nil;
+            p.effect.motionTexture=nil; p.effect.uiTexture=nil; p.effect.outputTexture=nil;
             p.force_reset = false;
             p.history_frames = reset ? 1 : p.history_frames + 1;
             return true;
@@ -281,3 +326,4 @@ bool FrameInterpolator::Encode(const Inputs& in, VkImage output, const Parameter
     }
 }
 } // namespace Vulkan
+

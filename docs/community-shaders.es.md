@@ -2,10 +2,9 @@
 
 [English](community-shaders.md) · [Português brasileiro](community-shaders.pt-BR.md)
 
-**Disponibilidad:** estas instrucciones describen el launcher actualizado, validado
-localmente como 0.4.20. Esta actualización de la aplicación todavía no se ha publicado
-en GitHub. Las descargas antiguas pueden no tener el botón **Shaders comunitarios**.
-El catálogo oficial y el validador de contribuciones de GitHub ya están disponibles.
+**Disponible en la [release 0.4.20](https://github.com/xPXavierx/gow3-macos-arm64/releases/tag/v0.4.20).**
+Las descargas antiguas pueden no tener el botón **Shaders comunitarios**. El catálogo
+oficial y el validador de contribuciones de GitHub están disponibles.
 
 **Jugar → descubrir combinaciones → contribuir → revisar → todos reciben la actualización.**
 

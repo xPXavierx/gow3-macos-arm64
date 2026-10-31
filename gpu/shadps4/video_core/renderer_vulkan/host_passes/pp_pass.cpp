@@ -15,6 +15,9 @@
 
 namespace Vulkan::HostPasses {
 
+// Destroy Vulkan handle wrappers with the library's own dispatch configuration.
+PostProcessingPass::~PostProcessingPass() = default;
+
 void PostProcessingPass::Create(vk::Device device, const vk::Format surface_format) {
     boost::container::static_vector<vk::DescriptorSetLayoutBinding, 2> bindings{
         {

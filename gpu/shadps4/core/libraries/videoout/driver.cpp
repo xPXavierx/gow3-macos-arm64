@@ -17,6 +17,7 @@
 #include "common/assert.h"
 #include "gow3_toggles.h"
 #include "gow3_settings.h"
+#include "gow3_runtime_control.h"
 #include "gow3_graphics.h"
 #include "video_core/renderer_vulkan/vk_frame_capture.h"
 #include "common/debug.h"
@@ -322,6 +323,18 @@ void VideoOutDriver::Flip(const Request& req) {
         static std::vector<double> intervals;
         intervals.push_back(frame_ms);
         last = now;
+        // A compositor can keep presenting an old image while compilation stalls
+        // the game. Trace actual guest flips separately from Metal presentations.
+        static FILE* frame_trace = []() -> FILE* {
+            const char* path = std::getenv("GOW3_FRAME_TRACE");
+            FILE* file = path && *path ? std::fopen(path, "w") : nullptr;
+            if (file) std::setvbuf(file, nullptr, _IOLBF, 0);
+            return file;
+        }();
+        if (frame_trace) {
+            std::fprintf(frame_trace, "%.9f\n",
+                std::chrono::duration<double>(now.time_since_epoch()).count());
+        }
         // Stall diagnostics: what happened during a long frame.
         static u64 last_gpu_ns, last_images, last_image_bytes, last_buffer_bytes;
         static u64 last_t[6], last_minflt, last_sigf, last_pc, last_pp, last_rc, last_rp;
@@ -665,6 +678,7 @@ void VideoOutDriver::PresentThread(std::stop_token token) {
     // and the uncapped presets keep their fixed limit.
     const bool fixed_limit = std::getenv("GOW3_FPS_LIMIT") || EmulatorSettings.GetVblankFrequency() == 480;
     const auto current_limit = [&] {
+        if (Gow3Runtime::Enabled()) return Gow3Runtime::RealLimit(Gow3Runtime::Applied(),Gow3Runtime::refresh_hz);
         const auto& s = Gow3Settings::Get();
         return fixed_limit ? EmulatorSettings.GetFrameLimit()
                            : u32(Gow3Graphics::PresentLimit(s.fps_limit, s.applied_engine_fps));

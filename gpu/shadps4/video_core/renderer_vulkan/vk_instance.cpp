@@ -343,7 +343,7 @@ bool Instance::CreateDevice() {
 #ifdef __APPLE__
     const auto enabled=[](const char* name){const char* v=std::getenv(name);return v && v[0]=='1';};
     if (std::getenv("GOW3_METALFX_MODE") || enabled("GOW3_FRAMEGEN")) add_extension("VK_EXT_metal_objects");
-    if(enabled("GOW3_FRAMEGEN") || enabled("GOW3_PRESENT_TIMING"))display_timing=add_extension("VK_GOOGLE_display_timing");
+    if(enabled("GOW3_FRAMEGEN") || enabled("GOW3_RUNTIME_CONTROLS") || enabled("GOW3_PRESENT_TIMING"))display_timing=add_extension("VK_GOOGLE_display_timing");
 #endif
 
     // Optional
@@ -514,15 +514,33 @@ bool Instance::CreateDevice() {
         .queueCount = static_cast<u32>(queue_priorities.size()),
         .pQueuePriorities = queue_priorities.data(),
     };
-    std::array queue_infos = {queue_info, queue_info};
-    queue_infos[1].queueFamilyIndex = sparse_queue_family_index;
+    std::vector queue_infos = {queue_info};
+    if(sparse_queue_family_index!=queue_family_index) {
+        auto sparse=queue_info;sparse.queueFamilyIndex=sparse_queue_family_index;queue_infos.push_back(sparse);
+    }
+    present_queue_family_index=queue_family_index;
+#ifdef __APPLE__
+    // MoltenVK exposes independent Metal queues as separate families, not
+    // multiple queues in one family. Keep interpolation/presentation waits off
+    // the game's graphics queue. Shared frame images use concurrent sharing.
+    if(const auto* mode=std::getenv("GOW3_ASYNC_INTERPOLATION");mode && mode[0]=='1') {
+        for(u32 i=0;i<family_properties.size();++i) {
+            if(i==queue_family_index || !family_properties[i].queueCount ||
+               !(family_properties[i].queueFlags & vk::QueueFlagBits::eGraphics))continue;
+            present_queue_family_index=i;
+            if(i!=sparse_queue_family_index){auto info=queue_info;info.queueFamilyIndex=i;queue_infos.push_back(info);}
+            break;
+        }
+        std::printf("Framegen queues: graphics family=%u presentation family=%u independent=%d\n",queue_family_index,present_queue_family_index,present_queue_family_index!=queue_family_index);
+    }
+#endif
 
     const auto vk11_features = feature_chain.get<vk::PhysicalDeviceVulkan11Features>();
     vk12_features = feature_chain.get<vk::PhysicalDeviceVulkan12Features>();
     vk13_features = feature_chain.get<vk::PhysicalDeviceVulkan13Features>();
     vk::StructureChain device_chain = {
         vk::DeviceCreateInfo{
-            .queueCreateInfoCount = queue_family_index == sparse_queue_family_index ? 1u : 2u,
+            .queueCreateInfoCount = static_cast<u32>(queue_infos.size()),
             .pQueueCreateInfos = queue_infos.data(),
             .enabledExtensionCount = static_cast<u32>(enabled_extensions.size()),
             .ppEnabledExtensionNames = enabled_extensions.data(),
@@ -760,7 +778,7 @@ bool Instance::CreateDevice() {
 
     graphics_queue = device->getQueue(queue_family_index, 0);
     sparse_queue = device->getQueue(sparse_queue_family_index, 0);
-    present_queue = device->getQueue(queue_family_index, 0);
+    present_queue = device->getQueue(present_queue_family_index, 0);
 
     if (calibrated_timestamps) {
         const auto [time_domains_result, time_domains] =

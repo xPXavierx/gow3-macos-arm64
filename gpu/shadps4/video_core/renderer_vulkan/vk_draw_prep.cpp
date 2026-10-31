@@ -200,6 +200,12 @@ DrawPreparation::DrawPreparation(PipelineCache& pipeline_cache_)
     : pipeline_cache{pipeline_cache_} {
     worker_count = DefaultWorkerCount();
     if (worker_count) {
+        pipeline_cache.SetPreparationWake([this] {
+            // Synchronize with the claim predicate to avoid losing a shader
+            // publication between its generation check and sleeping.
+            std::scoped_lock lock{mutex};
+            cv.notify_all();
+        });
         scanner = std::jthread([this](std::stop_token stop) { ScannerLoop(stop); });
     }
     for (u32 i = 0; i < worker_count; ++i) {
@@ -210,6 +216,7 @@ DrawPreparation::DrawPreparation(PipelineCache& pipeline_cache_)
 }
 
 DrawPreparation::~DrawPreparation() {
+    pipeline_cache.SetPreparationWake({});
     for (auto& worker : workers) {
         worker.request_stop();
     }
@@ -394,10 +401,13 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
     // The nearest scanned buffer the GPU thread has not reached and no worker has claimed.
     const auto claimable = [&]() -> std::shared_ptr<Submission> {
         const u64 gpu = gpu_seq.load(std::memory_order_acquire);
+        const u64 generation = pipeline_cache.PreparationGeneration();
         for (const auto& submission : submissions) {
             if (submission->seq >= gpu && submission->seq >= tail_seq &&
                 submission->scanned.load(std::memory_order_acquire) &&
-                !submission->claimed.load(std::memory_order_relaxed)) {
+                !submission->claimed.load(std::memory_order_relaxed) &&
+                !submission->preparation_finished &&
+                submission->preparation_generation != generation) {
                 return submission;
             }
         }
@@ -413,10 +423,12 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                 target = baseline_ready ? claimable() : nullptr;
                 return target != nullptr;
             });
-            if (stop.stop_requested() || !target) {
+            if (stop.stop_requested()) {
                 return;
             }
+            if (!target) continue;
             target->claimed.store(true, std::memory_order_relaxed);
+            target->preparation_generation = pipeline_cache.PreparationGeneration();
             // Buffers between this worker's state and the target: their deltas. A position
             // already collected (or past the target) restarts from the queue's tail state.
             if (position == NoPosition || position < tail_seq || position > target->seq) {
@@ -435,6 +447,7 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
         path.clear();
         u64 checksum = target->start_checksum;
         u32 ordinal = 0;
+        bool unavailable = false;
         arena = FlatArena{};
         ForEachPacket(target->commands, [&](const AmdGpu::PM4Header* header) {
             AmdGpu::Liverpool::ApplyGraphicsRegisterPacket(*regs, header, checksum);
@@ -445,6 +458,12 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
             if (ordinal < target->num_draws &&
                 target->seq >= gpu_seq.load(std::memory_order_acquire)) {
                 auto& draw = target->draws[ordinal];
+                // Published snapshots can still be read by the GPU/recorder.
+                // A retry must never overwrite or release their arena chunks.
+                if (draw.state.load(std::memory_order_acquire) == PreparedDraw::Ready) {
+                    ++ordinal;
+                    return;
+                }
                 prep_worker.stages.clear();
                 prep_worker.failed = false;
                 sel.draw_indirect_params = {};
@@ -472,14 +491,23 @@ void DrawPreparation::WorkerLoop(std::stop_token stop, u32 index) {
                     }
                     draw.state.store(PreparedDraw::Ready, std::memory_order_release);
                 } else {
+                    unavailable = true;
                     draw.state.store(PreparedDraw::Unavailable, std::memory_order_release);
                 }
             }
             ++ordinal;
         });
         // The arena's chunks live as long as the submission.
-        target->flat_chunks = std::move(arena.chunks);
+        for (auto& chunk : arena.chunks) {
+            target->flat_chunks.push_back(std::move(chunk));
+        }
         position = target->seq + 1;
+        {
+            std::scoped_lock lock{mutex};
+            target->preparation_finished = !unavailable;
+            target->claimed.store(false, std::memory_order_relaxed);
+        }
+        cv.notify_all();
     }
 }
 

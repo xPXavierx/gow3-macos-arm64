@@ -7,6 +7,8 @@
 #include "video_core/texture_cache/image.h"
 #include "video_core/host_shaders/framegen_inputs_comp.h"
 #include "video_core/host_shaders/framegen_inputs_compact_comp.h"
+#include "video_core/host_shaders/framegen_temporal_comp.h"
+#include "video_core/host_shaders/framegen_temporal_compact_comp.h"
 #include "video_core/host_shaders/framegen_ui_comp.h"
 #include <array>
 #include <cassert>
@@ -33,8 +35,9 @@ int main() {
         .bindingCount=6,.pBindings=bindings.data()},nullptr,d).value;
     auto layout=device.createPipelineLayoutUnique({.setLayoutCount=1,.pSetLayouts=&*desc},nullptr,d).value;
     unsigned cases=0;
-    for(bool compact:{false,true}) for(unsigned color_div:{1u,2u}) for(unsigned depth_div:{1u,2u}) for(bool ui_only:{false,true}) {
-        const unsigned cw=w/color_div,ch=h/color_div,dw=w/depth_div,dh=h/depth_div;
+    for(bool compact:{false,true}) for(unsigned color_div:{1u,2u,0u}) for(unsigned depth_div:{1u,2u,0u}) for(unsigned mode:{0u,1u,2u}) {
+        const bool ui_only=mode==1,temporal_only=mode==2;
+        const unsigned cw=color_div?w/color_div:6,ch=cw,dw=depth_div?w/depth_div:5,dh=dw;
         VkBufferCreateInfo bc{.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,.size=6*slot,
             .usage=VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT};
         VmaAllocationCreateInfo ac{.flags=VMA_ALLOCATION_CREATE_MAPPED_BIT|VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT,
@@ -72,15 +75,22 @@ int main() {
                 .srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED,
                 .image=vk::Image(images[i]),.subresourceRange={vk::ImageAspectFlagBits::eColor,0,1,0,1}};
         }
-        auto module=ui_only?Vulkan::CompileSPV(FRAMEGEN_UI_COMP,device):compact?Vulkan::CompileSPV(FRAMEGEN_INPUTS_COMPACT_COMP,device):Vulkan::CompileSPV(FRAMEGEN_INPUTS_COMP,device);
+        auto module=ui_only?Vulkan::CompileSPV(FRAMEGEN_UI_COMP,device):temporal_only?
+            (compact?Vulkan::CompileSPV(FRAMEGEN_TEMPORAL_COMPACT_COMP,device):Vulkan::CompileSPV(FRAMEGEN_TEMPORAL_COMP,device)):
+            compact?Vulkan::CompileSPV(FRAMEGEN_INPUTS_COMPACT_COMP,device):Vulkan::CompileSPV(FRAMEGEN_INPUTS_COMP,device);
         auto pipeline=device.createComputePipelineUnique({}, {.stage={.stage=vk::ShaderStageFlagBits::eCompute,.module=module,.pName="main"},.layout=*layout},nullptr,d).value;
         device.destroyShaderModule(module,nullptr,d);
         auto cmd=scheduler.CommandBuffer();cmd.pipelineBarrier2({.imageMemoryBarrierCount=6,.pImageMemoryBarriers=barriers.data()},d);
+        if(temporal_only)cmd.clearColorImage(vk::Image(images[3]),vk::ImageLayout::eGeneral,
+            vk::ClearColorValue{std::array<float,4>{37.f/255,65.f/255,91.f/255,1}},
+            vk::ImageSubresourceRange{vk::ImageAspectFlagBits::eColor,0,1,0,1},d);
         for(unsigned i=0;i<3;++i) cmd.copyBufferToImage(buffer,vk::Image(images[i]),vk::ImageLayout::eGeneral,
             vk::BufferImageCopy{.bufferOffset=i*slot,.imageSubresource={vk::ImageAspectFlagBits::eColor,0,0,1},.imageExtent={w,h,1}},d);
         for(auto& b:barriers){b.oldLayout=vk::ImageLayout::eGeneral;b.srcAccessMask=vk::AccessFlagBits2::eTransferWrite;b.dstAccessMask=vk::AccessFlagBits2::eShaderRead|vk::AccessFlagBits2::eShaderWrite;}
         cmd.pipelineBarrier2({.imageMemoryBarrierCount=6,.pImageMemoryBarriers=barriers.data()},d);
-        cmd.bindPipeline(vk::PipelineBindPoint::eCompute,*pipeline,d);cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute,*layout,0,writes,d);
+        cmd.bindPipeline(vk::PipelineBindPoint::eCompute,*pipeline,d);
+        if(temporal_only){const std::array selected{writes[1],writes[2],writes[4],writes[5]};cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute,*layout,0,selected,d);}
+        else cmd.pushDescriptorSetKHR(vk::PipelineBindPoint::eCompute,*layout,0,writes,d);
         cmd.dispatch(1,1,1,d);
         for(auto& b:barriers){b.srcAccessMask=vk::AccessFlagBits2::eShaderWrite;b.dstAccessMask=vk::AccessFlagBits2::eTransferRead;}
         cmd.pipelineBarrier2({.imageMemoryBarrierCount=6,.pImageMemoryBarriers=barriers.data()},d);
@@ -89,17 +99,30 @@ int main() {
         scheduler.Finish();
         for(unsigned y=0;y<ch;++y)for(unsigned x=0;x<cw;++x) {
             const auto* color=memory+3*slot+4*(y*cw+x);
-            assert(color[0]==x*color_div*16+(color_div==2?8:0));
-            assert(color[1]==y*color_div*16+(color_div==2?8:0));assert(color[2]==64 && color[3]==255);
+            if(temporal_only){assert(color[0]==37 && color[1]==65 && color[2]==91 && color[3]==255);continue;}
+            auto average=[](unsigned index,unsigned out) {
+                const double lo=double(index)*w/out,hi=double(index+1)*w/out;
+                double sum=0;for(unsigned q=unsigned(std::floor(lo));q<unsigned(std::ceil(hi));++q)
+                    sum+=q*16*(std::min(hi,double(q+1))-std::max(lo,double(q)));
+                return sum/(hi-lo);
+            };
+            assert(std::abs(double(color[0])-average(x,cw))<=1);
+            assert(std::abs(double(color[1])-average(y,ch))<=1);assert(color[2]==64 && color[3]==255);
         }
         if(!ui_only)for(unsigned y=0;y<dh;++y)for(unsigned x=0;x<dw;++x) {
-            const unsigned sx=x*depth_div+(depth_div==2?1:0),sy=y*depth_div+(depth_div==2?1:0),i=y*dw+x;
-            const float z=reinterpret_cast<float*>(memory+4*slot)[i];assert(std::abs(z-((sx%2&&sy%2)?0.25f:0.75f))<1e-6f);
+            unsigned sx=x*w/dw,sy=y*h/dh;float expected=(sx%2&&sy%2)?.25f:.75f;
+            for(unsigned yy=y*h/dh;yy<unsigned(std::ceil(double(y+1)*h/dh));++yy)
+                for(unsigned xx=x*w/dw;xx<unsigned(std::ceil(double(x+1)*w/dw));++xx) {
+                    const float value=(xx%2&&yy%2)?.25f:.75f;
+                    if(value<expected){expected=value;sx=xx;sy=yy;}
+                }
+            const auto i=y*dw+x;
+            const float z=reinterpret_cast<float*>(memory+4*slot)[i];assert(std::abs(z-expected)<1e-6f);
             const auto* flow=reinterpret_cast<_Float16*>(memory+5*slot)+2*i;const bool valid=sx%3!=0;
             assert(float(flow[0])==(valid?float(int(sx)-4):0));assert(float(flow[1])==(valid?float(int(sy)-4):0));
         }
         for(unsigned i=3;i<(ui_only?4:6);++i){unsigned bytes=(i==3?cw*ch:dw*dh)*4;for(unsigned b=bytes;b<slot;++b)assert(memory[i*slot+b]==0xdd);}
         vmaDestroyBuffer(instance.GetAllocator(),buffer,allocation);++cases;
     }
-    std::printf("PASS: %u production framegen packing/UI variants, exact colors, depth, motion and buffer guards\n",cases);
+    std::printf("PASS: %u production framegen packing/UI variants, area-filtered colors, fractional ratios, depth, motion and buffer guards\n",cases);
 }

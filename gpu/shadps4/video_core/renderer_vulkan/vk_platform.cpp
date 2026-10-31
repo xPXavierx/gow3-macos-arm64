@@ -28,6 +28,10 @@
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+// VK_NO_PROTOTYPES is enabled for Vulkan-Hpp. Bind this entry point to the
+// library already linked into the app, rather than dlopening an unbundled
+// libvulkan.dylib by name (which can load a second Homebrew loader).
+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance, const char*);
 #endif
 
 namespace Vulkan {
@@ -271,9 +275,13 @@ vk::UniqueInstance CreateInstance(Frontend::WindowSystemType window_type, bool e
     // Respect VK_DRIVER_FILES / VK_ICD_FILENAMES and the Vulkan loader's normal discovery.
     // An executable directory is not an ICD manifest and must not replace user configuration.
 
+#ifdef __APPLE__
+    VULKAN_HPP_DEFAULT_DISPATCHER.init(&::vkGetInstanceProcAddr);
+#else
     static vk::detail::DynamicLoader dl;
     VULKAN_HPP_DEFAULT_DISPATCHER.init(
         dl.getProcAddress<PFN_vkGetInstanceProcAddr>("vkGetInstanceProcAddr"));
+#endif
 
     const auto [available_version_result, available_version] =
         VULKAN_HPP_DEFAULT_DISPATCHER.vkEnumerateInstanceVersion

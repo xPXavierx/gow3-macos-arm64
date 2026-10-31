@@ -4,6 +4,8 @@
 #pragma once
 
 #include <span>
+#include <optional>
+#include <stdexcept>
 #include <vector>
 #include <boost/container/static_vector.hpp>
 #include "common/assert.h"
@@ -119,6 +121,14 @@ struct Info : InfoPersistent {
 
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
+    // Compiler-only input for a known program's speculative permutations. This
+    // is never serialized or installed in a live rendering Info.
+    struct CompilationSnapshot {
+        std::span<const u32> flat;
+        PersistentSrtInfo layout;
+        u64 layout_fingerprint{}; // community recipes: compare locally generated layout; never import walker instructions
+    };
+    std::optional<CompilationSnapshot> compilation_flat_snapshot;
     PersistentSrtInfo srt_info;
 
     AttributeFlags loads{};
@@ -244,6 +254,22 @@ struct Info : InfoPersistent {
     }
 
     void RefreshFlatBuf() {
+        if (compilation_flat_snapshot) {
+            const auto& captured = *compilation_flat_snapshot;
+            const auto flat = captured.flat;
+            const bool layout_matches = captured.layout_fingerprint
+                ? captured.layout.walker_func_size == srt_info.walker_func_size &&
+                  captured.layout_fingerprint == SrtLayoutFingerprint(srt_info.walker_func, srt_info.walker_func_size)
+                : captured.layout.walker_func_size == srt_info.walker_func_size &&
+                  bool(captured.layout.walker_func) == bool(srt_info.walker_func) &&
+                  (!srt_info.walker_func_size || std::memcmp(SrtWalkerCode(captured.layout.walker_func),
+                       SrtWalkerCode(srt_info.walker_func), srt_info.walker_func_size) == 0);
+            if (flat.size() != srt_info.flattened_bufsize_dw || !layout_matches) {
+                throw std::runtime_error("Speculative shader resource layout changed");
+            }
+            flattened_ud_buf.assign(flat.begin(), flat.end());
+            return;
+        }
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());

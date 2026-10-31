@@ -10,7 +10,16 @@
 
 int main() {
     VkInstance instance{};
+    VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    application.apiVersion = VK_API_VERSION_1_1;
     VkInstanceCreateInfo instance_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    instance_info.pApplicationInfo = &application;
+#ifdef __APPLE__
+    const char* portability = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+    instance_info.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    instance_info.enabledExtensionCount = 1;
+    instance_info.ppEnabledExtensionNames = &portability;
+#endif
     assert(vkCreateInstance(&instance_info, nullptr, &instance) == VK_SUCCESS);
     uint32_t count = 0;
     assert(vkEnumeratePhysicalDevices(instance, &count, nullptr) == VK_SUCCESS && count);
@@ -34,6 +43,11 @@ int main() {
     VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     device_info.queueCreateInfoCount = 1;
     device_info.pQueueCreateInfos = &queue_info;
+#ifdef __APPLE__
+    const char* subset = "VK_KHR_portability_subset";
+    device_info.enabledExtensionCount = 1;
+    device_info.ppEnabledExtensionNames = &subset;
+#endif
     VkDevice device{};
     assert(vkCreateDevice(physical[0], &device_info, nullptr, &device) == VK_SUCCESS);
     // GLSL 450: layout(local_size_x=1) in; void main() {}. No dispatch or game resources.
@@ -86,6 +100,30 @@ int main() {
     assert(vkCreatePipelineCache(device, &cache_info, nullptr, &merged) == VK_SUCCESS);
     assert(vkMergePipelineCaches(device, merged, caches.size(), caches.data()) == VK_SUCCESS);
     for (auto& job : jobs) {
+        auto pipeline = job.Poll();
+        assert(pipeline && *pipeline);
+        vkDestroyPipeline(device, *pipeline, nullptr);
+    }
+    // Look-ahead and required builds share a cache without the external-sync
+    // flag. Exercise actual concurrent driver creation before querying/merging it.
+    Vulkan::AsyncCompiler shared_compiler(6);
+    std::array<Vulkan::AsyncJob<VkPipeline>, 6> shared_jobs;
+    for (auto& job : shared_jobs) {
+        assert(job.Start(shared_compiler, [&] {
+            start.arrive_and_wait();
+            VkComputePipelineCreateInfo info{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            info.stage.module = shader;
+            info.stage.pName = "main";
+            info.layout = layout;
+            VkPipeline pipeline{};
+            assert(vkCreateComputePipelines(device, merged, 1, &info, nullptr, &pipeline) == VK_SUCCESS);
+            return pipeline;
+        }));
+    }
+    shared_compiler.Stop();
+    for (auto& job : shared_jobs) {
         auto pipeline = job.Poll();
         assert(pipeline && *pipeline);
         vkDestroyPipeline(device, *pipeline, nullptr);

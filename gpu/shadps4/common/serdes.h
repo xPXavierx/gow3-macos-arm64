@@ -7,6 +7,7 @@
 #include "common/types.h"
 
 #include <cstddef>
+#include <stdexcept>
 #include <vector>
 
 namespace Serialization {
@@ -36,14 +37,20 @@ struct Archive {
     [[nodiscard]] size_t SizeBytes() const {
         return container.size();
     }
+    [[nodiscard]] size_t RemainingBytes() const {
+        return container.size() - offset;
+    }
 
     u8* CurrPtr() {
         return container.data() + offset;
     }
 
+    void Require(bool valid) const {
+        if (!valid && reject_invalid) throw std::runtime_error("Invalid catalogue serialization bounds");
+        ASSERT_MSG(valid,"Invalid or corrupted deserialization container/shader cache");
+    }
     void Advance(size_t size) {
-        ASSERT_MSG(offset + size <= container.size(),
-                   "Invalid or corrupted deserialization container/shader cache");
+        Require(size <= RemainingBytes());
         offset += size;
     }
 
@@ -52,14 +59,21 @@ struct Archive {
         return std::move(container);
     }
 
+    /// New description formats must not include spare preallocated bytes.
+    std::vector<u8>&& TakeWritten() {
+        container.resize(offset);
+        return TakeOff();
+    }
+
     [[nodiscard]] bool IsEoS() const {
         return offset >= container.size();
     }
 
     Archive() = default;
-    explicit Archive(std::vector<u8>&& v) : container{v} {}
+    explicit Archive(std::vector<u8>&& v, bool reject=false) : reject_invalid{reject}, container{std::move(v)} {}
 
 private:
+    bool reject_invalid{};
     u32 offset{};
     std::vector<u8> container{};
 
@@ -105,8 +119,7 @@ struct Writer {
 struct Reader {
     template <typename T>
     void Read(T* ptr, size_t size) {
-        ASSERT_MSG(ar.offset + size <= ar.container.size(),
-                   "Invalid or corrupted deserialization container/shader cache");
+        ar.Require(size <= ar.RemainingBytes());
         std::memcpy(reinterpret_cast<void*>(ptr), ar.CurrPtr(), size);
         ar.Advance(size);
     }
@@ -121,6 +134,7 @@ struct Reader {
     void Read(auto& v) {
         size_t num_elements{};
         Read(num_elements);
+        ar.Require(num_elements <= ar.RemainingBytes() && num_elements <= v.max_size());
         for (int i = 0; i < num_elements; ++i) {
             v.emplace_back();
             Read(v.back());
@@ -130,6 +144,7 @@ struct Reader {
     void Read(std::string& s) {
         size_t length{};
         Read(length);
+        ar.Require(length <= ar.RemainingBytes());
         s.resize(length);
         Read(s.data(), length);
     }

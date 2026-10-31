@@ -15,11 +15,12 @@ namespace Vulkan::HostPasses {
 
 class PostProcessingPass {
 public:
+    ~PostProcessingPass();
     struct Settings {
         float gamma = 1.0f;
         u32 hdr = 0;
         u32 srgb_input = 0;
-        u32 padding = 0; // std430: the vec4 below starts at offset 16
+        float rcas_attenuation = -1.0f; // negative: no fused RCAS; vec4 remains at offset 16
         // gow3: the part of the input shown; the rest is drawn black (cutscene bars).
         MovieBars::Rect picture = MovieBars::Whole;
     };

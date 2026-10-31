@@ -172,14 +172,19 @@ def generate_profile(resources, game, base, out, selection, commands):
     with (out / 'generation.log').open('w') as log:
         commands.run([resources / 'Recompiler/bin/gow3-aot-recomp', elf,
             generated / 'functions.tsv', generated / 'recomp.c', '@' + str(generated / 'offsets.txt')], log=log)
+    vector_functions = 0
     for source in generated.glob('recomp*.c'):
         text = source.read_text().replace('    unsigned poll_spins = 0;\n', '')
         text = re.sub(r' \{ rc_poll_wait\(&poll_spins\); goto (L_[0-9a-f]+); \} else \{ poll_spins = 0; \}', r' goto \1;', text)
         if 'poll_spins' in text or 'rc_poll_wait(' in text:
             raise PreparationError('prepare_failed', 'Unknown generated polling instrumentation')
+        from aot_vector_cache import transform
+        text, promoted = transform(text)
+        vector_functions += promoted
         source.write_text(text)
     return {**selection, 'resolution_patch': resolution, 'patches': names,
-            'generator_policy': 'checkpoint-no-poll-hooks-v1'}
+            'generator_policy': 'checkpoint-no-poll-hooks-vector-cache-v2',
+            'vector_register_cache': {'policy': 'locals-v1', 'functions': vector_functions}}
 
 
 def ensure_profile(resources, support, game, selection):
