@@ -16,8 +16,9 @@ macOS y el código necesario para compilarla.
 Requisitos: **Apple Silicon, macOS 26 o posterior y CUSA01623 v1.02**. Los hashes
 del ejecutable y los módulos determinan la compatibilidad; los metadatos probados
 muestran APP_VER 01.00. Otras regiones, actualizaciones y ejecutables modificados
-no están validados; un ejecutable retail verificado puede aceptarse explícitamente
-con `accepted-executables.json` (ver [COMMUNITY.md](packaging/macos/launcher/COMMUNITY.md)). Probado en M3 Max; otros Macs y la campaña completa siguen
+no están validados. Si solo difiere el ejecutable, el launcher ofrece **Continuar de todos modos**
+con un aviso de compatibilidad. La autorización se conserva al actualizar la app;
+la región y los módulos siguen siendo estrictos (ver [COMMUNITY.md](packaging/macos/launcher/COMMUNITY.md)). Probado en M3 Max; otros Macs y la campaña completa siguen
 pendientes. La preparación inicial requiere al menos 3 GB libres.
 
 La aplicación incluye compilador offline, Python y bibliotecas nativas. No exige

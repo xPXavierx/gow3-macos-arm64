@@ -1,4 +1,4 @@
-GOD OF WAR III — COMMUNITY ARM64 EDITION 0.4.20
+GOD OF WAR III — COMMUNITY ARM64 EDITION 0.4.22
 
 ENGLISH
 1. Move God of War III.app to Applications and open it.
@@ -16,7 +16,9 @@ Cancel stops preparation safely. Click Play to retry; completed work is retained
 Requirements: Apple Silicon and macOS 26 or later. Tested on M3 Max.
 Tested executable: God of War III Remastered CUSA01623 v1.02. Compatibility is
 checked using executable and module SHA-256 hashes, not just the SFO version.
-Other regions, updates and modified executables are rejected with an explanation.
+Other regions and mismatching modules remain blocked. If only eboot.bin differs,
+Cancel / Continue anyway lets you explicitly approve that executable. Approval
+survives app updates; a new preparation recipe may still require recompilation.
 The tested dump's SFO reports APP_VER 01.00, despite its tested v1.02 executable.
 Allow at least 3 GB of free Mac disk space for initial preparation. Game data stays
 in the selected folder; no game dump, saves or generated game code is included.
@@ -40,7 +42,9 @@ PORTUGUÊS BRASILEIRO
 Requisitos: Apple Silicon, macOS 26 ou superior e pelo menos 3 GB livres para a
 preparação. Testado no M3 Max, com CUSA01623 v1.02. O executável e os módulos são
 conferidos por SHA-256; o número do SFO sozinho não garante compatibilidade.
-Outras regiões, updates e executáveis modificados são recusados com uma explicação.
+Outras regiões e módulos divergentes continuam bloqueados. Se só eboot.bin diferir,
+Cancelar / Continuar mesmo assim permite autorizar esse executável. A autorização
+sobrevive às atualizações; uma receita nova ainda pode exigir recompilação.
 O pacote não inclui dump, saves nem código gerado do jogo. Os dados ficam externos.
 Esta versão tem assinatura local, sem Developer ID/notarização. O macOS pode pedir
 aprovação em Ajustes do Sistema > Privacidade e Segurança > Abrir Mesmo Assim.
@@ -58,7 +62,9 @@ ESPAÑOL
 
 Requisitos: Apple Silicon, macOS 26 o posterior, al menos 3 GB libres para preparar.
 Probado en M3 Max con CUSA01623 v1.02. Se verifican hashes SHA-256 del ejecutable y
-los módulos; el número del SFO no basta. Otras regiones/updates/mods son rechazados.
+los módulos; el número del SFO no basta. Otras regiones y módulos distintos siguen
+bloqueados. Si solo difiere eboot.bin, Cancelar / Continuar de todos modos permite
+autorizarlo. La autorización se conserva al actualizar; podría recompilarse el juego.
 No se incluyen dump, partidas ni código generado del juego. Esta versión
 no tiene Developer ID/notarización; macOS puede pedir aprobación para abrirla.
 

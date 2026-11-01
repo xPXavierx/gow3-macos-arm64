@@ -148,7 +148,7 @@ def main():
         h.update(str(file.relative_to(resources)).encode() + b'\0' + file.read_bytes())
     recipe = h.hexdigest()[:24]
     manifest = json.loads((resources / 'build-manifest.json').read_text())
-    manifest.update(distribution='community-first-run', version='0.4.21', profiles=0,
+    manifest.update(distribution='community-first-run', version='0.4.22', profiles=0,
         local_private_aot=False, automatic_preparation=True, preparation_recipe=recipe,
         compiler='Zig 0.15.2 / Clang 20.1.2', requires_xcode=False, requires_homebrew=False,
         initial_preparation_offline=True, tested_title_id='CUSA01623', tested_version='1.02',
@@ -156,10 +156,11 @@ def main():
         community_catalogue_abi='f9b9a649560a0b85')
     (resources / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     plist = plistlib.loads((contents / 'Info.plist').read_bytes())
-    plist.update(CFBundleVersion='25', CFBundleShortVersionString='0.4.21')
+    plist.update(CFBundleVersion='26', CFBundleShortVersionString='0.4.22')
     (contents / 'Info.plist').write_bytes(plistlib.dumps(plist))
     forbidden = {'boot-linked.bin', 'eboot.bin', 'eboot.elf', 'linked.elf', 'functions.tsv', 'offsets.txt',
-                 'libgow3-recompiled.dylib', 'analysis.json', 'link.json', 'aot-patches.json', 'preferences.json'}
+                 'libgow3-recompiled.dylib', 'analysis.json', 'link.json', 'aot-patches.json', 'preferences.json',
+                 'accepted-executables.json'}
     for file in resources.rglob('*'):
         if file.is_file() and (file.name in forbidden or file.suffix.lower() in ('.wad', '.prx', '.pkg', '.self') or
             (recompiled_name(file.name) and file != resources / 'Recompiler/Source/src/cpu/recomp.c')):

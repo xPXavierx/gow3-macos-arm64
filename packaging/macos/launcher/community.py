@@ -23,9 +23,10 @@ import time
 
 
 class PreparationError(ValueError):
-    def __init__(self, code, detail):
+    def __init__(self, code, detail, **details):
         super().__init__(detail)
         self.code = code
+        self.details = details
 
 
 def digest(path):
@@ -101,7 +102,7 @@ def validate_dump(resources, game, support=None):
     accepted = player_accepted(support) if support is not None else {}
     tested_eboot = expected['files']['eboot.bin']
     tested_eboot = [tested_eboot] if isinstance(tested_eboot, str) else list(tested_eboot)
-    matched, overrides = {}, {}
+    matched, overrides, pending = {}, {}, None
     for relative, sha in expected['files'].items():
         source = game / relative
         if not source.is_file():
@@ -114,20 +115,58 @@ def validate_dump(resources, game, support=None):
             matched[relative] = overrides[relative] = found
             print('DUMP_OVERRIDE: ' + relative + ' ' + found + ' accepted from ' +
                 str(support / ACCEPTED_OVERRIDE), flush=True)
+        elif relative in OVERRIDABLE:
+            # Offer consent only after every strict module and the game data
+            # have passed. A different executable must not hide those failures.
+            matched[relative] = found
+            pending = (relative, found)
         else:
-            hint = ''
-            if support is not None and relative in OVERRIDABLE:
-                hint = (' To accept an executable you verified yourself, list its SHA-256 under "' +
-                    relative + '" in ' + str(support / ACCEPTED_OVERRIDE) + '.')
             raise PreparationError('dump_version', 'Unsupported executable/module: ' + relative +
                 '. Tested CUSA01623 v1.02, eboot SHA-256 ' + ', '.join(tested_eboot) +
                 '. The SFO version alone is not sufficient; this dump reports APP_VER ' +
-                str(sfo.get('APP_VER')) + '.' + hint)
+                str(sfo.get('APP_VER')) + '.')
     # Do not accept a folder containing executable placeholders but no game data.
     data = game / 'EXEC/WAD/PS4_LE/SHELL.WAD'
     if not data.is_file() or data.stat().st_size == 0:
         raise PreparationError('dump_missing', 'The extracted game data is missing (EXEC/WAD/PS4_LE/SHELL.WAD).')
+    if pending:
+        relative, found = pending
+        raise PreparationError('dump_unverified' if support is not None else 'dump_version',
+            'Untested executable: ' + relative + '. SHA-256 ' + found +
+            '. The title and required modules match; explicit player consent is required.',
+            executable_sha256=found, reported_app_version=str(sfo.get('APP_VER', '')))
     return {**expected, 'files': matched, 'player_accepted': overrides}
+
+
+def accept_executable(resources, support, game, executable_sha256):
+    """Remember explicit consent outside the app, independent of release/recipe.
+
+    Recheck the selected dump before writing; a stale dialog cannot authorize
+    a replacement executable or bypass a module/title failure.
+    """
+    import fcntl
+    if not isinstance(executable_sha256, str) or not re.fullmatch('[0-9a-f]{64}', executable_sha256):
+        raise PreparationError('accepted_changed', 'Invalid executable consent digest.')
+    support.mkdir(parents=True, exist_ok=True)
+    with (support / 'session.lock').open('a+') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise PreparationError('accepted_busy', 'Close the running game before accepting an executable.') from None
+        try:
+            matched = validate_dump(resources, game, support)
+        except PreparationError as error:
+            if error.code != 'dump_unverified':
+                raise
+            found = error.details['executable_sha256']
+        else:
+            found = matched['files']['eboot.bin']
+        if found != executable_sha256:
+            raise PreparationError('accepted_changed', 'The executable changed while consent was being requested.')
+        accepted = player_accepted(support)
+        accepted.setdefault('eboot.bin', set()).add(found)
+        atomic_json(support / ACCEPTED_OVERRIDE, {key: sorted(values) for key, values in accepted.items()})
+        return {'accepted': True, 'executable_sha256': found}
 
 
 class Commands:
@@ -342,7 +381,9 @@ def ensure_profile(resources, support, game, selection):
                         preparation_recipe=recipe, generated_locally=True)
         atomic_json(out / 'profile.json', metadata)
         # Recheck source modules before committing the transaction.
-        validate_dump(resources, game, support)
+        checked = validate_dump(resources, game, support)
+        if checked['files'] != expected['files']:
+            raise PreparationError('accepted_changed', 'Dump inputs changed during preparation; the profile was not sealed.')
         seal(out, ['boot-linked.bin', 'analysis.json', 'link.json', 'native-inputs.json',
                    'aot-patches.json', 'aot/libgow3-recompiled.dylib', 'profile.json'], {'recipe': recipe})
         status(support, 'ready', 1, reused=False, player_accepted=accepted or None,
@@ -351,3 +392,21 @@ def ensure_profile(resources, support, game, selection):
     except BaseException:
         commands.cancel()
         raise
+
+
+if __name__ == '__main__':
+    import argparse
+    import contextlib
+    parser = argparse.ArgumentParser(description='Record explicit executable consent for the launcher.')
+    for name in ('resources', 'support', 'game'):
+        parser.add_argument('--' + name, required=True, type=Path)
+    parser.add_argument('--accept-executable', required=True)
+    args = parser.parse_args()
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            result = accept_executable(args.resources.resolve(), args.support.resolve(),
+                args.game.resolve(), args.accept_executable)
+    except (PreparationError, OSError, ValueError) as error:
+        print(json.dumps({'accepted': False, 'error_code': getattr(error, 'code', 'prepare_failed')}))
+        sys.exit(1)
+    print(json.dumps(result))

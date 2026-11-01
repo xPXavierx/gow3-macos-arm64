@@ -16,8 +16,9 @@ This repository contains the macOS application and the source needed to build it
 **Requirements:** Apple Silicon, macOS 26 or later and your own CUSA01623 v1.02
 dump. The tested extracted metadata reports APP_VER 01.00; executable and module
 hashes determine compatibility. Other regions, updates and modified executables
-are not qualified; a verified retail executable can be accepted explicitly with
-`accepted-executables.json` (see [COMMUNITY.md](packaging/macos/launcher/COMMUNITY.md)). Tested on M3 Max; other Macs and the entire campaign remain
+are not qualified. If only the executable differs, the launcher offers **Continue anyway**
+after an explicit compatibility warning; approval survives app updates. Region/module
+checks remain strict (see [COMMUNITY.md](packaging/macos/launcher/COMMUNITY.md)). Tested on M3 Max; other Macs and the entire campaign remain
 unverified. Initial preparation needs at least 3 GB free space.
 
 The downloadable app includes its offline compiler, Python and native libraries.

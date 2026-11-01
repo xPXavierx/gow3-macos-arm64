@@ -323,7 +323,8 @@ def main():
         except Exception as error:
             if community:
                 code = error.code if isinstance(error, PreparationError) else "prepare_failed"
-                status(support, "failed", error_code=code, detail=str(error))
+                status(support, "failed", error_code=code, detail=str(error),
+                    **(error.details if isinstance(error, PreparationError) else {}))
             raise
         if a.prepare_only:
             return 0

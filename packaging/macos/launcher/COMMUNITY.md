@@ -35,39 +35,45 @@ Start with 1080p on slower GPUs. 4K output does not imply a 4K physical display.
 
 **Game version tested:** God of War III Remastered, **CUSA01623 v1.02**.
 The app checks SHA-256 of `eboot.bin`, `libc.prx` and `libSceFios2.prx` before any
-compilation or boot. The accepted executable is:
+compilation or boot. The tested executable is:
 
 ```text
 d85c8135d330c3b601bf5dc3f1dd86bd6119fb8a9fce372bed2c9785f9a79299
 ```
 
 The tested extracted SFO reports `APP_VER=01.00`; the executable hash is the
-compatibility authority. Other regions, executable updates/mods or module
-revisions are rejected with an explanation. The app does not convert an
+compatibility reference. Other regions and module revisions remain blocked;
+a different executable needs the explicit approval described below. The app does not convert an
 unsupported revision into the tested revision. It does not modify the dump.
 
-**A different executable (opt-in):** a player who has verified another retail
-`eboot.bin` of this same title on their own machine can accept that one file
-without patching the app. Create
-`~/Library/Application Support/God of War III ARM64/accepted-executables.json`:
+**A different executable (opt-in):** after checking the title/region, required
+module hashes and game data, the launcher offers **Cancel** or **Continue anyway**
+when only `eboot.bin` differs. The warning displays the executable SHA-256 and
+explains that this build has not been qualified. Continuing attempts local ARM64
+preparation; it does not guarantee campaign compatibility or bypass the loader's
+format, patch-signature and coverage checks.
+
+Approval is saved in
+`~/Library/Application Support/God of War III ARM64/accepted-executables.json`,
+keyed by the full executable hash. It survives replacing/updating the app and is
+independent of the preparation recipe. An update may require recompilation, but
+the same approved executable does not require renewed approval. A different
+executable requires its own confirmation. Saves and settings are preserved.
+
+The PR's manual JSON format remains supported for advanced users:
 
 ```json
-{
-  "eboot.bin": ["6e72330e9092e5164049b865e5568f2d450904001a73fe0a2f4b39194c195b3c"]
-}
+{"eboot.bin": ["<full lowercase SHA-256 of the executable you accept>"]}
 ```
 
-Then click Play. Preparation prints `DUMP_OVERRIDE:` with the accepted hash,
-records it as `player_accepted` in `preparation-status.json`, and keeps the
-prepared profile under its own executable key
-(`Prepared/<recipe>/<sha256[:16]>/`), so a profile generated for an accepted
-executable is never reused for, or reported as, the tested build. Only
-`eboot.bin` may be listed: `libc.prx` and `libSceFios2.prx` stay authoritative
-because preparation links them against the tested ABI, and a file that lists
-them is rejected (`accepted_invalid`). The override is opt-in and absent by
-default; the compatibility warranty above covers only the tested executable.
-Delete the file to return to the shipped behaviour. It lives in the support
-folder, so it survives app updates that replace the bundle.
+No approval is bundled with the app. `libc.prx` and `libSceFios2.prx` remain strict;
+other title IDs/regions and mismatching modules cannot be approved. The launcher
+rechecks the selected dump before saving approval, logs `DUMP_OVERRIDE:` on use,
+records `player_accepted` at profile readiness and keys prepared code under
+`Prepared/<recipe>/<sha256[:16]>/`. Delete the approval file to revoke approvals.
+Shader-cache clearing preserves this file. Malformed JSON gives a localized
+recovery message instead of a raw error key. This extends danielgpinheiro's
+[PR #7](https://github.com/xPXavierx/gow3-macos-arm64/pull/7).
 
 **Signing:** this community release uses local ad-hoc signatures. It is **not
 Developer ID-signed or notarized by Apple**. macOS may require approval through

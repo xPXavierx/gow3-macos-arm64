@@ -52,7 +52,7 @@ def audit(app):
             assert name in ('compatibility.txt', 'binary-fingerprints.tsv')
     assert len(list(catalogue.glob('*.recipe'))) == descriptions['shader_recipes']
     assert len(list(catalogue.glob('*.pso'))) == descriptions['pipeline_recipes']
-    forbidden = {'boot-linked.bin', 'eboot.bin', 'eboot.elf', 'linked.elf', 'functions.tsv', 'offsets.txt',
+    forbidden = {'accepted-executables.json', 'boot-linked.bin', 'eboot.bin', 'eboot.elf', 'linked.elf', 'functions.tsv', 'offsets.txt',
         'libgow3-recompiled.dylib', 'analysis.json', 'link.json', 'preferences.json', 'aot-patches.json'}
     rows = []
     files = 0

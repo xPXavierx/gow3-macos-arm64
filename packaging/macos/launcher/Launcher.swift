@@ -103,7 +103,14 @@ let translations: [String: [String: String]] = [
  "cancelled":"Preparação interrompida. Clique em Jogar para continuar.",
  "cancel":"Cancelar",
  "firstRun":"A primeira preparação pode levar vários minutos. O resultado será salvo neste Mac.",
- "dump_version":"Dump incompatível. Esta versão foi testada com CUSA01623 v1.02 e confere o conteúdo do executável e dos módulos. Outros updates, regiões e executáveis modificados não são aceitos, a menos que você liste o SHA-256 do executável em accepted-executables.json na pasta de suporte do app.",
+ "dump_version":"A região ou os módulos deste dump não correspondem à versão testada, CUSA01623 v1.02. Autorizar outro executável não permite ignorar essas diferenças.",
+ "dump_unverified":"Executável diferente da versão testada",
+ "executableWarning":"A região e os módulos obrigatórios foram conferidos, mas este executável difere da versão testada. A compatibilidade não está garantida. Deseja tentar jogar mesmo assim?",
+ "executableRemember":"Sua escolha será lembrada neste Mac para este executável, inclusive após atualizar o aplicativo. Uma atualização ainda pode exigir nova recompilação ARM64.",
+ "continueAnyway":"Continuar mesmo assim", "acceptingExecutable":"Salvando autorização do executável…",
+ "accepted_invalid":"O arquivo accepted-executables.json na pasta de suporte do aplicativo é inválido. Corrija ou remova esse arquivo e clique em Jogar novamente. Seus saves e configurações serão preservados.",
+ "accepted_changed":"O dump mudou desde a conferência. Clique em Jogar novamente para conferir e autorizar o executável atual.",
+ "accepted_busy":"Feche o jogo e aguarde o fim da sessão antes de autorizar outro executável.",
  "dump_missing":"O dump está incompleto. Selecione a pasta extraída com os executáveis e os arquivos de dados do jogo.",
  "disk_space":"Libere pelo menos 3 GB no disco do Mac para preparar o jogo.",
  "prepare_failed":"Não foi possível concluir a preparação. Abra os logs para ver o diagnóstico e clique em Jogar para tentar novamente.",
@@ -156,7 +163,14 @@ let translations: [String: [String: String]] = [
  "cancelled":"Preparation stopped. Click Play to continue.",
  "cancel":"Cancel",
  "firstRun":"First preparation may take several minutes. The result will be saved on this Mac.",
- "dump_version":"Incompatible dump. This release was tested with CUSA01623 v1.02 and verifies executable and module contents. Other updates, regions and modified executables are not accepted, unless you list the executable SHA-256 in accepted-executables.json in the app support folder.",
+ "dump_version":"This dump's region or modules do not match the tested CUSA01623 v1.02 build. Accepting another executable cannot bypass these differences.",
+ "dump_unverified":"Executable differs from the tested build",
+ "executableWarning":"The region and required modules have been checked, but this executable differs from the tested build. Compatibility is not guaranteed. Would you like to try playing anyway?",
+ "executableRemember":"Your choice will be remembered on this Mac for this executable, including after app updates. An update may still require new ARM64 preparation.",
+ "continueAnyway":"Continue anyway", "acceptingExecutable":"Saving executable approval…",
+ "accepted_invalid":"The accepted-executables.json file in the app support folder is invalid. Correct or remove that file, then click Play again. Your saves and settings will be preserved.",
+ "accepted_changed":"The dump changed after it was checked. Click Play again to check and approve the current executable.",
+ "accepted_busy":"Close the game and wait for the session to end before approving another executable.",
  "dump_missing":"The dump is incomplete. Select the extracted folder containing the executables and game data files.",
  "disk_space":"Free at least 3 GB on your Mac to prepare the game.",
  "prepare_failed":"Preparation could not finish. Open the logs for diagnostics, then click Play to try again.",
@@ -209,7 +223,14 @@ let translations: [String: [String: String]] = [
  "cancelled":"Preparación detenida. Pulsa Jugar para continuar.",
  "cancel":"Cancelar",
  "firstRun":"La primera preparación puede tardar varios minutos. El resultado se guardará en este Mac.",
- "dump_version":"Dump incompatible. Esta versión fue probada con CUSA01623 v1.02 y verifica el contenido del ejecutable y los módulos. No se aceptan otras actualizaciones, regiones ni ejecutables modificados, salvo que incluya el SHA-256 del ejecutable en accepted-executables.json en la carpeta de soporte de la app.",
+ "dump_version":"La región o los módulos del dump no coinciden con la versión probada, CUSA01623 v1.02. Autorizar otro ejecutable no permite omitir estas diferencias.",
+ "dump_unverified":"El ejecutable difiere de la versión probada",
+ "executableWarning":"Se han comprobado la región y los módulos necesarios, pero este ejecutable difiere de la versión probada. La compatibilidad no está garantizada. ¿Quieres intentar jugar de todos modos?",
+ "executableRemember":"Tu elección se recordará en este Mac para este ejecutable, incluso después de actualizar la aplicación. Una actualización aún puede requerir otra recompilación ARM64.",
+ "continueAnyway":"Continuar de todos modos", "acceptingExecutable":"Guardando autorización del ejecutable…",
+ "accepted_invalid":"El archivo accepted-executables.json de la carpeta de soporte de la aplicación no es válido. Corrige o elimina ese archivo y pulsa Jugar de nuevo. Se conservarán tus partidas y ajustes.",
+ "accepted_changed":"El dump cambió después de comprobarlo. Pulsa Jugar de nuevo para comprobar y autorizar el ejecutable actual.",
+ "accepted_busy":"Cierra el juego y espera a que termine la sesión antes de autorizar otro ejecutable.",
  "dump_missing":"El dump está incompleto. Selecciona la carpeta extraída con los ejecutables y los archivos de datos del juego.",
  "disk_space":"Libera al menos 3 GB en tu Mac para preparar el juego.",
  "prepare_failed":"No se pudo completar la preparación. Abre los logs para ver el diagnóstico y pulsa Jugar para reintentar.",
@@ -252,6 +273,8 @@ struct PreparationState: Decodable {
     var completed: Int?
     var total: Int?
     var error_code: String?
+    var executable_sha256: String?
+    var reported_app_version: String?
 }
 
 func failureKey(log: String, preparation: PreparationState?) -> String {
@@ -259,6 +282,49 @@ func failureKey(log: String, preparation: PreparationState?) -> String {
     if log.contains("DUMP_VERSION:") { return "dump_version" }
     if let state = preparation, state.phase == "failed", let code = state.error_code { return code }
     return "runtime_failed"
+}
+
+enum ExecutableConsent {
+    struct Failure: Error { let key: String }
+    static func digest(_ state: PreparationState) -> String? {
+        guard state.phase == "failed", state.error_code == "dump_unverified",
+              let digest = state.executable_sha256,
+              digest.range(of:"^[0-9a-f]{64}$",options:.regularExpression) != nil else { return nil }
+        return digest
+    }
+    static func alert(_ state: PreparationState, translate: (String) -> String) -> NSAlert? {
+        guard let digest = digest(state) else { return nil }
+        let alert = NSAlert(); alert.alertStyle = .warning
+        alert.messageText = translate("dump_unverified")
+        alert.informativeText = translate("executableWarning") + "\n\n" +
+            translate("executableRemember") + "\n\nCUSA01623 · APP_VER " +
+            (state.reported_app_version ?? "?") + "\neboot.bin · SHA-256\n" + digest
+        // Cancel is the default; only an explicit second-button choice authorizes.
+        alert.addButton(withTitle:translate("cancel"))
+        alert.addButton(withTitle:translate("continueAnyway"))
+        alert.buttons[1].keyEquivalent = ""
+        return alert
+    }
+    static func remember(resources: URL, support: URL, game: URL, digest: String) throws {
+        let task = Process(), output = Pipe()
+        task.executableURL = resources.appendingPathComponent("Python/bin/python3.14")
+        task.arguments = ["-I","-S","-B",resources.appendingPathComponent("community.py").path,
+            "--resources",resources.path,"--support",support.path,"--game",game.path,
+            "--accept-executable",digest]
+        task.environment = ["PATH":"/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME":FileManager.default.homeDirectoryForCurrentUser.path,
+            "TMPDIR":NSTemporaryDirectory(),"LANG":"en_US.UTF-8"]
+        task.standardOutput = output; task.standardError = FileHandle.nullDevice
+        task.standardInput = FileHandle.nullDevice
+        try task.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        let result = (try? JSONSerialization.jsonObject(with:data)) as? [String:Any]
+        guard task.terminationStatus == 0, result?["accepted"] as? Bool == true,
+              result?["executable_sha256"] as? String == digest else {
+            throw Failure(key:result?["error_code"] as? String ?? "prepare_failed")
+        }
+    }
 }
 
 // All display profiles share this game's graphics cache. Take the same flock as
@@ -383,6 +449,31 @@ final class LauncherModel: ObservableObject {
         let logs = support.appendingPathComponent("Logs")
         try? FileManager.default.createDirectory(at:logs,withIntermediateDirectories:true)
         NSWorkspace.shared.open(logs)
+    }
+    func confirmExecutable(_ state: PreparationState) {
+        guard !busy, let game = gameURL, let digest = ExecutableConsent.digest(state),
+              let alert = ExecutableConsent.alert(state,translate:t) else {
+            showError(t("prepare_failed")); return
+        }
+        NSApp.activate(ignoringOtherApps:true)
+        guard alert.runModal() == .alertSecondButtonReturn else {
+            statusKey = "cancelled"; return
+        }
+        busy = true; statusKey = "acceptingExecutable"
+        DispatchQueue.global(qos:.userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            let result = Result { try ExecutableConsent.remember(resources:self.resources,
+                support:self.support,game:game,digest:digest) }
+            DispatchQueue.main.async {
+                self.busy = false
+                switch result {
+                case .success: self.play()
+                case .failure(let error):
+                    self.statusKey = "failed"
+                    self.showError(self.t((error as? ExecutableConsent.Failure)?.key ?? "prepare_failed"))
+                }
+            }
+        }
     }
     func clearShaders() {
         guard !busy && !clearingShaders && !catalogueBusy else { return }
@@ -556,7 +647,11 @@ final class LauncherModel: ObservableObject {
                     if exitCode != 0 && !self.stopping {
                         self.statusKey = "failed"
                         let diagnostic = (try? String(contentsOf:log,encoding:.utf8)) ?? ""
-                        self.showError(self.t(failureKey(log:diagnostic,preparation:self.statusState)))
+                        if let state = self.statusState, ExecutableConsent.digest(state) != nil {
+                            self.confirmExecutable(state)
+                        } else {
+                            self.showError(self.t(failureKey(log:diagnostic,preparation:self.statusState)))
+                        }
                     } else {
                         self.signedCatalogue("pending",quiet:true)
                     }
@@ -933,6 +1028,23 @@ if let index = args.firstIndex(of:"--self-test"), index+1 < args.count {
     precondition(failureKey(log:"Host fault",preparation:nil) == "runtime_failed")
     precondition(failureKey(log:"DUMP_VERSION: incompatible",preparation:nil) == "dump_version")
     precondition(failureKey(log:"",preparation:PreparationState(phase:"failed",error_code:"disk_space")) == "disk_space")
+    let candidate = PreparationState(phase:"failed",error_code:"dump_unverified",
+        executable_sha256:String(repeating:"a",count:64),reported_app_version:"01.02")
+    precondition(ExecutableConsent.digest(candidate) == String(repeating:"a",count:64))
+    precondition(ExecutableConsent.digest(PreparationState(phase:"failed",error_code:"dump_version",
+        executable_sha256:String(repeating:"a",count:64))) == nil)
+    precondition(ExecutableConsent.digest(PreparationState(phase:"failed",error_code:"dump_unverified",
+        executable_sha256:"not-a-digest")) == nil)
+    for language in ["en","pt-BR","es"] {
+        let tr = { (key:String) in translations[language]![key]! }
+        let alert = ExecutableConsent.alert(candidate,translate:tr)!
+        precondition(alert.buttons.count == 2 && alert.buttons[0].title == tr("cancel"))
+        precondition(alert.buttons[1].title == tr("continueAnyway") && alert.buttons[1].keyEquivalent.isEmpty)
+        precondition(alert.informativeText.contains(candidate.executable_sha256!))
+        for code in ["dump_unverified","accepted_invalid","accepted_changed","accepted_busy"] {
+            precondition(translations[language]![code] != nil)
+        }
+    }
     let p = Preferences()
     let legacy = try! JSONDecoder().decode(Preferences.self,from:Data("{\"gamePath\":\"/example\"}".utf8))
     precondition(p.language == "en" && legacy.language == "en")
@@ -971,7 +1083,7 @@ if let index = args.firstIndex(of:"--self-test"), index+1 < args.count {
     let gameCache = state.appendingPathComponent("User/cache/CUSA01623")
     let protectedPaths = ["preferences.json", "User/savedata/1/CUSA01623/AUTOSAVE/SAVEDATA",
         "User/settings.toml", "Prepared/recipe/aot/libgow3-recompiled.dylib",
-        "Profiles/3840x2160-60/aot-patches.json", "CompilerCache/game.o",
+        "Profiles/3840x2160-60/aot-patches.json", "CompilerCache/game.o", "accepted-executables.json",
         "User/cache/OTHER_GAME/pipeline.key", "Community/imported/shared.jsonl",
         "Community/contributions/current.jsonl", "Community/official/abi/trust-state.json",
         "Community/official/abi/current.json", "Community/official/abi/generation/manifest.sig"]
@@ -1055,6 +1167,8 @@ if let index = args.firstIndex(of:"--self-test"), index+1 < args.count {
         "shader_cache_clear_busy_and_play_guards":true,
         "shader_cache_clear_missing_cache_safe":true,
         "shader_cache_clear_symlink_guards":true,
+        "executable_consent_localized_and_explicit":true,
+        "shader_cache_clear_preserves_executable_consent":true,
         "artwork_bundled":FileManager.default.fileExists(atPath:Bundle.main.resourceURL!.appendingPathComponent("Branding/GOW-3-Art.jpg").path)]
     try! JSONSerialization.data(withJSONObject:result,options:[.prettyPrinted,.sortedKeys]).write(to:URL(fileURLWithPath:args[index+1]))
     exit(0)
