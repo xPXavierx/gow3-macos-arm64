@@ -1,51 +1,59 @@
-# Community release 0.4.21 validation
+# Community release 0.4.22 validation
 
-Tested on 1 November 2026, Apple M3 Max / macOS 26.5.2, with the hash-verified
-CUSA01623 v1.02 dump. Other Macs and the whole campaign remain unqualified.
+Tested on 1 November 2026, Apple M3 Max / macOS 26.5.2. This is a launcher and
+executable-approval update. The renderer, native game host and graphics catalogue
+are unchanged from 0.4.21; no new FPS gain or stutter reduction is claimed.
 
-## Source and package checks
+## Consent and source checks
 
-- Five selected backport checkpoints, plus release documentation/versioning;
-  [upstream integration status](../../../docs/upstream-status.md).
-- 11 native runtime/loader/AOT tests and 5 graphics checks, including actual
-  MoltenVK roundtrips and 60,000 concurrent label publications/recycles.
-- 34 preparation/display/catalogue tests pass. The remote catalogue validator
-  [passed](https://github.com/xPXavierx/gow3-macos-arm64/actions/runs/41332584068).
-- 109 thin ARM64 Mach-O files; non-system dependencies bundled. No dump, saves,
-  prepared game library or generated game code is included.
-- Launcher self-test covers 106 translated keys, English first use, persisted
-  dump/settings/language, Retina/Game Mode and safe shader-cache clearing.
-- Official catalogue download/signature verification passed with the existing
-  public key. The portable seed has 1,300 shader and 962 pipeline descriptions.
+- Original [danielgpinheiro PR #7](https://github.com/xPXavierx/gow3-macos-arm64/pull/7)
+  commit retained, with the tested launcher confirmation built on top.
+- 31 Python tests pass: 10 preparation/consent, 3 launcher shader-catalogue,
+  10 portable catalogue and 8 catalogue-service tests.
+- The launcher compiles for ARM64. Its AppKit self-test covers 114 translated keys
+  in English, Brazilian Portuguese and Spanish, explicit Cancel / Continue anyway
+  buttons, persisted settings and shader-cache clearing that preserves approvals.
+- The production Swift consent bridge invoked the bundled isolated Python and
+  saved/reused approval from a disposable support directory. The reference dump
+  still passes without an override; wrong title/module hashes remain blocked.
+- Two app-resource directories with different preparation recipes reused the same
+  support-folder approval without asking again. Changed hashes require a fresh
+  decision, and the save operation rejects a stale digest or busy session.
 
-## Actual first run
+## Fresh automatic preparation
 
-A fresh support directory and compiler/object cache were used. CPU preparation
-completed offline in **153.63 seconds**, with reads of Xcode, /Library/Developer
-and /opt/homebrew denied. The sealed profile was then revalidated using its
-Mach-O header under the same restrictions; reuse took about **0.03 seconds**.
-The CPU preparation recipe is unchanged from 0.4.20, so compatible existing
-profiles can be reused. No player Xcode/Homebrew installation is required.
+A disposable copy of the owner dump was used. Bytes appended outside the SELF's
+mapped payload changed its raw SHA-256 while its extracted ELF remained exactly
+identical. The original dump was not modified. This isolates the approval path;
+it does not certify the contributor's actual alternate retail executable.
 
-The packaged game loaded all **16,042 locally generated functions**, with zero
-CPU JIT translations/interpreted fallback. The test used the same newly generated
-library, copied saves and an initially empty port shader cache. Native 4K with
-cap 60, movement and attacks completed without fatal errors or omitted draws.
-The prior display mode was restored after the session.
+The unapproved executable was initially refused. After explicit test approval,
+a fresh preparation/object cache generated **37 C shards** with
+**16,042 functions** and linked a thin ARM64 game library in
+**153.76 seconds**. Preparation ran offline with Xcode,
+/Library/Developer and /opt/homebrew reads denied. Sealed-profile reuse took
+**0.03 seconds**; the approval file remained unchanged.
 
-The one-minute observation measured **59.81 FPS**, p95 **16.92 ms**, p99 **17.07 ms**
-and maximum **202.59 ms**, with two intervals above 33.5 ms. Loading, resource
-indexing and pipeline warming precede this measurement. **This is not a claim of
-zero stutter**; the longest cold-run interval was not isolated to a cause. The
-initial 959-pipeline warm-up took 76.63 seconds on this run. The system Metal
-driver cache was not cleared.
+The recipe changes in this release, so the first Play may rebuild a profile.
+Approval is kept outside the app and independent of that recipe: future updates
+must not require authorizing the same executable again. Other executable hashes
+still need their own approval. Existing saves/settings remain outside the app.
 
-The separately controlled native 4K uncapped backport comparison was
-82.81 -> 82.80 FPS; no FPS gain is claimed. Three-minute private autosave and
-MetalFX checks are described in the linked upstream status. This is a correctness
-release, with further shader coverage, longer boss fights and transitions still
-pending. Frame generation stays disabled; all execution is ARM64, without Rosetta.
+## Distribution and scope
 
-Source/audit data: [community-validation.json](community-validation.json). The
-distribution retains ad-hoc signatures; Apple notarization and a separate clean
-account download/quarantine test were not performed.
+- 109 thin ARM64 Mach-O files, all non-system dependencies bundled; Retina and
+  fullscreen Game Mode metadata retained, frame generation disabled.
+- No dump, saves, acceptance file, generated guest C or prepared game library is
+  bundled. Only the compiler/tool sources and portable graphics descriptions ship.
+- Existing signed catalogue: 1,300 shader and 962 pipeline descriptions, partial
+  campaign coverage. Its signature/public key and the renderer ABI are unchanged.
+- Ad-hoc signature integrity checked; Apple notarization and a separate clean
+  account download/quarantine flow were not performed.
+
+The contributor's actual executable was unavailable for an independent gameplay
+test. There is no new gameplay/FPS benchmark for 0.4.22. Prior engine tests and
+bounded native 4K gameplay measurements, including remaining cold-use pauses,
+are recorded in the [0.4.21 validation](https://github.com/xPXavierx/gow3-macos-arm64/blob/v0.4.21/packaging/macos/launcher/COMMUNITY_VALIDATION.md).
+Other Macs, long boss fights and the full campaign remain unqualified.
+
+Machine-readable results: [community-validation.json](community-validation.json).
