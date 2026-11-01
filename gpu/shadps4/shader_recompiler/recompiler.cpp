@@ -62,6 +62,12 @@ void EmitControlFlowGraph(IR::Program& program, Pools& pools, Gcn::CFG& cfg,
 
 IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Info& info,
                              RuntimeInfo& runtime_info, const Profile& profile) {
+    if (code.empty()) {
+        // Speculative jobs reject the snapshot; required rendering keeps its fatal diagnostic.
+        UNREACHABLE_MSG("TranslateProgram received an empty instruction stream (stage {}, hash {:#x})",
+                        info.hw_stage, info.pgm_hash);
+    }
+
     // Ensure first instruction is expected.
     constexpr u32 token_mov_vcchi = 0xBEEB03FF;
     if (code[0] != token_mov_vcchi) {

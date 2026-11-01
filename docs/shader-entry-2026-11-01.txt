@@ -1,0 +1,20 @@
+Empty shader input at the native compiler boundary
+=================================================
+
+Adapted from SpartanPort 368d89910ddb4a26942873be582e2c6387d8764a.
+TranslateProgram now rejects an empty instruction span before reading code[0]
+or constructing the decoder. The diagnostic names the stage and program hash.
+
+The existing Mac assertion policy is preserved: a speculative compilation job
+rejects its snapshot by exception; the required shader path terminates with the
+GPU error diagnostic. This is not an empty substitute shader and does not skip a
+required draw or assert that the player's dump must be corrupt.
+
+The regression calls the actual production TranslateProgram through libgow3gpu:
+null and nonnull empty spans reject inside an asynchronous speculative job; the
+same worker then compiles a valid compute stream. A separate required-empty
+process exits 23 with the explicit diagnostic. The existing speculative assertion
+and pipeline-key identity checks also pass, as does pixel-coordinate/ABI coverage.
+
+No shader math, specialization/key identity, cache format, signed catalogue trust,
+AOT recipe, guest code or launcher setting changes. ARM64; no Rosetta/framegen.
