@@ -19,6 +19,10 @@ upload, submission, account or network service.
 
 Supported game: **CUSA01623, update 1.02**, with executable SHA-256
 `d85c8135d330c3b601bf5dc3f1dd86bd6119fb8a9fce372bed2c9785f9a79299`.
+A different executable accepted through `accepted-executables.json`
+(see [COMMUNITY.md](../packaging/macos/launcher/COMMUNITY.md)) still uses this
+same catalogue, rebuilt locally from that dump; descriptions that do not match
+its code are rejected and complete required rendering applies.
 The renderer ABI must also match; only explicitly supported description migrations
 are accepted across versions, and other catalogues are rejected. This initial format records vertex/fragment specializations and graphics
 pipelines. It does not cover every compute stage or every possible campaign state.

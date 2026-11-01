@@ -46,6 +46,29 @@ compatibility authority. Other regions, executable updates/mods or module
 revisions are rejected with an explanation. The app does not convert an
 unsupported revision into the tested revision. It does not modify the dump.
 
+**A different executable (opt-in):** a player who has verified another retail
+`eboot.bin` of this same title on their own machine can accept that one file
+without patching the app. Create
+`~/Library/Application Support/God of War III ARM64/accepted-executables.json`:
+
+```json
+{
+  "eboot.bin": ["6e72330e9092e5164049b865e5568f2d450904001a73fe0a2f4b39194c195b3c"]
+}
+```
+
+Then click Play. Preparation prints `DUMP_OVERRIDE:` with the accepted hash,
+records it as `player_accepted` in `preparation-status.json`, and keeps the
+prepared profile under its own executable key
+(`Prepared/<recipe>/<sha256[:16]>/`), so a profile generated for an accepted
+executable is never reused for, or reported as, the tested build. Only
+`eboot.bin` may be listed: `libc.prx` and `libSceFios2.prx` stay authoritative
+because preparation links them against the tested ABI, and a file that lists
+them is rejected (`accepted_invalid`). The override is opt-in and absent by
+default; the compatibility warranty above covers only the tested executable.
+Delete the file to return to the shipped behaviour. It lives in the support
+folder, so it survives app updates that replace the bundle.
+
 **Signing:** this community release uses local ad-hoc signatures. It is **not
 Developer ID-signed or notarized by Apple**. macOS may require approval through
 System Settings → Privacy & Security → Open Anyway after the first opening

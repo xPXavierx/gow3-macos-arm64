@@ -49,26 +49,85 @@ def status(support, phase, fraction=None, **details):
     print('PREPARATION: ' + json.dumps({'phase': phase, **details}), flush=True)
 
 
-def validate_dump(resources, game):
+ACCEPTED_OVERRIDE = 'accepted-executables.json'
+# Only the executable may be declared by a player: the modules are linked against
+# the tested ABI, so a different libc.prx or libSceFios2.prx is never accepted.
+OVERRIDABLE = ('eboot.bin',)
+
+
+def player_accepted(support):
+    """Digests the player explicitly verified, from <support>/accepted-executables.json.
+
+    The tested executable stays authoritative; this file only adds executables a
+    player checked on their own machine. It is absent in a default installation.
+    """
+    path = support / ACCEPTED_OVERRIDE
+    if not path.is_file():
+        return {}
+    try:
+        declared = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        raise PreparationError('accepted_invalid', 'Unreadable ' + str(path) + ': ' + str(error))
+    if not isinstance(declared, dict):
+        raise PreparationError('accepted_invalid', str(path) + ' must map "' + OVERRIDABLE[0] +
+            '" to a list of SHA-256 values.')
+    accepted = {}
+    for relative, values in declared.items():
+        if relative not in OVERRIDABLE:
+            raise PreparationError('accepted_invalid', str(path) + ' may only list ' +
+                ', '.join(OVERRIDABLE) + '; it declares ' + str(relative) + '.')
+        values = [values] if isinstance(values, str) else values
+        if not isinstance(values, list) or not all(
+                isinstance(v, str) and re.fullmatch('[0-9a-f]{64}', v) for v in values):
+            raise PreparationError('accepted_invalid', str(path) + ' must list lowercase ' +
+                'SHA-256 values under "' + relative + '".')
+        accepted[relative] = set(values)
+    return accepted
+
+
+def validate_dump(resources, game, support=None):
+    """Compare the dump with the tested hashes and any player-accepted executable.
+
+    Returns the supported-game manifest with 'files' holding the digest each file
+    actually matched, so caches are keyed by the executable present on disk, and
+    'player_accepted' naming the files only the local override allowed.
+    """
     sys.path.insert(0, str(resources / 'Runtime/scripts'))
     from prepare import read_sfo
     expected = json.loads((resources / 'supported-game.json').read_text())
     sfo = read_sfo(game / 'sce_sys/param.sfo')
     if not sfo or sfo.get('TITLE_ID') != expected['title_id']:
         raise PreparationError('dump_version', 'Expected an extracted God of War III Remastered CUSA01623 dump.')
+    accepted = player_accepted(support) if support is not None else {}
+    tested_eboot = expected['files']['eboot.bin']
+    tested_eboot = [tested_eboot] if isinstance(tested_eboot, str) else list(tested_eboot)
+    matched, overrides = {}, {}
     for relative, sha in expected['files'].items():
         source = game / relative
         if not source.is_file():
             raise PreparationError('dump_missing', 'Required file is missing: ' + relative)
-        if digest(source) != sha:
+        found = digest(source)
+        tested = [sha] if isinstance(sha, str) else list(sha)
+        if found in tested:
+            matched[relative] = found
+        elif found in accepted.get(relative, ()):
+            matched[relative] = overrides[relative] = found
+            print('DUMP_OVERRIDE: ' + relative + ' ' + found + ' accepted from ' +
+                str(support / ACCEPTED_OVERRIDE), flush=True)
+        else:
+            hint = ''
+            if support is not None and relative in OVERRIDABLE:
+                hint = (' To accept an executable you verified yourself, list its SHA-256 under "' +
+                    relative + '" in ' + str(support / ACCEPTED_OVERRIDE) + '.')
             raise PreparationError('dump_version', 'Unsupported executable/module: ' + relative +
-                '. Tested CUSA01623 v1.02, eboot SHA-256 ' + expected['files']['eboot.bin'] +
-                '. The SFO version alone is not sufficient; this dump reports APP_VER ' + str(sfo.get('APP_VER')) + '.')
+                '. Tested CUSA01623 v1.02, eboot SHA-256 ' + ', '.join(tested_eboot) +
+                '. The SFO version alone is not sufficient; this dump reports APP_VER ' +
+                str(sfo.get('APP_VER')) + '.' + hint)
     # Do not accept a folder containing executable placeholders but no game data.
     data = game / 'EXEC/WAD/PS4_LE/SHELL.WAD'
     if not data.is_file() or data.stat().st_size == 0:
         raise PreparationError('dump_missing', 'The extracted game data is missing (EXEC/WAD/PS4_LE/SHELL.WAD).')
-    return expected
+    return {**expected, 'files': matched, 'player_accepted': overrides}
 
 
 class Commands:
@@ -192,13 +251,15 @@ def ensure_profile(resources, support, game, selection):
     if sys.platform != 'darwin' or platform.machine() != 'arm64':
         raise PreparationError('architecture', 'An Apple Silicon Mac running ARM64 is required. Rosetta is not supported.')
     status(support, 'checking', 0)
-    expected = validate_dump(resources, game)
+    expected = validate_dump(resources, game, support)
+    accepted = expected['player_accepted']
     manifest = json.loads((resources / 'build-manifest.json').read_text())
     recipe = manifest['preparation_recipe']
     root = support / 'Prepared' / recipe / expected['files']['eboot.bin'][:16]
     out = root / 'Profiles' / selection['profile']
     if valid_cache(out, recipe):
-        status(support, 'ready', 1, reused=True, preparation_seconds=round(time.monotonic() - started, 3))
+        status(support, 'ready', 1, reused=True, player_accepted=accepted or None,
+            preparation_seconds=round(time.monotonic() - started, 3))
         return out, out, json.loads((out / 'profile.json').read_text())
     root.mkdir(parents=True, exist_ok=True)
     # Leave room for generated C, incremental objects, compiler cache and linking.
@@ -281,10 +342,11 @@ def ensure_profile(resources, support, game, selection):
                         preparation_recipe=recipe, generated_locally=True)
         atomic_json(out / 'profile.json', metadata)
         # Recheck source modules before committing the transaction.
-        validate_dump(resources, game)
+        validate_dump(resources, game, support)
         seal(out, ['boot-linked.bin', 'analysis.json', 'link.json', 'native-inputs.json',
                    'aot-patches.json', 'aot/libgow3-recompiled.dylib', 'profile.json'], {'recipe': recipe})
-        status(support, 'ready', 1, reused=False, preparation_seconds=round(time.monotonic() - started, 3))
+        status(support, 'ready', 1, reused=False, player_accepted=accepted or None,
+            preparation_seconds=round(time.monotonic() - started, 3))
         return out, out, metadata
     except BaseException:
         commands.cancel()

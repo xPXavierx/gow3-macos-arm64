@@ -48,6 +48,39 @@ class CommunityPreparationTests(unittest.TestCase):
                 c.validate_dump(self.root, game)
             self.assertEqual(error.exception.code, 'dump_version')
 
+    def test_player_accepted_executable_is_opt_in_and_never_a_module(self):
+        game = self.fixture()
+        (game / 'eboot.bin').write_bytes(b'second retail extraction of the same title')
+        other = c.digest(game / 'eboot.bin')
+        sfo = {'TITLE_ID': 'CUSA01623', 'APP_VER': '01.02'}
+        with mock.patch('prepare.read_sfo', return_value=sfo):
+            # Absent override file: the tested executable stays authoritative.
+            with self.assertRaises(c.PreparationError) as error:
+                c.validate_dump(self.root, game, self.root)
+            self.assertEqual(error.exception.code, 'dump_version')
+            self.assertIn('accepted-executables.json', str(error.exception))
+            override = self.root / 'accepted-executables.json'
+            override.write_text(json.dumps({'eboot.bin': [other]}))
+            result = c.validate_dump(self.root, game, self.root)
+            # The matched digest keys the preparation cache, and the override is
+            # reported so a prepared profile is never silently attributed to the
+            # tested build.
+            self.assertEqual(result['files']['eboot.bin'], other)
+            self.assertEqual(result['player_accepted'], {'eboot.bin': other})
+            # A different module is never accepted, whatever the player declares.
+            override.write_text(json.dumps({'sce_module/libc.prx': [other]}))
+            with self.assertRaises(c.PreparationError) as error:
+                c.validate_dump(self.root, game, self.root)
+            self.assertEqual(error.exception.code, 'accepted_invalid')
+            override.write_text(json.dumps({'eboot.bin': ['not-a-digest']}))
+            with self.assertRaises(c.PreparationError) as error:
+                c.validate_dump(self.root, game, self.root)
+            self.assertEqual(error.exception.code, 'accepted_invalid')
+            override.write_text('{')
+            with self.assertRaises(c.PreparationError) as error:
+                c.validate_dump(self.root, game, self.root)
+            self.assertEqual(error.exception.code, 'accepted_invalid')
+
     def test_wrong_region_and_missing_game_data_are_explained(self):
         game = self.fixture()
         with mock.patch('prepare.read_sfo', return_value={'TITLE_ID': 'CUSA99999'}):
