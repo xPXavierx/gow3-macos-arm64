@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstring>
+#include <span>
 #include "common/assert.h"
 #include "common/bit_field.h"
 #include "common/types.h"
@@ -953,22 +954,22 @@ struct PM4CmdReleaseMem {
         return data_lo | u64(data_hi) << 32;
     }
 
-    void SignalFence(auto&& signal_irq, auto&& gds_to_mem) const {
+    void SignalFence(auto&& signal_irq, auto&& gds_to_mem, auto&& write_mem) const {
         switch (data_sel.Value()) {
         case DataSelect::Data32Low: {
-            *Address<u32*>() = DataDWord();
+            write_mem(Address<void*>(), DataDWord(), sizeof(u32));
             break;
         }
         case DataSelect::Data64: {
-            *Address<u64*>() = DataQWord();
+            write_mem(Address<void*>(), DataQWord(), sizeof(u64));
             break;
         }
         case DataSelect::GpuClock64: {
-            *Address<u64*>() = GetGpuClock64();
+            write_mem(Address<void*>(), GetGpuClock64(), sizeof(u64));
             break;
         }
         case DataSelect::PerfCounter: {
-            *Address<u64*>() = GetGpuPerfCounter();
+            write_mem(Address<void*>(), GetGpuPerfCounter(), sizeof(u64));
             break;
         }
         case DataSelect::GdsMemStore: {

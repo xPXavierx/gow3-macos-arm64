@@ -23,6 +23,7 @@
 #include "core/memory.h"
 #include "core/platform.h"
 #include "video_core/amdgpu/liverpool.h"
+#include "video_core/amdgpu/fence_write.h"
 #include "gow3_write_log.h"
 #include "video_core/amdgpu/pm4_cmds.h"
 #include "video_core/renderdoc.h"
@@ -244,15 +245,16 @@ bool PipelinedOpcode(PM4ItOpcode opcode) {
 } // namespace
 
 namespace {
+void PublishFenceLabel(void* address, u64 value, u32 size) {
+    Gow3WriteLog::Note(reinterpret_cast<u64>(address), &value, size, Gow3WriteLog::Fence);
+    AmdGpu::WriteFenceLabel(address, value, size,
+        [](void* dst, const void* src, u32 bytes) {
+            return Core::Memory::Instance()->TryWriteBacking(dst, src, bytes);
+        });
+}
 void SignalEop(const PM4CmdEventWriteEop& eop) {
     eop.SignalFence(
-        [](void* address, u64 data, u32 num_bytes) {
-            auto* memory = Core::Memory::Instance();
-            Gow3WriteLog::Note(reinterpret_cast<u64>(address), &data, num_bytes, Gow3WriteLog::Fence);
-            if (!memory->TryWriteBacking(address, &data, num_bytes)) {
-                memcpy(address, &data, num_bytes);
-            }
-        },
+        PublishFenceLabel,
         [] { Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxEop); });
 }
 
@@ -341,18 +343,12 @@ void RunEventWriteEos(Vulkan::Rasterizer& rasterizer, const u8* data) {
     rasterizer.WaitHostCopies();
     rasterizer.WaitDeferredSignals();
     rasterizer.ProcessDownloadImages();
-    event_eos.SignalFence([](void* address, u64 value, u32 num_bytes) {
-        auto* memory = Core::Memory::Instance();
-        Gow3WriteLog::Note(reinterpret_cast<u64>(address), &value, num_bytes, Gow3WriteLog::Fence);
-        if (!memory->TryWriteBacking(address, &value, num_bytes)) {
-            memcpy(address, &value, num_bytes);
-        }
-    });
+    event_eos.SignalFence(PublishFenceLabel);
     if (event_eos.command == PM4CmdEventWriteEos::Command::GdsStore) {
         ASSERT(event_eos.size == 1);
         rasterizer.Finish();
         const u32 value = rasterizer.ReadDataFromGds(event_eos.gds_index);
-        *event_eos.Address() = value;
+        runtime_store_once(event_eos.Address(), &value, sizeof(value));
     }
 }
 } // namespace
@@ -1630,7 +1626,7 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
                 },
                 [this](VAddr dst, u16 gds_index, u16 num_dwords) {
                     rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false, true);
-                });
+                }, PublishFenceLabel);
             break;
         }
         case PM4ItOpcode::EventWrite: {

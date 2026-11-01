@@ -1,0 +1,66 @@
+Native GPU completion-label publication
+=======================================
+
+Base: 750359473cda2655dec882ea7d3997a2c9255229 (local shader/registry checkpoint).
+Adapted from SpartanPort 6f5aa50c764047d56d5fec622049218d67615013, with lineage
+in deadinside28/bloodborne_pc 4d4d20812c and DarkIzuku/bloodborne_pc 27efd4c5bc.
+The shared runtime_store.h implements the public upstream small-store contract.
+
+Why it applies to this Mac
+
+The upstream report described overlapping glibc stores. Local inspection of this
+Mac's resolved _platform_memmove instead found a byte-tail loop for runtime-sized
+four-byte copies. That is a different implementation, but does not provide a
+single atomic 32-bit release publication. It can expose completion before later
+stores finish. This is a producer publication/lifetime hazard; no specific game
+crash was reproduced and attributed to it during this batch.
+
+Contract
+
+Naturally aligned 32/64-bit labels publish through one release store. Other small
+ranges (up to 64 bytes) use nonoverlapping aligned 8/4/2/1-byte release chunks.
+A misaligned or multi-chunk range is NOT claimed to be atomic as a whole. Larger
+resource transfers retain memcpy. Fixed-width source loads tolerate unaligned
+source bytes without reading beyond them.
+
+runtime_memory_write_backing validates the entire range before any write and
+holds the existing VMA read lock through validation and copying. Failed backing
+attempts leave all bytes untouched, so the caller cannot publish a prefix and
+then repeat it in its direct fallback. Reserved/gap/wrapping ranges fail. Zero
+length remains a no-op success. Physical offsets and adjacent VMA handling remain.
+
+EOP and EOS use the same production fence writer for backing and direct fallback.
+Compute RELEASE_MEM now uses that writer for labels/timestamps too. The EOS GDS
+single-word direct path uses the same release-store primitive while retaining
+its original direct guest access/tracking behavior. The GDS bulk-copy callback
+and IRQ routing are retained. Required host-copy/draw-pipe/deferred-signal waits,
+download processing and guest texture invalidation policy are not bypassed.
+
+Scope of ordering
+
+Release publication strengthens the producer side. It does not replace waiting
+for prior copy tasks or alter the guest CPU's load/barrier model. Concurrent
+publication tests use acquire readers and immediate recycling after completion.
+No new thread scheduling, lock elision, async-fence toggle or GPU work omission.
+
+Qualification
+
+Eleven native runtime/loader/AOT checks pass. The new production-manager fixture
+covers inaccessible guest views, physical aliases, source/destination alignments,
+sizes 0..128, large transfers, discontiguous backing across adjacent VMAs, failure
+without a visible prefix and 60000 concurrent 32/64-bit publications/recycles.
+
+Production PM4 method tests cover EOP/EOS/RELEASE_MEM, both widths and backing/direct
+paths, write-before-IRQ, no-data EOP and GDS dispatch. An invalid label width is
+fatal with an explicit diagnostic (expected exit 23), not a silently skipped write.
+Readback queue/snapshot and real MoltenVK scene roundtrips pass. ARM64 disassembly
+confirms STLR (32/64), STLRH and STLRB in the native backing writer and STLR (32/64)
+in the renderer fallback, plus the retained bulk memcpy path.
+
+Bounded game measurements and cold-local-cache results are recorded beside the
+private checkpoint. They are not full-campaign/long-boss-fight qualification.
+Do not claim this correction fixes all stutter or establishes an FPS gain.
+
+No shader key/ABI, signed catalogue trust, AOT recipe, guest code patches, MetalFX
+math, launcher controls, stale/deferred readback defaults or framegen changes.
+Runtime and renderer must be deployed together. All code remains native ARM64.

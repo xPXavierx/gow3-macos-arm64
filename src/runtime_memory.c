@@ -8,6 +8,7 @@
  * encode 40-bit addresses, so host-default 0x7f... addresses would not fit. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_store.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -899,19 +900,30 @@ void runtime_memory_set_gpu_hooks(GpuRange map, GpuRange unmap, GpuRange invalid
     write_unlock();
     flush_hooks();
 }
-/* Writes through the backing view; 0 when part of the range has no backing. */
+/* Writes through the backing view; failure leaves all bytes untouched so callers
+ * can fall back without repeating an already-visible partial completion write. */
 int runtime_memory_write_backing(uintptr_t address, const void *data, uint64_t size) {
+    if (!size) return 1;
+    if (size>UINTPTR_MAX-address) return 0;
     read_lock();
-    int ok=1;
-    for (uintptr_t at=address, end=address+size; at<end && ok;) {
-        size_t i=vma_index(at);
-        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) { ok=0; break; }
+    const uintptr_t end=address+size;
+    const size_t first=vma_index(address);
+    size_t i=first;
+    for (uintptr_t at=address; at<end; ++i) {
+        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED) {
+            read_unlock(); return 0;
+        }
+        at=vmas[i].end<end ? vmas[i].end : end;
+    }
+    i=first;
+    for (uintptr_t at=address; at<end; ++i) {
         uint64_t n=(vmas[i].end<end ? vmas[i].end : end)-at;
-        memcpy(backing_base+vmas[i].phys+(at-vmas[i].start),(const unsigned char *)data+(at-address),n);
+        runtime_store_once(backing_base+vmas[i].phys+(at-vmas[i].start),
+                           (const unsigned char *)data+(at-address),n);
         at+=n;
     }
     read_unlock();
-    return ok;
+    return 1;
 }
 /* Host uploads must not fault on GPU-protected guest pages: a copy worker can
  * otherwise wait for the GPU thread that is waiting for that very copy. Hold
