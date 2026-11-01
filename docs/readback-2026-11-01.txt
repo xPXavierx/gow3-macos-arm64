@@ -1,0 +1,67 @@
+ARM64 image readback dependencies and protected uploads
+=====================================================
+
+Base: local integrity checkpoint 9d38b66a559e4cd9355f9d9181a0a9667c442c60.
+The first integrity batch was also tested by the owner without observed problems.
+
+Selected upstream contracts
+
+SpartanPort b776be748eac872ecfba7a64c2cc8e85c6eeeae6 (readback portion only):
+Image refresh, image uploads and image frees may use byte-exact dependencies in
+stale mode. CPU faults and precise mode retain page overlap. Deleting an image
+cancels only its bytes so a pending copy of its neighbor still reaches memory.
+The Mac's existing 16 KiB tracker page size is retained; upstream's 4 KiB default
+must not replace it. No new optimization bit is taken from the occupied Mac mask.
+GOW3_EXACT_READBACK_WAITS=0 is a launch-time diagnostic override, not a UI option.
+
+SpartanPort 63d437e373cc6d1a2183e18633fdc4b2aacdd333:
+Copy uploads through the physical backing while holding the mapping read lock.
+Worker reads then cannot fault on guest pages that the GPU protects. Sparse gaps,
+reserved ranges and invalid wrapping ranges still read as zero. Parallel uploads
+and their scheduler completion dependencies remain in place.
+
+Backing reads do not themselves trigger guest read faults. Constant snapshots
+therefore check precise readback dependencies, drain the recorder before waiting,
+and retry if the readback generation changed during the copy. This catches even
+a copy that was both published and retired meanwhile. Stale mode continues to
+permit the previously published bytes, as the original launcher policy specifies.
+
+The portable helper readback_copy.h is production code tested under controlled
+publication/retirement interleavings. It does not skip a draw or bypass a required
+dependency. Existing GPU-written-buffer/pending-write guards remain in the ring.
+
+Qualification
+
+Nine native runtime/loader/AOT tests pass, including actual PROT_NONE guest views,
+physical backing offsets, sparse ranges, remaps concurrent with readers, mutexes
+and the first integrity batch's lifetime regressions. GPU checks cover 4/16 KiB
+queue dependencies/cancellation, snapshot interleavings, source statistics, aliases
+and real color/depth/stencil/mip roundtrips through MoltenVK.
+
+Private game tests use copied saves/cache. A manual temple save and an autosave
+by the large gate exercise different views with scripted short movements. They
+are bounded checks, not a long boss-fight or campaign qualification. Native 4K
+uncapped measurements were 82.63 FPS before and 83.02 after in the selected run;
+the difference does not establish an FPS gain. Image-neighbor waits avoided were
+zero in these views, where demand readback waits were already absent in stale mode.
+The gate autosave with the normal launcher policy measured 59.98 FPS native 4K
+over 45 s and 60.00 FPS with balanced MetalFX (2272x1278 -> 3840x2160) over 30 s.
+No observed frame interval exceeded 33.5 ms in those two bounded samples.
+Timings are VideoOut/flip intervals, not a complete physical-display benchmark;
+power/clock conditions and animated scene state were not strictly controlled.
+
+Precise mode was exercised to validate protected uploads and mandatory waits;
+it completed without a native fault/deadlock and was substantially slower. It is
+diagnostic only. The launcher remains deferred_readback=1/stale_readback=1, with
+its original readback-linear rule, complete draws, native ARM64 and framegen off.
+
+The first candidate pipeline warm-up took 151.34 s. Reopenings with the same
+binary took about 7.2 s. No pipeline/cache algorithm is changed by this batch;
+startup preparation must be reported separately from gameplay. A cold driver
+cache is a plausible explanation, not a measured shader-cache implementation fix.
+
+Shader keys/ABI, catalogue trust/signing, guest patches, AOT preparation recipe,
+texture payloads and MetalFX mathematics are unchanged. A new runtime export is
+used by the renderer, so the host and libgow3gpu must be updated together.
+Do not publish the private test app or generated game code. Public integration
+and long-session/campaign coverage remain separate gates.

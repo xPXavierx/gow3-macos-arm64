@@ -149,7 +149,9 @@ public:
     void ProcessDownloadImages();
     bool ResolveReadbacks(VAddr address, u64 size, bool assume_locks = true,
                           ReadbackSource source = ReadbackSource::Unknown);
-    void CancelReadbacks(VAddr address, u64 size);
+    void CancelReadbacks(VAddr address, u64 size, bool exact = false);
+    bool ReadbackBlocksRead(VAddr address, u64 size);
+    u64 ReadbackGeneration() const;
 
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);
@@ -529,9 +531,19 @@ private:
     u64 partial_views = 0;
     void NotePartialView(const ImageInfo& request, const ImageInfo& used, BindingType binding);
     u64 readbacks_released = 0;
+    u64 readbacks_neighbors = 0;
+    bool ExactReadbackWaits() const {
+        // Diagnostic override only. Existing optimization bits are already occupied on the Mac.
+        static const bool enabled = [] {
+            const char* value = std::getenv("GOW3_EXACT_READBACK_WAITS");
+            return !value || value[0] != '0';
+        }();
+        return stale_readbacks && enabled;
+    }
     ReadbackQueue<Vulkan::StagingBufferRef, TRACKER_PAGE_BITS> pending_readbacks;
     std::mutex readback_mutex;
     std::atomic<bool> has_pending_readbacks{false};
+    std::atomic<u64> readback_generation{0};
     u64 readbacks_queued = 0, readbacks_completed = 0, readbacks_waited = 0;
     u64 readbacks_canceled = 0, readbacks_peak_bytes = 0;
     std::chrono::steady_clock::time_point readback_report = std::chrono::steady_clock::now();

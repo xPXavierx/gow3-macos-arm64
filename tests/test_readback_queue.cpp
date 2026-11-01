@@ -3,7 +3,51 @@
 #include <vector>
 #include "video_core/texture_cache/readback_queue.h"
 
+template <unsigned PageBits>
+static void exact_image_dependencies() {
+    constexpr std::uint64_t base = 0x50000000;
+    constexpr std::uint64_t page = std::uint64_t{1} << PageBits;
+    VideoCore::ReadbackQueue<int, PageBits> queue;
+    queue.Push(base + page - 256, 256, 20, 7);
+    // Adjacent bytes of one host page are independent images. A real CPU fault
+    // must still wait/release that whole page, including on 16 KiB Darwin pages.
+    assert(queue.RequiredTick(base, page - 256) == 20);
+    assert(queue.RequiredTick(base, page - 256, true) == 0);
+    assert(queue.RequiredTick(base, page - 255, true) == 20);
+    assert(queue.RequiredTick(base + page - 256, 1, true) == 20);
+    assert(queue.RequiredTick(base + page, 1, true) == 0);
+    assert(queue.RequiredTick(base, 0, true) == 0);
+    unsigned canceled = 0;
+    queue.Cancel(base, page - 256, [&](auto&) { ++canceled; }, true);
+    assert(canceled == 0);
+    std::vector<int> published;
+    queue.Retire([](auto) { return true; }, [&](auto& entry) {
+        if (entry.valid) published.push_back(entry.payload);
+    });
+    assert((published == std::vector<int>{7}));
+
+    queue.Push(base, 4, 21, 8);
+    queue.Push(base + page - 4, 4, 22, 9);
+    queue.Cancel(base, 4, [&](auto& entry) {
+        assert(entry.payload == 8 && entry.watched);
+        ++canceled;
+    }, true);
+    assert(canceled == 1);
+    assert(queue.RequiredTick(base + page - 4, 4, true) == 22);
+    published.clear();
+    queue.Retire([](auto tick) { return tick <= 21; }, [&](auto& entry) {
+        if (entry.valid) published.push_back(entry.payload);
+    });
+    assert(published.empty() && queue.Bytes() == 4);
+    queue.Retire([](auto) { return true; }, [&](auto& entry) {
+        if (entry.valid) published.push_back(entry.payload);
+    });
+    assert((published == std::vector<int>{9}));
+}
+
 int main() {
+    exact_image_dependencies<12>();
+    exact_image_dependencies<14>();
     VideoCore::ReadbackQueue<int> queue;
     std::vector<int> published;
     auto complete = [&](auto& entry) {

@@ -22,6 +22,7 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
+#include "video_core/texture_cache/readback_copy.h"
 #include "video_core/renderer_vulkan/vk_null_resources.h"
 #include "video_core/renderer_vulkan/vk_gpu_profiler.h"
 #include "video_core/renderer_vulkan/vk_draw_effects.h"
@@ -534,7 +535,15 @@ void Rasterizer::CollectRingBindings(const Shader::Info& stage, const PreparedDr
         if (source) {
             std::memcpy(dst, source, size);
         } else {
-            memory->CopySparseMemory(address, dst, size);
+            VideoCore::CopyWithReadbackDependencies(
+                [this] { return texture_cache.ReadbackGeneration(); },
+                [this, address, size] { return texture_cache.ReadbackBlocksRead(address, size); },
+                [this, address, size] {
+                    DrainDrawPipe();
+                    texture_cache.ResolveReadbacks(address, size, true,
+                                                   VideoCore::ReadbackSource::CpuRead);
+                },
+                [&] { memory->CopySparseMemory(address, dst, size); });
         }
         constant_ring->Flush(*offset, size);
         out.push_back({index, static_cast<u32>(size), *offset, address});
