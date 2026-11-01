@@ -46,7 +46,7 @@ compatibility authority. Other regions, executable updates/mods or module
 revisions are rejected with an explanation. The app does not convert an
 unsupported revision into the tested revision. It does not modify the dump.
 
-**Signing:** this initial preview has local ad-hoc signatures. It is **not
+**Signing:** this community release uses local ad-hoc signatures. It is **not
 Developer ID-signed or notarized by Apple**. macOS may require approval through
 System Settings → Privacy & Security → Open Anyway after the first opening
 attempt. Only approve a trusted download; do not disable Gatekeeper.

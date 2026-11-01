@@ -1,60 +1,51 @@
-# Community preview validation — 2026-10-18
+# Community release 0.4.21 validation
 
-Release: 0.4.0 preview 1. Tested on Apple M3 Max, macOS 26.5.2, with the
-hash-accepted CUSA01623 v1.02 executable/modules. These results do not certify
-other Macs, every dump or the complete campaign.
+Tested on 1 November 2026, Apple M3 Max / macOS 26.5.2, with the hash-verified
+CUSA01623 v1.02 dump. Other Macs and the whole campaign remain unqualified.
 
-- **Cold automatic preparation:** 126.078 s, empty application data directory,
-  bundled ARM64 Python, scanner, recompiler and Zig 0.15.2/Clang 20.1.2. The entire
-  preparation process ran under an OS sandbox denying reads from Xcode,
-  `/Library/Developer` and `/opt/homebrew`; no Apple SDK was bundled.
-- **Second preparation request:** 0.052 s to check and reuse the native-4K ready
-  profile. This excludes game boot, asset loading and graphics shader preparation.
-- **Another selected profile:** 4K output with MetalFX Quality (2560×1440 input)
-  prepared in 28.965 s using the same incremental object cache.
-- **Relocation/read-only bundle:** extracted the actual release ZIP into a path
-  with spaces and accented characters, removed write permissions from the app,
-  checked its signature, reused the Quality profile in 0.034 s and generated a
-  new 720p native profile in 26.005 s, with the same developer-directory read bans.
-- **Original checkpoint parity:** cold discovery reproduced all 16,042 function
-  candidates exactly. The native-4K patched loader image SHA-256 remained
-  `1e7fc75649e7d4a1c14916d0e63a266e22859553f3ac0337e7aea24ea6f588ca`,
-  identical to the previous working local profile.
-- **CPU compiler semantics:** 953 synthetic instruction cases passed the existing
-  native differential check, with zero failures, crashes or skipped cases. Its
-  reference interpreter is a test oracle; actual game CPU fallbacks remain off.
-- **Game regression:** the first cold-generated library booted, reached the main
-  menu, loaded an isolated copy of the initial AUTOSAVE, reached Pause and ran a
-  roughly 40-second sequence beginning in combat and ending in climbing. No
-  native fault was recorded. Texture appearance and native-4K/MetalFX-off HUD
-  were inspected in the game's own render captures. This was a packaging/boot
-  regression check, not a new optimization or sustained heavy-combat benchmark.
-  Shutdown logged zero blocks translated and zero instructions interpreted from
-  translated code.
-- **Actual GUI flow:** empty preferences opened in English with the dump picker.
-  Choosing the dump and Play showed live stage/progress; Cancel stopped compiler
-  processes; Play resumed completed work and automatically opened the native game.
-  With a fresh save folder the game's brightness calibration appeared normally;
-  Space confirmed Cross/X. The Metal HUD showed Game Mode on while frontmost.
-- **Failure UX:** a synthetic incompatible executable was rejected before source
-  generation. The actual GUI displayed the localized compatibility explanation
-  naming CUSA01623 v1.02. Four preparation/cache/cancellation contract tests and
-  nine existing shared startup tests passed. The Swift self-test checked all
-  three translation key sets, accented fonts, English first-use defaults, saved
-  settings/bookmarks, missing folders, dimensions and Retina/Game Mode metadata.
-- **Package audit:** 19,651 files checked, 107 Mach-O files, all thin ARM64 and all
-  non-system runtime bindings inside the app. No dump, prepared image, generated
-  game library, user preferences/saves or Python bytecode was present. Deep/strict
-  code-signature integrity passed before and after relocation.
+## Source and package checks
 
-The ZIP is approximately 131 MiB (about 506 MiB extracted). It contains the same
-launcher art/icon/font/menu style as the local app. Initial saves, game-derived
-captures and all prepared game code used above remain private and are excluded.
+- Five selected backport checkpoints, plus release documentation/versioning;
+  [upstream integration status](../../../docs/upstream-status.md).
+- 11 native runtime/loader/AOT tests and 5 graphics checks, including actual
+  MoltenVK roundtrips and 60,000 concurrent label publications/recycles.
+- 34 preparation/display/catalogue tests pass. The remote catalogue validator
+  [passed](https://github.com/xPXavierx/gow3-macos-arm64/actions/runs/41332584068).
+- 109 thin ARM64 Mach-O files; non-system dependencies bundled. No dump, saves,
+  prepared game library or generated game code is included.
+- Launcher self-test covers 106 translated keys, English first use, persisted
+  dump/settings/language, Retina/Game Mode and safe shader-cache clearing.
+- Official catalogue download/signature verification passed with the existing
+  public key. The portable seed has 1,300 shader and 962 pipeline descriptions.
 
-## Remaining limits
+## Actual first run
 
-The package is ad-hoc signed and **not Apple-notarized**. A Developer ID identity
-was unavailable on the test machine. Other-Mac testing, download/quarantine
-approval on a separate clean macOS account, complete campaign coverage, other
-game revisions and long-run behavior remain unverified. See COMMUNITY.md for
-installation, compatibility and the signing limitation.
+A fresh support directory and compiler/object cache were used. CPU preparation
+completed offline in **153.63 seconds**, with reads of Xcode, /Library/Developer
+and /opt/homebrew denied. The sealed profile was then revalidated using its
+Mach-O header under the same restrictions; reuse took about **0.03 seconds**.
+The CPU preparation recipe is unchanged from 0.4.20, so compatible existing
+profiles can be reused. No player Xcode/Homebrew installation is required.
+
+The packaged game loaded all **16,042 locally generated functions**, with zero
+CPU JIT translations/interpreted fallback. The test used the same newly generated
+library, copied saves and an initially empty port shader cache. Native 4K with
+cap 60, movement and attacks completed without fatal errors or omitted draws.
+The prior display mode was restored after the session.
+
+The one-minute observation measured **59.81 FPS**, p95 **16.92 ms**, p99 **17.07 ms**
+and maximum **202.59 ms**, with two intervals above 33.5 ms. Loading, resource
+indexing and pipeline warming precede this measurement. **This is not a claim of
+zero stutter**; the longest cold-run interval was not isolated to a cause. The
+initial 959-pipeline warm-up took 76.63 seconds on this run. The system Metal
+driver cache was not cleared.
+
+The separately controlled native 4K uncapped backport comparison was
+82.81 -> 82.80 FPS; no FPS gain is claimed. Three-minute private autosave and
+MetalFX checks are described in the linked upstream status. This is a correctness
+release, with further shader coverage, longer boss fights and transitions still
+pending. Frame generation stays disabled; all execution is ARM64, without Rosetta.
+
+Source/audit data: [community-validation.json](community-validation.json). The
+distribution retains ad-hoc signatures; Apple notarization and a separate clean
+account download/quarantine test were not performed.
