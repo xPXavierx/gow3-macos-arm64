@@ -7,6 +7,7 @@
  * the same 9-byte instruction with another displacement. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,6 +69,7 @@ static _Thread_local int32_t guest_errno;
 static const unsigned char *tls_template;
 static uint64_t tls_filesz, tls_memsz, tls_align=16;
 static size_t created, joined_count, exited;
+static RuntimeRegistryStats lookup_stats;
 
 void runtime_set_main_tls(const void *data,uint64_t filesz,uint64_t memsz,uint64_t align) {
     tls_template=data; tls_filesz=filesz; tls_memsz=memsz; tls_align=align ? align : 16;
@@ -170,7 +172,18 @@ void runtime_thread_attach_main(void) {
 static GuestThread *find_thread(void *handle) {
     GuestThread *found=NULL;
     pthread_mutex_lock(&lock);
-    for (GuestThread *t=threads;t;t=t->next) if (t==handle) { found=t; break; }
+    // Policy initialization and reordering share the registry lock; no racy static init.
+    const uint64_t start=registry_begin(&lookup_stats,"GOW3_THREAD_FRONT");
+    uint64_t nodes=0;
+    GuestThread **link=&threads;
+    for (GuestThread *t=threads;t;link=&t->next,t=t->next) {
+        if (lookup_stats.diagnostic) ++nodes;
+        if (t!=handle) continue;
+        found=t;
+        if (lookup_stats.front && link!=&threads) { *link=t->next; t->next=threads; threads=t; }
+        break;
+    }
+    registry_end(&lookup_stats,start,nodes,found!=NULL);
     pthread_mutex_unlock(&lock);
     return found;
 }
@@ -443,6 +456,7 @@ uintptr_t runtime_thread_resolve(const char *name) {
 void runtime_thread_report(void) {
     pthread_mutex_lock(&lock);
     printf("Runtime: guest threads created=%zu, exited=%zu, joined=%zu\n",created,exited,joined_count);
+    registry_report("thread",&lookup_stats);
     pthread_mutex_unlock(&lock);
 }
 

@@ -2,6 +2,7 @@
  * Priority-ordered semaphores are approximated by FIFO order. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,10 +28,23 @@ static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static Sema *registry;
 static uint32_t next_id=1;
 static size_t created, deleted, acquired, signaled, timed_out;
-static Sema *find(uint32_t id) {
-    for (Sema *s=registry;s;s=s->next) if (s->id==id) return s;
+static RuntimeRegistryStats lookup_stats;
+/* Diagnostic snapshots neither reorder the registry nor contribute to measurements. */
+static Sema *find_ordered(uint32_t id,int reorder) {
+    const uint64_t start=reorder ? registry_begin(&lookup_stats,"GOW3_SEMA_FRONT") : 0;
+    uint64_t nodes=0;
+    Sema **link=&registry;
+    for (Sema *s=registry;s;link=&s->next,s=s->next) {
+        if (lookup_stats.diagnostic) ++nodes;
+        if (s->id!=id) continue;
+        if (reorder && lookup_stats.front && link!=&registry) { *link=s->next; s->next=registry; registry=s; }
+        if (reorder) registry_end(&lookup_stats,start,nodes,1);
+        return s;
+    }
+    if (reorder) registry_end(&lookup_stats,start,nodes,0);
     return NULL;
 }
+static Sema *find(uint32_t id) { return find_ordered(id,1); }
 static void host_check(int e) {
     if (e) { fprintf(stderr,"STOP: semaphore host error %d\n",e); exit(21); }
 }
@@ -178,7 +192,7 @@ static ABI int32_t sem_delete(uint32_t id) {
 /* Read-only test/diagnostic snapshot, not exposed to guest code. */
 unsigned runtime_sema_waiters(uint32_t id) {
     pthread_mutex_lock(&lock);
-    Sema *s=find(id); unsigned n=0;
+    Sema *s=find_ordered(id,0); unsigned n=0;
     if (s) for (Waiter *w=s->first;w;w=w->next) ++n;
     pthread_mutex_unlock(&lock);
     return n;
@@ -196,6 +210,7 @@ void runtime_sema_report(void) {
     pthread_mutex_lock(&lock);
     printf("Runtime: semaphores created=%zu, deleted=%zu, acquired=%zu, signals=%zu, timeouts=%zu\n",
            created,deleted,acquired,signaled,timed_out);
+    registry_report("semaphore",&lookup_stats);
     pthread_mutex_unlock(&lock);
 }
 

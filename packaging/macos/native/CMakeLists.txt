@@ -90,6 +90,12 @@ foreach(name runtime sema)
 endforeach()
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+add_executable(registry-test "${ROOT}/tests/test_registry.c")
+target_compile_options(registry-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+target_link_libraries(registry-test PRIVATE runtime)
+add_test(NAME arm64-registry COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_LIST_DIR}/verify_registry.py" "$<TARGET_FILE:registry-test>")
+set_tests_properties(arm64-registry PROPERTIES TIMEOUT 65)
 find_path(ZYDIS_INCLUDE_DIR Zydis/Zydis.h REQUIRED)
 add_test(NAME arm64-loader-integration COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_LIST_DIR}/verify_loader.py" "$<TARGET_FILE:gow3-probe-arm64>"

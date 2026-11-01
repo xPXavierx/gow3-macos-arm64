@@ -2,6 +2,7 @@
    lifetime, static initialization and ownership; waiting happens outside it. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "runtime_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,7 @@ typedef struct { int64_t seconds, nanoseconds; } GuestTime;
 static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
 static Rwlock *registry;
 static size_t created, reads, writes, unlocks;
+static RuntimeRegistryStats lookup_stats;
 static int32_t error(int e) {
     if (!e) return 0;
     unsigned code;
@@ -40,7 +42,17 @@ static int32_t error(int e) {
 }
 /* All helpers ending in _locked require registry_lock. */
 static Rwlock *find_locked(Rwlock *handle) {
-    for (Rwlock *r=registry; r; r=r->next) if (r==handle) return r;
+    const uint64_t start=registry_begin(&lookup_stats,"GOW3_RWLOCK_FRONT");
+    uint64_t nodes=0;
+    Rwlock **link=&registry;
+    for (Rwlock *r=registry; r; link=&r->next,r=r->next) {
+        if (lookup_stats.diagnostic) ++nodes;
+        if (r!=handle) continue;
+        if (lookup_stats.front && link!=&registry) { *link=r->next; r->next=registry; registry=r; }
+        registry_end(&lookup_stats,start,nodes,1);
+        return r;
+    }
+    registry_end(&lookup_stats,start,nodes,0);
     return NULL;
 }
 static int create_locked(Rwlock **out) {
@@ -157,6 +169,7 @@ uintptr_t runtime_rwlock_resolve(const char *name) {
 void runtime_rwlock_report(void) {
     pthread_mutex_lock(&registry_lock);
     printf("Runtime: rwlocks created=%zu, reads=%zu, writes=%zu, unlocks=%zu\n",created,reads,writes,unlocks);
+    registry_report("rwlock",&lookup_stats);
     pthread_mutex_unlock(&registry_lock);
 }
 

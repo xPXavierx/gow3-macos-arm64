@@ -1,0 +1,44 @@
+Native registry lookup locality
+===============================
+
+Adapted from SpartanPort 201a00f0cf5f0b3463b268e53cd70e99d7145e25, which traces
+the idea/implementation to Jgamrot/bloodborne_pc ba609a7b98. Only the lookup-order
+policy is taken. Matching rwlocks, semaphores and retained thread records move
+to the start of their existing lists under the same owning lock. Object identity,
+waiter order, lifetime, TCB/TLS, attributes and destruction rules are unchanged.
+Policy initialization also occurs under that lock (including thread lookups).
+Semaphore diagnostic snapshots neither reorder the list nor affect measurements.
+
+Default: move-to-front enabled. Launch-time diagnostic overrides (no UI setting):
+GOW3_RWLOCK_FRONT=0, GOW3_SEMA_FRONT=0, GOW3_THREAD_FRONT=0 preserve the prior order.
+GOW3_REGISTRY_DIAG=1 enables node counts and search timers; it is off by default.
+Normal sessions do not take per-lookup clocks or update profiling counters.
+search_ns covers the search/reorder and measurement overhead while the lock is
+held; it excludes time waiting for the registry mutex and is not CPU utilization.
+Counters emitted on shutdown include startup/loading, not only the FPS window.
+
+The production-API fixture grows 64 locks/semaphores and 64 retained host-thread
+records, then accesses four older records, concurrently creates/destroys objects,
+checks busy/invalid handles, and verifies that waiter snapshots do not reorder.
+Both policies return the same successful/error results and lookup counts. All
+three registries traverse over 94% fewer nodes in that deliberately growing-list
+fixture. That is a locality regression check, not an FPS benchmark.
+
+Two isolated native 4K temple-save runs (60 seconds each, cap off, AC power):
+prior order 81.51 FPS, p95 13.02 ms; move-to-front 80.45 FPS, p95 13.32 ms.
+No FPS gain is established by this pair. There was no observed frame interval
+above 33.5 ms, fatal error, skipped draw, CPU fallback or new visible corruption.
+Thread lookup traversal fell from about 6.90 to 1.00 nodes per query. The rwlock
+and semaphore registries already required just one node per query in this view.
+Thread search timers summed 19.46 vs 7.78 ms across entire sessions, with timing
+instrumentation enabled; this path was not a major frame-time cost there.
+
+The comparison uses VideoOut/flip timings, copied warm caches and short scripted
+movement, not a full physical-display, long-combat or campaign qualification.
+Scene animation and clock/thermal conditions were not strictly controlled.
+No FPS improvement is claimed. Avoid assuming that more retained records alone
+explain the remaining CPU/GPU bottlenecks.
+
+The shader-entry guard is a separate contract documented in shader-entry-2026-11-01.txt.
+The fence publication review (A07) remains a separate targeted change. Launcher
+options, shader ABI/cache keys, signed catalogue, AOT recipe and MetalFX are intact.
