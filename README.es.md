@@ -75,6 +75,12 @@ M3 Max; no es una garantía para toda la campaña. Frame gen está excluido de l
 no se distribuye un paquete. UltraWide y los tutoriales, launchers y paquetes de
 Windows/Linux no forman parte de este port.
 
+## Actualizaciones del upstream
+
+Este fork incorpora correcciones seleccionadas de SpartanPort, conservando el runtime ARM64 y el launcher macOS. La versión 0.4.21 incluye las correcciones de memoria, mutex, alias de texturas, readbacks, entrada de shaders, registros y publicación de fences validadas localmente. Son backports adaptados: el contador “commits behind” de GitHub mide la ascendencia y no disminuye solo porque se hayan portado correcciones equivalentes.
+
+Consulte el [estado de integración y trabajo pendiente](docs/upstream-status.md), incluidos los dos nuevos commits revisados el 1 de noviembre de 2026.
+
 ## Desarrollo y errores
 
 El [README en inglés](README.md#build-and-contribute) enlaza los pasos para compilar

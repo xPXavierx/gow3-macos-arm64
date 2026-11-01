@@ -38,7 +38,7 @@ subprocess.run(['/usr/bin/xcrun', 'swiftc', '-O', '-target', 'arm64-apple-macos1
     '-o', str(resources/'DisplayMode')], check=True)
 plist = {'CFBundleExecutable':'GOW3Launcher','CFBundleIdentifier':'org.gow3pc.launcher',
     'CFBundleName':'God of War III','CFBundleDisplayName':'God of War III · Apple Silicon',
-    'CFBundlePackageType':'APPL','CFBundleVersion':'24','CFBundleShortVersionString':'0.4.20',
+    'CFBundlePackageType':'APPL','CFBundleVersion':'25','CFBundleShortVersionString':'0.4.21',
     'LSMinimumSystemVersion':'26.0','LSArchitecturePriority':['arm64'],
     'LSApplicationCategoryType':'public.app-category.games','LSSupportsGameMode':True,
     'GCSupportsGameMode':True,'NSHighResolutionCapable':True,
@@ -196,7 +196,7 @@ for binary in prof.rglob('*.dylib'):
 subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(rt/'bin/gow3-probe-arm64.app')],check=True)
 subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(app)],check=True)
 subprocess.run(['/usr/bin/codesign','--verify','--deep','--strict',str(app)],check=True)
-(resources/'build-manifest.json').write_text(json.dumps({'version':'0.4.20','architecture':'arm64','minimum_macos':'26.0','profiles':profile_count,
+(resources/'build-manifest.json').write_text(json.dumps({'version':'0.4.21','architecture':'arm64','minimum_macos':'26.0','profiles':profile_count,
     'bundled_libraries':len(list(frameworks.iterdir())),'full_game_dump_bundled':False,
     'local_private_aot':not a.runtime_only,'runtime_staging_only':a.runtime_only,
     'display_info_hud':True,'default_language':'en','branding':branding,

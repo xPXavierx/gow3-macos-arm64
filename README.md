@@ -40,7 +40,7 @@ Contributions are validated and reviewed before entering the signed official
 catalogue. No dumps, saves, logs or another player's compiled GPU cache are shared.
 Coverage grows across campaign areas; it does not yet guarantee zero stutter.
 
-**Available in release 0.4.20.** Download the updated application from Releases.
+**Available since release 0.4.20.** Download the updated application from Releases.
 The official catalogue service is online.
 See the [player guide](docs/community-shaders.md) for every step and the difference
 between updating, compiling and clearing the cache.
@@ -77,6 +77,12 @@ upscaling remains available. See [presentation pacing](packaging/macos/native/FR
 The higher-resolution texture experiment was discontinued. No replacement pack
 is distributed. Windows/Linux launchers, packaging and unsupported ultrawide
 instructions are not part of this port.
+
+## Upstream updates
+
+This fork incorporates selected SpartanPort fixes while retaining the native ARM64 runtime and macOS launcher. Release 0.4.21 includes the memory, mutex, texture-alias, readback, shader-input, registry and fence-publication corrections validated locally. These are adapted backports: GitHub's “commits behind” count tracks ancestry and does not decrease simply because equivalent fixes were ported.
+
+See the [integration status and remaining work](docs/upstream-status.md), including the two newer upstream commits reviewed on 1 November 2026.
 
 ## Build and contribute
 

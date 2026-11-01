@@ -40,7 +40,7 @@ Contribuições são validadas e revisadas antes de entrar no catálogo oficial 
 Não se compartilham dumps, saves, logs ou o cache compilado da GPU de outro jogador.
 A cobertura cresce por toda a campanha; ainda não garante ausência de stutter.
 
-**Disponível na release 0.4.20.** Baixe o aplicativo atualizado em Releases.
+**Disponível desde a release 0.4.20.** Baixe o aplicativo atualizado em Releases.
 O serviço do catálogo oficial já está disponível.
 O [guia para jogadores](docs/community-shaders.pt-BR.md) explica todos os passos e
 a diferença entre atualizar, compilar e limpar o cache.
@@ -73,6 +73,12 @@ Testes limitados de combate atingiram aproximadamente 60 FPS em 4K nativo no M3
 Max. Isso não garante o mesmo desempenho em toda a campanha. O frame gen foi retirado da build e do launcher. O upscaling MetalFX continua disponível. O experimento de texturas maiores foi encerrado; não
 há pacote de texturas distribuído. UltraWide, tutoriais e launchers Windows/Linux
 não fazem parte deste port.
+
+## Atualizações do upstream
+
+Este fork incorpora correções selecionadas do SpartanPort, mantendo o runtime ARM64 e o launcher macOS. A versão 0.4.21 inclui as correções de memória, mutex, aliases de texturas, readbacks, entrada de shaders, registros e publicação de fences validadas localmente. São backports adaptados: o contador “commits behind” do GitHub mede a ancestralidade e não diminui apenas porque correções equivalentes foram portadas.
+
+Veja o [estado da integração e as pendências](docs/upstream-status.md), incluindo os dois commits mais novos revisados em 1 de novembro de 2026.
 
 ## Desenvolvimento e problemas
 
