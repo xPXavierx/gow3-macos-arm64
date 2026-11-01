@@ -23,7 +23,8 @@ case $mode in
     ctest --test-dir out/macos-host --output-on-failure
     ;;
 --renderer|--native)
-    cmake -S gpu -B out/gpu-arm64-release "${cmake_common[@]}" "$@"
+    # Match the validated Apple Silicon renderer recipe; allow an explicit override last.
+    cmake -S gpu -B out/gpu-arm64-release "${cmake_common[@]}" -DGOW3_LTO=OFF "$@"
     cmake --build out/gpu-arm64-release --target gow3gpu --parallel 6
     if [[ $mode == --native ]]; then
         : "${GOW3_RECOMP_SOURCE_DIRECTORY:?Set the patched ARM64 recompiler source directory}"

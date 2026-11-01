@@ -1,0 +1,68 @@
+Native ARM64 integrity corrections from the pinned SpartanPort audit
+==================================================================
+
+Base: macOS release f0aef7a70f2bab4dfcac3bac6a71311f88eab977 (0.4.20).
+This is a selected correctness batch, not a merge of the upstream branch.
+
+Provenance / contracts
+
+1. ed3af5b7dd66aae5e5f0ed3020c3a53979f0b97d: split_at advances the physical
+   offset of flexible mappings too. Partial protect/release must not clear or
+   reuse pages still owned by the other half.
+2. 9e8a080bb7572e6f8159b4520de38957d85cd780: keep guest libc flags at offset
+   0x20 outside the host pthread_mutex_t. Preserve Darwin low-address allocation,
+   mutex/condition handles, recursive locks and timed-lock implementations.
+3. e650a33d7529e270d6d7bf44405eaa628de87eb8: notify the GPU before replacing
+   fixed mappings, so old readbacks land in old physical pages. Reannounce
+   surviving mappings on failure, process batches in order and grow notification
+   storage instead of aborting above 64 pending events. Darwin retains Mach hole
+   reservation rather than importing the Windows foreign-DLL reservation table.
+4. 9ca82cb552c827940efe4a05cdea1fc5e423b8f3: copy the width/height intersection
+   of compatible aliases. Address, pitch, layout, swizzle and format guards remain.
+
+Upstream commit URLs use https://github.com/FelipePrado0/SpartanPort/commit/<SHA>.
+Existing GPL-2.0-or-later licensing and upstream attribution are retained.
+
+Regression coverage
+
+tests/test_memory.c uses the upstream memory-lifetime scenarios and adds Darwin
+foreign-mapping failure/recovery and flexible fixed-map replacement. It compiles
+the production manager and actual low-address allocator, with GOW3_ARM64=1.
+
+tests/test_mutex_layout.c writes guest flags, exercises low pointers, condition
+wait/signal, recursive/timed locks, normal held-mutex EBUSY and destroyed handles.
+tests/test_runtime.c also checks the guest flag through the exported mutex API.
+The native CMake suite includes both lifetime tests. The jump-table fixture has
+an aggregate compilation timeout of 180 seconds; child execution timeouts remain.
+
+The aliasing regression covers useful width 1706/pitch 1792 in both directions
+and rejects incompatible layouts. readback-queue-test preserves existing waits.
+scene-resolution-test covers color/depth/stencil roundtrips, clipped aliases,
+packing guards and half-resolution mip proxies. Its Darwin fixture exports must
+remain visible to the renderer's dynamic imports.
+
+Build/runtime policy
+
+Use the existing validated renderer recipe with GOW3_LTO=OFF. build.sh now passes
+this explicitly, allowing an intentional command-line override. Do not compare a
+new default-LTO build with the existing non-LTO app as if only these fixes changed.
+
+The GPU scene-resolution test needs the bundled MoltenVK ICD and the launcher's
+GOW3_SCENE_DISCARD_RESAMPLE=1 policy. Runtime lifetime tests need permission to
+create temporary Mach/shm mappings. Do not run them against player saves.
+
+No guest-code patches, AOT recipe, shader key/ABI, texture payloads, readback modes,
+MetalFX algorithms, launcher options or community trust keys change in this batch.
+Frame generation stays disabled. No Rosetta, CPU interpreter or CPU JIT is used.
+
+Qualification boundary
+
+Native component/loader/AOT tests and bounded 4K game comparisons are part of
+local validation. They do not establish a campaign-wide fix or an FPS gain. The
+comparison uses cloned saves/cache and a later temple-area manual save, not a
+full combat route. The full-campaign, cold-cache and long-transition matrix is
+still required before presenting this as a broadly qualified public update.
+
+Next, separate batches should address exact readback waits and synchronized
+backing uploads, then registry lookup costs. Do not mix those performance changes
+into this memory/image-lifetime batch or replace the existing signed catalogue.

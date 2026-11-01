@@ -71,6 +71,16 @@ foreach(host gow3-probe-arm64 gow3-native-game)
     target_link_options(${host} PRIVATE -Wl,-export_dynamic)
 endforeach()
 enable_testing()
+find_package(Threads REQUIRED)
+foreach(check memory mutex_layout)
+    add_executable(${check}-native-test "${ROOT}/tests/test_${check}.c" "${ROOT}/src/compat_macos.c")
+    target_compile_definitions(${check}-native-test PRIVATE GOW3_ARM64=1)
+    target_include_directories(${check}-native-test PRIVATE "${ROOT}/src" "${GOW3_RECOMP_SOURCE_DIRECTORY}/src")
+    target_compile_options(${check}-native-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    target_link_libraries(${check}-native-test PRIVATE Threads::Threads)
+    add_test(NAME arm64-${check}-lifetime COMMAND ${check}-native-test)
+    set_tests_properties(arm64-${check}-lifetime PROPERTIES TIMEOUT 30)
+endforeach()
 foreach(name runtime sema)
     add_executable(${name}-test "${ROOT}/tests/test_${name}.c")
     target_compile_options(${name}-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
@@ -91,7 +101,9 @@ add_test(NAME arm64-jump-table COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_LIST_DIR}/verify_jump_table.py" "$<TARGET_FILE:gow3-probe-arm64>"
     "$<TARGET_FILE:gow3-aot-recomp>" "${GOW3_RECOMP_SOURCE_DIRECTORY}"
     "${ZYDIS_INCLUDE_DIR}" "${CMAKE_C_COMPILER}" "${CMAKE_CURRENT_BINARY_DIR}/jump-table-verification")
-set_tests_properties(arm64-jump-table PROPERTIES TIMEOUT 60)
+# Many compiler invocations run here. The fixture's game-process timeout remains
+# bounded separately; allow compilation on slower Apple Silicon hosts.
+set_tests_properties(arm64-jump-table PROPERTIES TIMEOUT 180)
 add_test(NAME arm64-poll-wait COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_LIST_DIR}/verify_poll_wait.py" "$<TARGET_FILE:gow3-aot-recomp>"
     "${GOW3_RECOMP_SOURCE_DIRECTORY}" "${ZYDIS_INCLUDE_DIR}" "${CMAKE_C_COMPILER}"
