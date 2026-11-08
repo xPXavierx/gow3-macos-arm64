@@ -1,10 +1,19 @@
 # God of War III Remastered — macOS Apple Silicon
 
+[![Apoie meu trabalho no Ko-fi](.github/assets/kofi-button.svg)](https://ko-fi.com/pxavier)
+
 [English](README.md) · [Español](README.es.md)
 
 Port nativo ARM64 mantido por [xPXavierx](https://github.com/xPXavierx), baseado em
 FelipePrado0/gow3_pc, bbport e shadPS4. Este repositório contém o aplicativo para
 macOS e o código necessário para compilá-lo.
+
+## Apoie meu trabalho
+
+Se você gostou deste port e deseja apoiar meu trabalho na versão para macOS Apple
+Silicon, pode contribuir pelo **[Ko-fi](https://ko-fi.com/pxavier)**.
+Seu apoio me ajuda a dedicar tempo ao desenvolvimento, às correções e às melhorias.
+As contribuições são totalmente opcionais, e o projeto continua gratuito para todos. Obrigado!
 
 ## Baixar e jogar
 

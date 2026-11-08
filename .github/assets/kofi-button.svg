@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="254" height="28" viewBox="0 0 254 28" role="img" aria-labelledby="title">
+  <title id="title">Support / Apoiar no Ko-fi</title>
+  <rect width="254" height="28" rx="5" fill="#30363d"/>
+  <path d="M178 0h71a5 5 0 0 1 5 5v18a5 5 0 0 1-5 5h-71z" fill="#ff5e5b"/>
+  <path d="M17 21l-6.1-5.8C6.8 11.2 12.6 5.9 17 10.3c4.4-4.4 10.2.9 6.1 4.9z" fill="#ff5e5b"/>
+  <g font-family="Arial, Helvetica, sans-serif" font-size="13" font-weight="600" text-anchor="middle">
+    <text x="105" y="18.5" fill="#ffffff">Support / Apoiar</text>
+    <text x="216" y="18.5" fill="#161b22">Ko-fi</text>
+  </g>
+</svg>
